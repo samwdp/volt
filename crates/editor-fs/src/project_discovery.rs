@@ -1,6 +1,7 @@
 use std::{
-    io,
-    path::PathBuf,
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -9,15 +10,22 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{ProjectCandidate, ProjectSearchRoot, discover_projects};
+use editor_path::volt_data_dir;
+use serde::{Deserialize, Serialize};
+
+const PROJECT_DISCOVERY_BACKGROUND_TICK: Duration = Duration::from_secs(2);
+const PROJECTS_FILE_NAME: &str = "projects.json";
+const PROJECTS_FILE_VERSION: u32 = 1;
+
+use super::{ProjectCandidate, ProjectKind, ProjectSearchRoot, discover_projects};
 
 /// Freshness window for cached Project Workspace candidates.
-pub const PROJECT_DISCOVERY_TTL: Duration = Duration::from_secs(30);
+pub const PROJECT_DISCOVERY_TTL: Duration = Duration::from_secs(5);
 
 const DEFAULT_WAIT_MESSAGE: &str = "project discovery request timed out";
 
 /// Configured search-root identity used to fingerprint the discovery cache.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectDiscoveryFingerprint {
     roots: Vec<(PathBuf, usize)>,
 }
@@ -36,6 +44,13 @@ impl ProjectDiscoveryFingerprint {
     /// Returns the sorted `(path, max_depth)` pairs.
     pub fn roots(&self) -> &[(PathBuf, usize)] {
         &self.roots
+    }
+
+    fn to_search_roots(&self) -> Vec<ProjectSearchRoot> {
+        self.roots
+            .iter()
+            .map(|(path, max_depth)| ProjectSearchRoot::new(path.clone(), *max_depth))
+            .collect()
     }
 }
 
@@ -85,6 +100,71 @@ impl ProjectDiscoverySnapshot {
     /// Returns a monotonically increasing cache generation.
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedProjectsFile {
+    version: u32,
+    fingerprint: ProjectDiscoveryFingerprint,
+    projects: Vec<PersistedProject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedProject {
+    name: String,
+    root: PathBuf,
+    kind: PersistedProjectKind,
+    repository_name: String,
+    repository_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PersistedProjectKind {
+    Git,
+    GitWorktree,
+}
+
+impl From<ProjectKind> for PersistedProjectKind {
+    fn from(kind: ProjectKind) -> Self {
+        match kind {
+            ProjectKind::Git => Self::Git,
+            ProjectKind::GitWorktree => Self::GitWorktree,
+        }
+    }
+}
+
+impl From<PersistedProjectKind> for ProjectKind {
+    fn from(kind: PersistedProjectKind) -> Self {
+        match kind {
+            PersistedProjectKind::Git => Self::Git,
+            PersistedProjectKind::GitWorktree => Self::GitWorktree,
+        }
+    }
+}
+
+impl From<&ProjectCandidate> for PersistedProject {
+    fn from(candidate: &ProjectCandidate) -> Self {
+        Self {
+            name: candidate.name().to_owned(),
+            root: candidate.root().to_path_buf(),
+            kind: PersistedProjectKind::from(candidate.kind()),
+            repository_name: candidate.repository_name().to_owned(),
+            repository_root: candidate.repository_root().to_path_buf(),
+        }
+    }
+}
+
+impl From<PersistedProject> for ProjectCandidate {
+    fn from(project: PersistedProject) -> Self {
+        ProjectCandidate::from_persisted(
+            project.name,
+            project.root,
+            ProjectKind::from(project.kind),
+            project.repository_name,
+            project.repository_root,
+        )
     }
 }
 
@@ -183,6 +263,88 @@ fn lock_state(hub: &ProjectDiscoveryHub) -> MutexGuard<'_, CacheInner> {
     lock_poison(hub.state.lock())
 }
 
+fn persist_path_override() -> &'static Mutex<Option<PathBuf>> {
+    static OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// Absolute path of the on-disk project candidate list (`…/volt/projects.json`).
+pub fn project_discovery_persist_path() -> PathBuf {
+    lock_poison(persist_path_override().lock())
+        .clone()
+        .unwrap_or_else(|| volt_data_dir().join(PROJECTS_FILE_NAME))
+}
+
+/// Overrides the projects.json path. Intended for tests.
+pub fn set_project_discovery_persist_path_for_test(path: Option<PathBuf>) {
+    *lock_poison(persist_path_override().lock()) = path;
+}
+
+fn load_persisted_projects(path: &Path) -> Option<PersistedProjectsFile> {
+    let contents = fs::read_to_string(path).ok()?;
+    let parsed: PersistedProjectsFile = serde_json::from_str(&contents).ok()?;
+    if parsed.version != PROJECTS_FILE_VERSION {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn persist_projects(fingerprint: &ProjectDiscoveryFingerprint, candidates: &[ProjectCandidate]) {
+    let path = project_discovery_persist_path();
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let file = PersistedProjectsFile {
+        version: PROJECTS_FILE_VERSION,
+        fingerprint: fingerprint.clone(),
+        projects: candidates.iter().map(PersistedProject::from).collect(),
+    };
+    let Ok(body) = serde_json::to_vec_pretty(&file) else {
+        return;
+    };
+    let tmp = path.with_extension("json.tmp");
+    let write_tmp = (|| -> io::Result<()> {
+        let mut handle = fs::File::create(&tmp)?;
+        handle.write_all(&body)?;
+        handle.sync_all()?;
+        Ok(())
+    })();
+    if write_tmp.is_err() {
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    if fs::rename(&tmp, &path).is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+fn maybe_seed_from_disk(inner: &mut CacheInner, requested: &ProjectDiscoveryFingerprint) {
+    if inner.fingerprint.is_some() || !inner.candidates.is_empty() {
+        return;
+    }
+    let Some(file) = load_persisted_projects(&project_discovery_persist_path()) else {
+        return;
+    };
+    if &file.fingerprint != requested {
+        return;
+    }
+    inner.candidates = file
+        .projects
+        .into_iter()
+        .map(ProjectCandidate::from)
+        .collect();
+    inner.fingerprint = Some(file.fingerprint);
+    // Leave completed_at unset so the first snapshot treats the seed as stale and
+    // kicks a background walk while still serving picker rows immediately.
+}
+
+fn candidate_roots_equal(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
 fn wait_if_worker_blocked(hub: &ProjectDiscoveryHub) {
     if !hub.worker_blocked.load(Ordering::SeqCst) {
         return;
@@ -216,6 +378,9 @@ fn apply_scan_result(
             inner.candidates = candidates;
             inner.last_walk_id = inner.last_walk_id.saturating_add(1);
             inner.completed_at = Some(Instant::now());
+            if let Some(fingerprint) = inner.fingerprint.clone() {
+                persist_projects(&fingerprint, &inner.candidates);
+            }
         }
         inner.in_progress = false;
         inner.revision = inner.revision.saturating_add(1);
@@ -248,25 +413,68 @@ fn kick_scan(
     request_id
 }
 
-/// Returns the cached snapshot immediately, kicking a background walk when needed.
-///
-/// Never blocks on the full disk walk. Within [`PROJECT_DISCOVERY_TTL`], unchanged
-/// roots reuse the last applied candidates (stale-while-revalidate after TTL).
-pub fn project_discovery_snapshot(roots: &[ProjectSearchRoot]) -> ProjectDiscoverySnapshot {
-    let fingerprint = ProjectDiscoveryFingerprint::from_roots(roots);
-    let hub = hub();
-    let mut inner = lock_state(hub);
+fn snapshot_for_roots(
+    hub: &ProjectDiscoveryHub,
+    inner: &mut CacheInner,
+    roots: &[ProjectSearchRoot],
+    fingerprint: ProjectDiscoveryFingerprint,
+    rescan_when_idle: bool,
+) {
+    maybe_seed_from_disk(inner, &fingerprint);
     let mismatch = inner.fingerprint.as_ref() != Some(&fingerprint);
     if mismatch {
         inner.candidates.clear();
         inner.completed_at = None;
-        kick_scan(hub, &mut inner, roots, fingerprint);
-        return inner.to_snapshot();
+        kick_scan(hub, inner, roots, fingerprint);
+        return;
     }
-    if !inner.in_progress && inner.is_stale() {
-        kick_scan(hub, &mut inner, roots, fingerprint);
+    if !inner.in_progress && (rescan_when_idle || inner.is_stale()) {
+        kick_scan(hub, inner, roots, fingerprint);
     }
+}
+
+/// Returns the cached snapshot immediately, kicking a background walk when needed.
+///
+/// Never blocks on the full disk walk. Within [`PROJECT_DISCOVERY_TTL`], unchanged
+/// roots reuse the last applied candidates (stale-while-revalidate after TTL).
+/// Cold starts seed from `projects.json` when the fingerprint matches.
+pub fn project_discovery_snapshot(roots: &[ProjectSearchRoot]) -> ProjectDiscoverySnapshot {
+    let fingerprint = ProjectDiscoveryFingerprint::from_roots(roots);
+    let hub = hub();
+    let mut inner = lock_state(hub);
+    snapshot_for_roots(hub, &mut inner, roots, fingerprint, false);
     inner.to_snapshot()
+}
+
+/// Returns cached candidates for the project picker and schedules a rescan when idle.
+///
+/// Unlike [`project_discovery_snapshot`], this always kicks a background walk when no
+/// scan is already running so opening the picker sees newly created projects.
+pub fn project_discovery_for_picker(roots: &[ProjectSearchRoot]) -> ProjectDiscoverySnapshot {
+    let fingerprint = ProjectDiscoveryFingerprint::from_roots(roots);
+    let hub = hub();
+    let mut inner = lock_state(hub);
+    snapshot_for_roots(hub, &mut inner, roots, fingerprint, true);
+    inner.to_snapshot()
+}
+
+fn background_tick_state() -> &'static Mutex<Option<Instant>> {
+    static LAST_TICK: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    LAST_TICK.get_or_init(|| Mutex::new(None))
+}
+
+/// Keeps project discovery fresh while the editor runs. Throttled; safe to call each frame.
+pub fn project_discovery_background_tick(roots: &[ProjectSearchRoot]) {
+    let now = Instant::now();
+    let mut last_tick = lock_poison(background_tick_state().lock());
+    if last_tick
+        .is_some_and(|previous| now.duration_since(previous) < PROJECT_DISCOVERY_BACKGROUND_TICK)
+    {
+        return;
+    }
+    *last_tick = Some(now);
+    drop(last_tick);
+    let _ = project_discovery_snapshot(roots);
 }
 
 /// Returns the current cache without kicking a walk.
@@ -280,6 +488,38 @@ pub fn project_discovery_request_scan(roots: &[ProjectSearchRoot]) -> u64 {
     let hub = hub();
     let mut inner = lock_state(hub);
     kick_scan(hub, &mut inner, roots, fingerprint)
+}
+
+/// Rescans using the fingerprint currently stored in the cache, if any.
+pub fn project_discovery_rescan_cached_roots() {
+    let hub = hub();
+    let mut inner = lock_state(hub);
+    let Some(fingerprint) = inner.fingerprint.clone() else {
+        return;
+    };
+    let roots = fingerprint.to_search_roots();
+    kick_scan(hub, &mut inner, &roots, fingerprint);
+}
+
+/// Drops a candidate from memory and `projects.json` without starting a walk.
+///
+/// Callers that mutate disk (Worktree Remove) should forget first for an immediate
+/// picker update, then [`project_discovery_rescan_cached_roots`] after the path is gone.
+pub fn project_discovery_forget_candidate(root: &Path) {
+    let hub = hub();
+    let mut inner = lock_state(hub);
+    let before = inner.candidates.len();
+    inner
+        .candidates
+        .retain(|candidate| !candidate_roots_equal(candidate.root(), root));
+    if inner.candidates.len() == before {
+        return;
+    }
+    inner.revision = inner.revision.saturating_add(1);
+    if let Some(fingerprint) = inner.fingerprint.clone() {
+        persist_projects(&fingerprint, &inner.candidates);
+    }
+    hub.condvar.notify_all();
 }
 
 /// Drops cached candidates so the next snapshot request rescans.
@@ -308,6 +548,7 @@ pub fn cancel_project_discovery_scan() {
 /// Clears cache bookkeeping. Intended for tests so cases do not leak.
 pub fn reset_project_discovery_cache() {
     set_project_discovery_worker_blocked_for_test(false);
+    *lock_poison(background_tick_state().lock()) = None;
     let hub = hub();
     let mut inner = lock_state(hub);
     let latest_request_id = inner.latest_request_id.saturating_add(1);

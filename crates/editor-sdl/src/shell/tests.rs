@@ -9655,7 +9655,10 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         &fonts,
         ui,
         None,
-        &[],
+        ShellDockEntries {
+            workspace: &[],
+            acp: &[],
+        },
         ShellChrome {
             user_library: &NullUserLibrary,
             theme_registry: None,
@@ -9730,7 +9733,10 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
         &fonts,
         ui,
         None,
-        &[],
+        ShellDockEntries {
+            workspace: &[],
+            acp: &[],
+        },
         ShellChrome {
             user_library: &NullUserLibrary,
             theme_registry: Some(&registry),
@@ -9811,7 +9817,10 @@ fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
         &fonts,
         ui,
         None,
-        &[],
+        ShellDockEntries {
+            workspace: &[],
+            acp: &[],
+        },
         ShellChrome {
             user_library: &NullUserLibrary,
             theme_registry: None,
@@ -9889,7 +9898,10 @@ fn render_shell_state_scene_with_docked_runtime_popup(
         &fonts,
         ui,
         Some(&popup),
-        &[],
+        ShellDockEntries {
+            workspace: &[],
+            acp: &[],
+        },
         ShellChrome {
             user_library: &NullUserLibrary,
             theme_registry,
@@ -10032,7 +10044,10 @@ fn render_shell_state_scene_with_notification_overlay(
         &fonts,
         ui,
         None,
-        &[],
+        ShellDockEntries {
+            workspace: &[],
+            acp: &[],
+        },
         ShellChrome {
             user_library: &NullUserLibrary,
             theme_registry,
@@ -13357,6 +13372,76 @@ fn hover_diagnostic_provider_fragments_preserve_fenced_code_blocks() -> Result<(
             ),
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn signature_help_markdown_renders_active_parameter_bold_with_syntax_color() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    register_rust_highlight_test_language(&mut state.runtime)?;
+
+    let rendered = {
+        let mut rendered = render_markdown_hover_content(
+            &mut state.runtime,
+            "**Signature 1/2 (active)**\n\n```rust\ncall(alpha, beta)\n```\n",
+        );
+        apply_signature_active_parameter_emphasis(
+            &mut rendered,
+            &editor_lsp::LspSignatureActiveParameter {
+                signature_index: 0,
+                label: "call(alpha, beta)".to_owned(),
+                start: 0,
+                end: 4,
+            },
+        );
+        rendered
+    };
+
+    let spans = rendered
+        .syntax_lines
+        .get(&3)
+        .expect("expected syntax spans on signature line");
+    assert!(spans.iter().any(|span| {
+        span.theme_token.as_ref() == HOVER_SIGNATURE_ACTIVE_PARAMETER_TOKEN
+            && span.start == 0
+            && span.end == 4
+    }));
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.theme_token.as_ref() == "syntax.function")
+    );
+
+    let mut theme_registry = editor_theme::ThemeRegistry::new();
+    theme_registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_token("syntax.function", editor_theme::Color::rgb(10, 20, 30))
+                .with_token_style(
+                    HOVER_SIGNATURE_ACTIVE_PARAMETER_TOKEN,
+                    editor_theme::Color::rgb(240, 240, 240),
+                    editor_theme::ThemeStyle::new(true, false),
+                ),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let line = "call(alpha, beta)";
+    let char_map = LineCharMap::new(line);
+    let byte_offsets = &char_map.bytes[..=char_map.len()];
+    let colored = line_color_segments(
+        line,
+        Some(spans),
+        Some(&theme_registry),
+        Color::RGB(240, 240, 240),
+        byte_offsets,
+        0,
+    );
+    let call_segment = colored
+        .iter()
+        .find(|(text, _, _)| text == "call")
+        .expect("expected colored segment for active parameter");
+    assert_eq!(call_segment.1, Color::RGB(10, 20, 30));
+    assert_eq!(call_segment.2, TextStyle::new(true, false));
     Ok(())
 }
 
@@ -20254,6 +20339,67 @@ fn popup_terminal_escape_enters_normal_mode() -> Result<(), String> {
 }
 
 #[test]
+fn popup_terminal_enter_falls_through_to_terminal_input() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    install_terminal_popup_test_buffer(&mut state)?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    // Enter resolves to `picker.submit` through the Popup Minor Mode. Without an
+    // open picker that binding must not claim the key, or the terminal never
+    // receives Enter to run a command.
+    let handled = state
+        .try_runtime_keybinding(Keycode::Return, Mod::NOMOD)
+        .map_err(|error| error.to_string())?;
+    assert!(
+        !handled,
+        "Enter must fall through when a non-picker popup is focused"
+    );
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    Ok(())
+}
+
+#[test]
+fn popup_terminal_enter_writes_to_live_session() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    state
+        .runtime
+        .execute_command("terminal.popup")
+        .map_err(|error| error.to_string())?;
+    let buffer_id = active_runtime_popup(&state.runtime)?
+        .map(|popup| popup.active_buffer)
+        .ok_or_else(|| "terminal popup was not opened".to_owned())?;
+    assert!(terminal_buffer_state(&state.runtime)?.contains(buffer_id));
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::Return),
+                scancode: None,
+                keymod: Mod::NOMOD,
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            640,
+            240,
+            8,
+            16,
+        )
+        .map_err(|error| error.to_string())?;
+
+    assert!(!handled, "Enter must not quit the shell");
+    assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Insert);
+    assert!(
+        terminal_buffer_state(&state.runtime)?.contains(buffer_id),
+        "Enter must reach the live terminal session instead of failing picker.submit"
+    );
+    Ok(())
+}
+
+#[test]
 fn popup_buffer_escape_enters_normal_mode() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let workspace_id = state
@@ -20773,7 +20919,10 @@ fn render_shell_state_draws_input_prompt_overlay_text() -> Result<(), String> {
         &fonts,
         ui,
         None,
-        &[],
+        ShellDockEntries {
+            workspace: &[],
+            acp: &[],
+        },
         ShellChrome {
             user_library: &NullUserLibrary,
             theme_registry: None,
@@ -21498,7 +21647,10 @@ fn workspace_dock_render_marks_active_row() -> Result<(), String> {
         &fonts,
         ui,
         None,
-        &entries,
+        ShellDockEntries {
+            workspace: &entries,
+            acp: &[],
+        },
         ShellChrome {
             user_library: &*shell_user_library(&state.runtime),
             theme_registry: None,
@@ -21652,6 +21804,64 @@ fn workspace_dock_ctrl_l_enters_focus_when_right_docked() -> Result<(), String> 
     assert!(
         shell_ui(&state.runtime)?.workspace_dock_focus_active(&*shell_user_library(&state.runtime))
     );
+    Ok(())
+}
+
+#[test]
+fn acp_dock_toggle_shows_and_hides() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    assert!(!shell_ui(&state.runtime)?.acp_dock_open());
+    assert!(!acp_dock_visible(shell_ui(&state.runtime)?));
+
+    toggle_acp_dock(&mut state.runtime)?;
+    assert!(shell_ui(&state.runtime)?.acp_dock_open());
+    assert!(acp_dock_visible(shell_ui(&state.runtime)?));
+
+    toggle_acp_dock(&mut state.runtime)?;
+    assert!(!shell_ui(&state.runtime)?.acp_dock_open());
+    assert!(!acp_dock_visible(shell_ui(&state.runtime)?));
+    Ok(())
+}
+
+#[test]
+fn acp_dock_entries_list_active_workspace_buffers() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first = install_user_plugin_buffer(&mut state, "*acp Claude*", user::acp::ACP_BUFFER_KIND)?;
+    let second = install_user_plugin_buffer(&mut state, "*acp Codex*", user::acp::ACP_BUFFER_KIND)?;
+    shell_buffer_mut(&mut state.runtime, first)?.init_acp_view("Claude");
+    shell_buffer_mut(&mut state.runtime, second)?.init_acp_view("Codex");
+    shell_buffer_mut(&mut state.runtime, first)?
+        .acp_set_session_title(Some("Refactor dock".to_owned()));
+
+    let entries = collect_acp_dock_entries(&state.runtime)?;
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].buffer_id, first);
+    assert_eq!(entries[0].name, "Claude");
+    assert_eq!(entries[0].session, "Refactor dock");
+    assert_eq!(entries[1].buffer_id, second);
+    assert_eq!(entries[1].name, "Codex");
+    assert_eq!(entries[1].session, "New session");
+    assert!(entries.iter().any(|entry| entry.active));
+    Ok(())
+}
+
+#[test]
+fn acp_dock_layout_shrinks_content_on_the_right() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    assert!(!shell_ui(&state.runtime)?.acp_dock_open());
+    toggle_acp_dock(&mut state.runtime)?;
+    let docks = shell_docks_layout(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?,
+        640,
+        360,
+        8,
+    );
+    assert!(docks.acp.visible);
+    assert_eq!(docks.acp.side, WorkspaceDockSide::Right);
+    assert!(docks.acp.dock_width > 0);
+    assert_eq!(docks.content_width + docks.acp.dock_width, 640);
+    assert_eq!(docks.content_x, 0);
     Ok(())
 }
 

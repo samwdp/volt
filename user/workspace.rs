@@ -3,7 +3,7 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, project_discovery_snapshot};
+use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, project_discovery_for_picker};
 use editor_git::list_repository_files;
 use editor_plugin_api::{
     PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
@@ -177,7 +177,7 @@ pub fn picker_items(context: &PickerProviderContext) -> Option<Vec<PickerItemSpe
 fn workspace_project_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
-    let snapshot = project_discovery_snapshot(&project_search_roots());
+    let snapshot = project_discovery_for_picker(&project_search_roots());
     if snapshot.candidates().is_empty() && snapshot.in_progress() {
         return Ok(vec![project_discovery_scanning_item()]);
     }
@@ -199,7 +199,7 @@ fn workspace_project_picker_items(
 fn workspace_switch_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
-    let snapshot = project_discovery_snapshot(&project_search_roots());
+    let snapshot = project_discovery_for_picker(&project_search_roots());
     let scanning = snapshot.candidates().is_empty() && snapshot.in_progress();
     let mut projects = snapshot
         .candidates()
@@ -420,8 +420,9 @@ mod tests {
     use super::*;
     use abi_stable::std_types::ROption;
     use editor_fs::{
-        ProjectSearchRoot, reset_project_discovery_cache,
-        set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
+        ProjectSearchRoot, project_discovery_snapshot, reset_project_discovery_cache,
+        set_project_discovery_persist_path_for_test, set_project_discovery_worker_blocked_for_test,
+        wait_for_project_discovery,
     };
     use editor_plugin_api::{
         PickerActionSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
@@ -439,13 +440,17 @@ mod tests {
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    struct DiscoveryOverrideGuard;
+    struct DiscoveryOverrideGuard {
+        persist_dir: PathBuf,
+    }
 
     impl Drop for DiscoveryOverrideGuard {
         fn drop(&mut self) {
             override_project_search_roots_for_test(None);
             reset_project_discovery_cache();
+            set_project_discovery_persist_path_for_test(None);
             set_project_discovery_worker_blocked_for_test(false);
+            let _ = fs::remove_dir_all(&self.persist_dir);
         }
     }
 
@@ -473,9 +478,12 @@ mod tests {
     fn begin_discovery_override(
         roots: Vec<ProjectSearchRoot>,
     ) -> Result<DiscoveryOverrideGuard, Box<dyn std::error::Error>> {
+        let persist_dir = temp_dir("discovery-persist");
+        fs::create_dir_all(&persist_dir)?;
+        set_project_discovery_persist_path_for_test(Some(persist_dir.join("projects.json")));
         reset_project_discovery_cache();
         override_project_search_roots_for_test(Some(roots));
-        Ok(DiscoveryOverrideGuard)
+        Ok(DiscoveryOverrideGuard { persist_dir })
     }
 
     #[test]

@@ -267,7 +267,7 @@ through `user/config.rs`.
 | Plugin module   | Config section   | What you can change at runtime                          |
 |-----------------|------------------|---------------------------------------------------------|
 | `workspace.rs`  | `workspace`      | Project search roots and `max_depth`                    |
-| `acp.rs`        | `acp`            | ACP client list, commands, args, env, cwd               |
+| `acp.rs`        | `acp`            | ACP client list, dock toggle, commands, args, env, cwd  |
 | `picker.rs`     | `ui`             | Picker label truncation strategy                        |
 | `ligatures.rs`  | `ui`             | Font ligature enablement                                |
 | `pane.rs`       | `ui.pane`        | Golden-ratio pane sizing                                |

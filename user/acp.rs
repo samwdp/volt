@@ -170,6 +170,12 @@ pub fn package() -> PluginPackage {
             "ui.acp.permission-deny",
             None,
         ),
+        hook_command(
+            "acp.dock.toggle",
+            "Shows or hides the ACP dock for the active workspace.",
+            "ui.acp-dock.toggle",
+            None,
+        ),
     ];
 
     let key_bindings = vec![
@@ -247,6 +253,17 @@ mod tests {
         assert_eq!(
             items[0].action(),
             &AcpActionSpec::insert_slash_command("fix".to_owned())
+        );
+    }
+
+    #[test]
+    fn package_exports_dock_toggle_command() {
+        let package = package();
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "acp.dock.toggle")
         );
     }
 }

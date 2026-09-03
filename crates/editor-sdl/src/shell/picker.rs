@@ -125,7 +125,11 @@ fn user_picker_overlay(
         spec.source(),
         PickerSource::WorkspaceProjects | PickerSource::WorkspaceSwitch
     ) {
-        overlay = overlay.with_result_order(PickerResultOrder::Source);
+        overlay = overlay
+            .with_result_order(PickerResultOrder::Source)
+            .with_project_discovery_revision(
+                editor_fs::current_project_discovery_snapshot().revision(),
+            );
     }
     if spec.source() == PickerSource::UndoTree {
         overlay = overlay.with_result_order(PickerResultOrder::Source);

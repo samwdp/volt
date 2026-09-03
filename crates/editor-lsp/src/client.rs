@@ -83,6 +83,8 @@ pub struct LspCompletionItem {
     edit_range: Option<TextRange>,
     detail: Option<String>,
     documentation: Option<String>,
+    has_documentation: bool,
+    raw_item: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +144,15 @@ impl LspCompletionItem {
             edit_range,
             detail,
             documentation,
+            has_documentation: false,
+            raw_item: Value::Null,
         }
+    }
+
+    fn with_raw_item(mut self, raw_item: Value, has_documentation: bool) -> Self {
+        self.raw_item = raw_item;
+        self.has_documentation = has_documentation;
+        self
     }
 
     pub fn server_id(&self) -> &str {
@@ -244,16 +254,24 @@ impl LspHoverContents {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspSignatureActiveParameter {
+    pub signature_index: usize,
+    pub label: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspSignatureHelpContents {
     server_id: String,
-    lines: Vec<String>,
+    signature_help: SignatureHelp,
 }
 
 impl LspSignatureHelpContents {
-    fn new(server_id: impl Into<String>, lines: Vec<String>) -> Self {
+    fn new(server_id: impl Into<String>, signature_help: SignatureHelp) -> Self {
         Self {
             server_id: server_id.into(),
-            lines,
+            signature_help,
         }
     }
 
@@ -261,8 +279,29 @@ impl LspSignatureHelpContents {
         &self.server_id
     }
 
-    pub fn lines(&self) -> &[String] {
-        &self.lines
+    pub fn markdown_text(&self, language: Option<&str>) -> String {
+        signature_help_markdown(&self.signature_help, language).unwrap_or_default()
+    }
+
+    pub fn active_parameter_range(&self) -> Option<LspSignatureActiveParameter> {
+        let active_signature_index = self
+            .signature_help
+            .active_signature
+            .map(|index| index as usize)
+            .filter(|index| *index < self.signature_help.signatures.len())
+            .unwrap_or(0);
+        let active_signature = self.signature_help.signatures.get(active_signature_index)?;
+        let active_parameter_index = active_signature
+            .active_parameter
+            .or(self.signature_help.active_parameter)
+            .map(|index| index as usize)?;
+        let (start, end) = active_parameter_char_range(active_signature, active_parameter_index)?;
+        Some(LspSignatureActiveParameter {
+            signature_index: active_signature_index,
+            label: active_signature.label.clone(),
+            start,
+            end,
+        })
     }
 }
 
@@ -1040,6 +1079,7 @@ struct LspSessionHandle {
     #[cfg(test)]
     fail_next_send: AtomicBool,
     needs_full_document: Mutex<BTreeSet<PathBuf>>,
+    completion_resolve_supported: AtomicBool,
 }
 
 impl std::fmt::Debug for LspSessionHandle {
@@ -1974,6 +2014,7 @@ impl LspClientManager {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            completion_resolve_supported: AtomicBool::new(false),
         }))
     }
 
@@ -2586,6 +2627,7 @@ impl LspSessionHandle {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            completion_resolve_supported: AtomicBool::new(false),
         });
         record_transport_event(
             &transport_log,
@@ -2690,7 +2732,16 @@ impl LspSessionHandle {
                     self.server_id()
                 ))
             })?;
-        self.set_text_document_sync_kind(initialize_result)?;
+        self.set_text_document_sync_kind(&initialize_result)?;
+        self.completion_resolve_supported.store(
+            initialize_result
+                .capabilities
+                .completion_provider
+                .as_ref()
+                .and_then(|provider| provider.resolve_provider)
+                .unwrap_or(false),
+            Ordering::Release,
+        );
         self.notify_typed::<Initialized>(InitializedParams {})?;
         if let Some(settings) = self.workspace_configuration_notification_payload(false)? {
             self.notify(
@@ -2710,9 +2761,10 @@ impl LspSessionHandle {
 
     fn set_text_document_sync_kind(
         &self,
-        initialize_result: InitializeResult,
+        initialize_result: &InitializeResult,
     ) -> Result<(), LspClientError> {
-        let kind = text_document_sync_kind(initialize_result.capabilities.text_document_sync);
+        let kind =
+            text_document_sync_kind(initialize_result.capabilities.text_document_sync.clone());
         *self.text_document_sync_kind.lock().map_err(|_| {
             LspClientError::Protocol("LSP text sync kind mutex poisoned".to_owned())
         })? = kind;
@@ -2949,7 +3001,41 @@ impl LspSessionHandle {
             partial_result_params: PartialResultParams::default(),
             context: None,
         })?;
-        Ok(parse_completion_response(self.server_id(), &response))
+        parse_completion_response(self.server_id(), &response)
+            .into_iter()
+            .map(|item| self.resolve_completion_item(item))
+            .collect()
+    }
+
+    fn resolve_completion_item(
+        &self,
+        item: LspCompletionItem,
+    ) -> Result<LspCompletionItem, LspClientError> {
+        if item.has_documentation || !self.completion_resolve_supported.load(Ordering::Acquire) {
+            return Ok(item);
+        }
+        let response = match self.request("completionItem/resolve", item.raw_item.clone()) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(item),
+            Err(error) => return Err(error),
+        };
+        let Value::Object(mut resolved) = response else {
+            return Err(LspClientError::Protocol(format!(
+                "language server `{}` returned a non-object completionItem/resolve response",
+                self.server_id()
+            )));
+        };
+        if let Value::Object(initial) = item.raw_item.clone() {
+            for (key, value) in initial {
+                resolved.entry(key).or_insert(value);
+            }
+        }
+        parse_completion_item(self.server_id(), &Value::Object(resolved)).ok_or_else(|| {
+            LspClientError::Protocol(format!(
+                "language server `{}` returned an invalid completionItem/resolve response",
+                self.server_id()
+            ))
+        })
     }
 
     fn inline_completion(
@@ -4057,6 +4143,9 @@ fn client_capabilities() -> Result<ClientCapabilities, LspClientError> {
             "completion": {
                 "completionItem": {
                     "documentationFormat": ["markdown"],
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail"]
+                    },
                     "snippetSupport": true
                 }
             },
@@ -4907,8 +4996,9 @@ fn parse_signature_help_response(
     let Some(signature_help) = signature_help else {
         return Ok(None);
     };
-    let lines = signature_help_lines(&signature_help);
-    Ok((!lines.is_empty()).then(|| LspSignatureHelpContents::new(server_id, lines)))
+    Ok(signature_help_markdown(&signature_help, None)
+        .is_some()
+        .then(|| LspSignatureHelpContents::new(server_id, signature_help)))
 }
 
 fn parse_definition_response(
@@ -5223,94 +5313,102 @@ fn normalize_hover_text(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn signature_help_lines(signature_help: &SignatureHelp) -> Vec<String> {
+fn signature_help_markdown(
+    signature_help: &SignatureHelp,
+    language: Option<&str>,
+) -> Option<String> {
     if signature_help.signatures.is_empty() {
-        return Vec::new();
+        return None;
     }
     let active_signature_index = signature_help
         .active_signature
         .map(|index| index as usize)
         .filter(|index| *index < signature_help.signatures.len())
         .unwrap_or(0);
-    let active_signature = &signature_help.signatures[active_signature_index];
+    let active_signature = signature_help.signatures.get(active_signature_index)?;
     let active_parameter_index = active_signature
         .active_parameter
         .or(signature_help.active_parameter)
         .map(|index| index as usize);
-    let mut lines = vec![active_signature.label.clone()];
-    if signature_help.signatures.len() > 1 {
-        lines.push(format!(
-            "Overload {}/{}",
-            active_signature_index + 1,
-            signature_help.signatures.len()
-        ));
+    let language = language.unwrap_or_default();
+    let multiple_signatures = signature_help.signatures.len() > 1;
+    let mut parts = Vec::new();
+    for (index, signature) in signature_help.signatures.iter().enumerate() {
+        if multiple_signatures {
+            let active_marker = if index == active_signature_index {
+                " (active)"
+            } else {
+                ""
+            };
+            parts.push(format!(
+                "**Signature {}/{}{}**",
+                index + 1,
+                signature_help.signatures.len(),
+                active_marker
+            ));
+        }
+        parts.push(markdown_code_fence(language, &signature.label));
+        if index == active_signature_index
+            && let Some(parameter_documentation) = active_parameter_index
+                .and_then(|parameter_index| {
+                    signature
+                        .parameters
+                        .as_ref()
+                        .and_then(|parameters| parameters.get(parameter_index))
+                })
+                .and_then(|parameter| parameter.documentation.as_ref())
+        {
+            parts.push(documentation_markdown(parameter_documentation));
+        }
+        if let Some(documentation) = signature.documentation.as_ref() {
+            parts.push(documentation_markdown(documentation));
+        }
     }
-    if let Some(parameter_label) =
-        active_parameter_index.and_then(|index| active_parameter_label(active_signature, index))
-    {
-        lines.push(format!("Parameter: {parameter_label}"));
-    }
-    if let Some(parameter_documentation) = active_parameter_index
-        .and_then(|index| {
-            active_signature
-                .parameters
-                .as_ref()
-                .and_then(|parameters| parameters.get(index))
-        })
-        .and_then(|parameter| parameter.documentation.as_ref())
-    {
-        lines.extend(documentation_lines(parameter_documentation));
-    }
-    if let Some(documentation) = active_signature.documentation.as_ref() {
-        lines.extend(documentation_lines(documentation));
-    }
-    lines
+    let text = normalize_hover_text(&parts.join("\n\n"));
+    (!text.trim().is_empty()).then_some(text)
 }
 
-fn active_parameter_label(
+fn documentation_markdown(documentation: &Documentation) -> String {
+    match documentation {
+        Documentation::String(text) => normalize_hover_text(text),
+        Documentation::MarkupContent(content) => normalize_hover_text(&content.value),
+    }
+}
+
+fn active_parameter_char_range(
     signature: &lsp_types::SignatureInformation,
     active_parameter_index: usize,
-) -> Option<String> {
+) -> Option<(usize, usize)> {
     let parameter = signature.parameters.as_ref()?.get(active_parameter_index)?;
-    parameter_label_text(&parameter.label, &signature.label)
-}
-
-fn parameter_label_text(label: &ParameterLabel, signature_label: &str) -> Option<String> {
-    match label {
+    match &parameter.label {
         ParameterLabel::Simple(text) => {
             let trimmed = text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            if trimmed.is_empty() {
+                return None;
+            }
+            find_substring_char_range(&signature.label, trimmed)
         }
         ParameterLabel::LabelOffsets([start, end]) => {
-            let label = string_slice_by_chars(signature_label, *start as usize, *end as usize)?
-                .trim()
-                .to_owned();
-            (!label.is_empty()).then_some(label)
+            let start = *start as usize;
+            let end = *end as usize;
+            let label_chars = signature.label.chars().count();
+            (start <= end && end <= label_chars).then_some((start, end))
         }
     }
 }
 
-fn documentation_lines(documentation: &Documentation) -> Vec<String> {
-    match documentation {
-        Documentation::String(text) => normalize_lines(text),
-        Documentation::MarkupContent(content) => normalize_lines(&content.value),
-    }
-}
-
-fn string_slice_by_chars(text: &str, start: usize, end: usize) -> Option<&str> {
-    if start > end {
+fn find_substring_char_range(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    let needle_len = needle.chars().count();
+    if needle_len == 0 {
         return None;
     }
-    let start_byte = char_to_byte_offset(text, start)?;
-    let end_byte = char_to_byte_offset(text, end)?;
-    text.get(start_byte..end_byte)
-}
-
-fn char_to_byte_offset(text: &str, char_index: usize) -> Option<usize> {
-    if char_index == text.chars().count() {
-        return Some(text.len());
+    let haystack_chars = haystack.chars().collect::<Vec<_>>();
+    for start in 0..=haystack_chars.len().saturating_sub(needle_len) {
+        if haystack_chars[start..start + needle_len] == needle.chars().collect::<Vec<_>>()[..] {
+            return Some((start, start + needle_len));
+        }
     }
-    text.char_indices().nth(char_index).map(|(index, _)| index)
+    None
 }
 
 fn location_from_lsp(server_id: &str, location: &Location) -> Option<LspLocation> {
@@ -5544,15 +5642,19 @@ fn parse_completion_item(server_id: &str, value: &Value) -> Option<LspCompletion
         .get("documentation")
         .and_then(completion_documentation)
         .or_else(|| detail.clone());
-    Some(LspCompletionItem::new(
-        server_id,
-        kind,
-        label,
-        insert_text,
-        edit_range,
-        detail,
-        documentation,
-    ))
+    let has_documentation = documentation.is_some();
+    Some(
+        LspCompletionItem::new(
+            server_id,
+            kind,
+            label,
+            insert_text,
+            edit_range,
+            detail,
+            documentation,
+        )
+        .with_raw_item(value.clone(), has_documentation),
+    )
 }
 
 fn completion_documentation(value: &Value) -> Option<String> {
@@ -5592,14 +5694,6 @@ fn parse_completion_kind(kind: u64) -> Option<LspCompletionKind> {
         25 => Some(LspCompletionKind::TypeParameter),
         _ => None,
     }
-}
-
-fn normalize_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim_end)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 fn path_to_file_uri(path: &Path) -> String {
@@ -5887,34 +5981,15 @@ mod tests {
             .expect("signature help response")
             .expect("signature help");
         assert_eq!(signature_help.server_id(), "rust-analyzer");
-        assert_eq!(
-            signature_help.lines()[0],
-            "do_thing(value: String, count: usize)"
-        );
-        assert!(
-            signature_help
-                .lines()
-                .iter()
-                .any(|line| line == "Overload 2/2")
-        );
-        assert!(
-            signature_help
-                .lines()
-                .iter()
-                .any(|line| line == "Parameter: count: usize")
-        );
-        assert!(
-            signature_help
-                .lines()
-                .iter()
-                .any(|line| line.contains("Number of repetitions"))
-        );
-        assert!(
-            signature_help
-                .lines()
-                .iter()
-                .any(|line| line.contains("Formats the value multiple times"))
-        );
+        let markdown = signature_help.markdown_text(Some("rust"));
+        assert!(markdown.contains("**Signature 1/2**"));
+        assert!(markdown.contains("**Signature 2/2 (active)**"));
+        assert!(markdown.contains("```rust\ndo_thing(value: String)\n```"));
+        assert!(markdown.contains("```rust\ndo_thing(value: String, count: usize)\n```"));
+        assert!(!markdown.contains("**Parameter:**"));
+        assert!(markdown.contains("Number of repetitions."));
+        assert!(markdown.contains("Formats the value multiple times."));
+        assert!(markdown.contains("Fallback overload"));
     }
 
     #[test]
@@ -5941,10 +6016,39 @@ mod tests {
             .expect("signature help");
         assert!(
             signature_help
-                .lines()
-                .iter()
-                .any(|line| line == "Parameter: beta")
+                .active_parameter_range()
+                .is_some_and(|range| range.start == 12 && range.end == 16)
         );
+    }
+
+    #[test]
+    fn signature_help_active_parameter_range_supports_simple_labels() {
+        let response = json!({
+            "signatures": [
+                {
+                    "label": "call(alpha, beta)",
+                    "parameters": [
+                        {
+                            "label": "alpha"
+                        },
+                        {
+                            "label": "beta"
+                        }
+                    ]
+                }
+            ],
+            "activeSignature": 0,
+            "activeParameter": 1
+        });
+        let signature_help = parse_signature_help_response("rust-analyzer", &response)
+            .expect("signature help response")
+            .expect("signature help");
+        let range = signature_help
+            .active_parameter_range()
+            .expect("active parameter range");
+        assert_eq!(range.label, "call(alpha, beta)");
+        assert_eq!(range.start, 12);
+        assert_eq!(range.end, 16);
     }
 
     #[test]
@@ -7074,6 +7178,7 @@ mod tests {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            completion_resolve_supported: AtomicBool::new(false),
         })
     }
 

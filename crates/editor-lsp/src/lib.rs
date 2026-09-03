@@ -20,7 +20,8 @@ pub use client::{
     LspInlineCompletionItem, LspLiveSession, LspLocation, LspLogDirection, LspLogEntry,
     LspLogSnapshot, LspNotification, LspNotificationAction, LspNotificationEntry,
     LspNotificationLevel, LspNotificationProgress, LspNotificationSnapshot, LspServerCommand,
-    LspSignatureHelpContents, LspTextEdit, language_server_session_in_workspace_scope,
+    LspSignatureActiveParameter, LspSignatureHelpContents, LspTextEdit,
+    language_server_session_in_workspace_scope,
 };
 pub use editor_tool_install::InstallRecipe;
 

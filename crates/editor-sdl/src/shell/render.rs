@@ -144,7 +144,7 @@ pub(super) fn render_shell_state(
     fonts: &FontSet<'_>,
     state: &ShellUiState,
     runtime_popup: Option<&RuntimePopupSnapshot>,
-    workspace_dock_entries: &[WorkspaceDockEntry],
+    dock_entries: ShellDockEntries<'_>,
     chrome: ShellChrome<'_>,
     view: ShellFrameView<'_>,
 ) -> Result<(), ShellError> {
@@ -164,7 +164,7 @@ pub(super) fn render_shell_state(
         line_height,
         ascent,
     } = metrics;
-    let dock = workspace_dock_layout(user_library, state, width, height, cell_width);
+    let docks = shell_docks_layout(user_library, state, width, height, cell_width);
     let content_height = height;
     let popup_height = runtime_popup
         .map(|_| popup_window_height(height, line_height))
@@ -176,12 +176,12 @@ pub(super) fn render_shell_state(
     let mut pane_rects = workspace_pane_rects(
         user_library,
         state,
-        dock.content_width,
+        docks.content_width,
         pane_height,
         panes.len(),
     );
     for rect in &mut pane_rects {
-        rect.x = rect.x.saturating_add(dock.content_x);
+        rect.x = rect.x.saturating_add(docks.content_x);
     }
     let window_effects = current_window_effect_settings(theme_registry);
     let base_background = theme_color(theme_registry, "ui.background", Color::RGB(15, 16, 20));
@@ -203,8 +203,17 @@ pub(super) fn render_shell_state(
 
     render_workspace_dock(
         target,
-        &dock,
-        workspace_dock_entries,
+        &docks.workspace,
+        dock_entries.workspace,
+        theme_registry,
+        cell_width,
+        line_height,
+        ascent,
+    )?;
+    render_acp_dock(
+        target,
+        &docks.acp,
+        dock_entries.acp,
         theme_registry,
         cell_width,
         line_height,
@@ -288,9 +297,9 @@ pub(super) fn render_shell_state(
             state,
             popup,
             PixelRectToRect::rect(
-                dock.content_x,
+                docks.content_x,
                 pane_height as i32,
-                dock.content_width,
+                docks.content_width,
                 popup_height,
             ),
             chrome,
@@ -5737,7 +5746,11 @@ pub(super) fn line_color_segments(
         };
         let token_style = relevant_spans
             .iter()
-            .filter(|(span_start, span_end, _)| start >= *span_start && end <= *span_end)
+            .filter(|(span_start, span_end, token)| {
+                start >= *span_start
+                    && end <= *span_end
+                    && *token != super::HOVER_SIGNATURE_ACTIVE_PARAMETER_TOKEN
+            })
             .min_by_key(|(span_start, span_end, token)| {
                 (
                     span_end.saturating_sub(*span_start),
@@ -5750,9 +5763,26 @@ pub(super) fn line_color_segments(
         let color = token_style
             .map(|token_style| to_sdl_color(token_style.color))
             .unwrap_or(default_color);
-        let style = token_style
+        let mut style = token_style
             .map(|token_style| text_style_from_theme_style(token_style.style))
             .unwrap_or_else(TextStyle::plain);
+        let has_active_parameter_emphasis =
+            relevant_spans.iter().any(|(span_start, span_end, token)| {
+                start >= *span_start
+                    && end <= *span_end
+                    && *token == super::HOVER_SIGNATURE_ACTIVE_PARAMETER_TOKEN
+            });
+        if has_active_parameter_emphasis {
+            let emphasis_bold = theme_registry
+                .and_then(|registry| {
+                    registry.resolve_style(super::HOVER_SIGNATURE_ACTIVE_PARAMETER_TOKEN)
+                })
+                .map(|token_style| token_style.style.bold)
+                .unwrap_or(true);
+            if emphasis_bold {
+                style = TextStyle::new(true, style.italic);
+            }
+        }
         segments.push((text.to_owned(), color, style));
     }
 
@@ -8012,7 +8042,7 @@ pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(
     color: Color,
 ) -> Result<(), ShellError> {
     let radius = radius.min(rect.width() / 2).min(rect.height() / 2) as i32;
-    if radius <= 1 {
+    if radius <= 0 {
         canvas.set_draw_color(color);
         return canvas
             .fill_rect(rect)
@@ -8023,35 +8053,65 @@ pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(
     canvas.set_blend_mode(sdl3::render::BlendMode::Blend);
     let rect_height = rect.height() as i32;
     let rect_width = rect.width() as i32;
+    let x0 = rect.x();
+    let y0 = rect.y();
 
     let result = (|| {
-        for row in 0..rect_height {
-            let (inset, edge_alpha) =
-                rounded_rect_row_coverage(row, rect_height, rect_width, radius, color.a);
-            let width = rect_width - (inset * 2);
-            if width > 0 {
-                canvas.set_draw_color(color);
-                canvas
-                    .fill_rect(Rect::new(rect.x() + inset, rect.y() + row, width as u32, 1))
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-            }
-
-            if edge_alpha > 0 && inset > 0 {
-                let edge_color = Color::RGBA(color.r, color.g, color.b, edge_alpha);
-                canvas.set_draw_color(edge_color);
-                canvas
-                    .fill_rect(Rect::new(rect.x() + inset - 1, rect.y() + row, 1, 1))
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-                canvas
-                    .fill_rect(Rect::new(
-                        rect.x() + rect_width - inset,
-                        rect.y() + row,
-                        1,
-                        1,
-                    ))
-                    .map_err(|error| ShellError::Sdl(error.to_string()))?;
-            }
+        // Body: full-width band between the corner caps.
+        if rect_height > radius * 2 {
+            canvas.set_draw_color(color);
+            canvas
+                .fill_rect(Rect::new(
+                    x0,
+                    y0 + radius,
+                    rect_width as u32,
+                    (rect_height - radius * 2) as u32,
+                ))
+                .map_err(|error| ShellError::Sdl(error.to_string()))?;
         }
+
+        // Straight edge caps between the four circular corners.
+        let mid_width = rect_width - radius * 2;
+        if mid_width > 0 {
+            canvas.set_draw_color(color);
+            canvas
+                .fill_rect(Rect::new(x0 + radius, y0, mid_width as u32, radius as u32))
+                .map_err(|error| ShellError::Sdl(error.to_string()))?;
+            canvas
+                .fill_rect(Rect::new(
+                    x0 + radius,
+                    y0 + rect_height - radius,
+                    mid_width as u32,
+                    radius as u32,
+                ))
+                .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        }
+
+        fill_rounded_corner_canvas(canvas, x0, y0, radius, color, RoundedCorner::TopLeft)?;
+        fill_rounded_corner_canvas(
+            canvas,
+            x0 + rect_width - radius,
+            y0,
+            radius,
+            color,
+            RoundedCorner::TopRight,
+        )?;
+        fill_rounded_corner_canvas(
+            canvas,
+            x0,
+            y0 + rect_height - radius,
+            radius,
+            color,
+            RoundedCorner::BottomLeft,
+        )?;
+        fill_rounded_corner_canvas(
+            canvas,
+            x0 + rect_width - radius,
+            y0 + rect_height - radius,
+            radius,
+            color,
+            RoundedCorner::BottomRight,
+        )?;
         Ok(())
     })();
 
@@ -8059,27 +8119,100 @@ pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(
     result
 }
 
-fn rounded_rect_row_coverage(
-    row: i32,
-    rect_height: i32,
-    rect_width: i32,
+#[derive(Clone, Copy)]
+enum RoundedCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+fn fill_rounded_corner_canvas<T: RenderTarget>(
+    canvas: &mut Canvas<T>,
+    origin_x: i32,
+    origin_y: i32,
     radius: i32,
-    alpha: u8,
-) -> (i32, u8) {
-    // Measure from pixel centers so the scanline coverage matches the blended edge pixels.
-    let corner_distance = if row < radius {
-        radius as f32 - row as f32 - 0.5
-    } else if row >= rect_height - radius {
-        row as f32 - (rect_height - radius) as f32 + 0.5
-    } else {
-        return (0, 0);
-    };
+    color: Color,
+    corner: RoundedCorner,
+) -> Result<(), ShellError> {
+    for ly in 0..radius {
+        let mut run_start = 0i32;
+        let mut run_alpha: Option<u8> = None;
+        let mut run_len = 0i32;
+
+        for lx in 0..radius {
+            let (outer_x, outer_y) = match corner {
+                RoundedCorner::TopLeft => (lx, ly),
+                RoundedCorner::TopRight => (radius - 1 - lx, ly),
+                RoundedCorner::BottomLeft => (lx, radius - 1 - ly),
+                RoundedCorner::BottomRight => (radius - 1 - lx, radius - 1 - ly),
+            };
+            let alpha =
+                scaled_coverage_alpha(rounded_corner_coverage(outer_x, outer_y, radius), color.a);
+            match run_alpha {
+                Some(current) if current == alpha => run_len += 1,
+                Some(current) => {
+                    fill_rounded_corner_run(
+                        canvas,
+                        origin_x + run_start,
+                        origin_y + ly,
+                        run_len,
+                        Color::RGBA(color.r, color.g, color.b, current),
+                    )?;
+                    run_start = lx;
+                    run_len = 1;
+                    run_alpha = Some(alpha);
+                }
+                None => {
+                    run_start = lx;
+                    run_len = 1;
+                    run_alpha = Some(alpha);
+                }
+            }
+        }
+
+        if let Some(alpha) = run_alpha {
+            fill_rounded_corner_run(
+                canvas,
+                origin_x + run_start,
+                origin_y + ly,
+                run_len,
+                Color::RGBA(color.r, color.g, color.b, alpha),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn fill_rounded_corner_run<T: RenderTarget>(
+    canvas: &mut Canvas<T>,
+    x: i32,
+    y: i32,
+    len: i32,
+    color: Color,
+) -> Result<(), ShellError> {
+    if len <= 0 || color.a == 0 {
+        return Ok(());
+    }
+    canvas.set_draw_color(color);
+    canvas
+        .fill_rect(Rect::new(x, y, len as u32, 1))
+        .map_err(|error| ShellError::Sdl(error.to_string()))
+}
+
+/// Coverage for a pixel in a circular corner, with `(0,0)` at the outer corner.
+/// Uses a signed-distance falloff so several fringe pixels blend instead of one stair step.
+fn rounded_corner_coverage(local_x: i32, local_y: i32, radius: i32) -> f32 {
+    if radius <= 0 {
+        return 0.0;
+    }
     let radius_f = radius as f32;
-    let inset = radius_f - (radius_f * radius_f - corner_distance * corner_distance).sqrt();
-    let full_inset = inset.ceil() as i32;
-    let full_inset = full_inset.clamp(0, rect_width / 2);
-    let coverage = (full_inset as f32 - inset).clamp(0.0, 1.0);
-    (full_inset, scaled_coverage_alpha(coverage, alpha))
+    let dx = local_x as f32 + 0.5 - radius_f;
+    let dy = local_y as f32 + 0.5 - radius_f;
+    let signed_distance = (dx * dx + dy * dy).sqrt() - radius_f;
+    // ~1.5px filter: smoother than a hard 1px edge, still sharp enough for UI chrome.
+    const AA_HALF_WIDTH: f32 = 0.75;
+    ((AA_HALF_WIDTH - signed_distance) / (2.0 * AA_HALF_WIDTH)).clamp(0.0, 1.0)
 }
 
 fn scaled_coverage_alpha(coverage: f32, alpha: u8) -> u8 {
@@ -8524,20 +8657,36 @@ impl PixelRectToRect {
 
 #[cfg(test)]
 mod render_rounded_rect_tests {
-    use super::rounded_rect_row_coverage;
+    use super::rounded_corner_coverage;
 
     #[test]
-    fn rounded_rect_row_coverage_is_symmetric() {
-        let top = rounded_rect_row_coverage(0, 12, 20, 4, 255);
-        let bottom = rounded_rect_row_coverage(11, 12, 20, 4, 255);
-        assert_eq!(top, bottom);
+    fn rounded_corner_coverage_is_symmetric_across_axes() {
+        let radius = 8;
+        for local in 0..radius {
+            let a = rounded_corner_coverage(local, 0, radius);
+            let b = rounded_corner_coverage(0, local, radius);
+            assert!((a - b).abs() < f32::EPSILON);
+        }
     }
 
     #[test]
-    fn rounded_rect_row_coverage_adds_partial_edge_pixels() {
-        let (inset, alpha) = rounded_rect_row_coverage(0, 12, 20, 4, 255);
-        assert!(inset > 0);
-        assert!(alpha > 0);
-        assert!(alpha < 255);
+    fn rounded_corner_coverage_has_multi_pixel_fringe() {
+        let radius = 8;
+        let mut partials = 0u32;
+        let mut solids = 0u32;
+        for ly in 0..radius {
+            for lx in 0..radius {
+                let coverage = rounded_corner_coverage(lx, ly, radius);
+                if coverage > 0.0 && coverage < 1.0 {
+                    partials += 1;
+                } else if coverage >= 1.0 {
+                    solids += 1;
+                }
+            }
+        }
+        assert!(partials > 1, "expected a multi-pixel antialiased fringe");
+        assert!(solids > 0, "expected fully covered interior corner pixels");
+        // Outer tip should be empty or very soft, not a hard stair.
+        assert!(rounded_corner_coverage(0, 0, radius) < 0.5);
     }
 }

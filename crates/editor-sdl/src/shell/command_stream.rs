@@ -20,6 +20,8 @@ use std::{
 #[derive(Debug)]
 pub(super) enum StreamedCommandExitAction {
     RefreshGitStatusBuffersAndCloseBuffer,
+    /// Like [`Self::RefreshGitStatusBuffersAndCloseBuffer`], then rescan project discovery.
+    RefreshGitStatusCloseAndRescanProjects,
     /// Refresh git status, close the stream popup, then open the commit buffer.
     RefreshGitStatusCloseAndOpenCommitBuffer,
     /// Refresh git status, close the stream popup, then open a Project Workspace.
@@ -509,6 +511,13 @@ pub(super) fn refresh_pending_streamed_commands(
                             refresh_git_status = true;
                         }
                     }
+                    StreamedCommandExitAction::RefreshGitStatusCloseAndRescanProjects => {
+                        if outcome.success {
+                            buffers_to_close.push(buffer_id);
+                            refresh_git_status = true;
+                            project_discovery_rescan_cached_roots();
+                        }
+                    }
                     StreamedCommandExitAction::RefreshGitStatusCloseAndOpenCommitBuffer => {
                         if outcome.success {
                             buffers_to_close.push(buffer_id);
@@ -523,6 +532,7 @@ pub(super) fn refresh_pending_streamed_commands(
                         if outcome.success {
                             buffers_to_close.push(buffer_id);
                             refresh_git_status = true;
+                            project_discovery_rescan_cached_roots();
                             open_workspace_after_close = Some((name, path));
                         }
                     }

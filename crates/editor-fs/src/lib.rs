@@ -11,9 +11,13 @@ mod project_discovery;
 pub use project_discovery::{
     PROJECT_DISCOVERY_TTL, ProjectDiscoveryFingerprint, ProjectDiscoverySnapshot,
     cancel_project_discovery_scan, current_project_discovery_snapshot,
-    invalidate_project_discovery_cache, project_discovery_request_scan, project_discovery_snapshot,
-    reset_project_discovery_cache, set_project_discovery_ttl_for_test,
-    set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
+    invalidate_project_discovery_cache, project_discovery_background_tick,
+    project_discovery_for_picker, project_discovery_forget_candidate,
+    project_discovery_persist_path, project_discovery_request_scan,
+    project_discovery_rescan_cached_roots, project_discovery_snapshot,
+    reset_project_discovery_cache, set_project_discovery_persist_path_for_test,
+    set_project_discovery_ttl_for_test, set_project_discovery_worker_blocked_for_test,
+    wait_for_project_discovery,
 };
 
 /// Human-readable summary of this crate's responsibility.
@@ -89,6 +93,23 @@ impl ProjectCandidate {
             kind,
             repository_name,
             repository_root,
+        }
+    }
+
+    /// Reconstructs a candidate from persisted fields without probing disk.
+    pub fn from_persisted(
+        name: impl Into<String>,
+        root: impl Into<PathBuf>,
+        kind: ProjectKind,
+        repository_name: impl Into<String>,
+        repository_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            root: root.into(),
+            kind,
+            repository_name: repository_name.into(),
+            repository_root: repository_root.into(),
         }
     }
 
@@ -648,21 +669,44 @@ fn windows_git_absolute_path(reference: &str) -> Option<PathBuf> {
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::{Mutex, MutexGuard},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         DirectoryBuffer, DirectoryEntryKind, ProjectKind, ProjectSearchRoot, compact_project_path,
-        discover_projects, project_discovery_request_scan, project_discovery_snapshot,
-        reset_project_discovery_cache, set_project_discovery_ttl_for_test,
-        set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
+        discover_projects, project_discovery_for_picker, project_discovery_forget_candidate,
+        project_discovery_persist_path, project_discovery_request_scan, project_discovery_snapshot,
+        reset_project_discovery_cache, set_project_discovery_persist_path_for_test,
+        set_project_discovery_ttl_for_test, set_project_discovery_worker_blocked_for_test,
+        wait_for_project_discovery,
     };
 
     fn discovery_test_lock() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    struct DiscoveryPersistGuard {
+        dir: PathBuf,
+    }
+
+    impl Drop for DiscoveryPersistGuard {
+        fn drop(&mut self) {
+            reset_project_discovery_cache();
+            set_project_discovery_persist_path_for_test(None);
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn begin_discovery_persist() -> DiscoveryPersistGuard {
+        let dir = temp_dir("discovery-persist");
+        let path = dir.join("projects.json");
+        let _ = fs::create_dir_all(&dir);
+        set_project_discovery_persist_path_for_test(Some(path));
+        reset_project_discovery_cache();
+        DiscoveryPersistGuard { dir }
     }
 
     fn wait_timeout() -> Duration {
@@ -899,7 +943,7 @@ mod tests {
     fn project_discovery_snapshot_returns_git_and_worktree_candidates()
     -> Result<(), Box<dyn std::error::Error>> {
         let _lock = discovery_test_lock();
-        reset_project_discovery_cache();
+        let _persist = begin_discovery_persist();
         let (root, repo, worktree) = git_and_worktree_tree("discover-cache-candidates")?;
         let missing = root.join("missing-search-root");
         let roots = [
@@ -940,7 +984,7 @@ mod tests {
     fn project_discovery_cache_preserves_worktree_display_name()
     -> Result<(), Box<dyn std::error::Error>> {
         let _lock = discovery_test_lock();
-        reset_project_discovery_cache();
+        let _persist = begin_discovery_persist();
         let root = temp_dir("discover-cache-worktree-name");
         let repo = root.join("repo-store");
         let gitdir = repo.join(".git").join("worktrees").join("feature");
@@ -971,7 +1015,7 @@ mod tests {
     fn project_discovery_second_snapshot_with_same_roots_is_cache_hit()
     -> Result<(), Box<dyn std::error::Error>> {
         let _lock = discovery_test_lock();
-        reset_project_discovery_cache();
+        let _persist = begin_discovery_persist();
         let (root, _, _) = git_and_worktree_tree("discover-cache-hit")?;
         let roots = [ProjectSearchRoot::new(&root, 3)];
 
@@ -993,7 +1037,7 @@ mod tests {
     fn project_discovery_fingerprint_change_invalidates_cache()
     -> Result<(), Box<dyn std::error::Error>> {
         let _lock = discovery_test_lock();
-        reset_project_discovery_cache();
+        let _persist = begin_discovery_persist();
         let (root, _, _) = git_and_worktree_tree("discover-cache-fingerprint")?;
         let first_roots = [ProjectSearchRoot::new(&root, 3)];
         let first = project_discovery_snapshot(&first_roots);
@@ -1020,7 +1064,7 @@ mod tests {
     fn project_discovery_stale_snapshot_returns_candidates_while_rescan_runs()
     -> Result<(), Box<dyn std::error::Error>> {
         let _lock = discovery_test_lock();
-        reset_project_discovery_cache();
+        let _persist = begin_discovery_persist();
         let (root, _, _) = git_and_worktree_tree("discover-cache-ttl")?;
         let roots = [ProjectSearchRoot::new(&root, 3)];
         let first = project_discovery_snapshot(&roots);
@@ -1043,9 +1087,33 @@ mod tests {
     }
 
     #[test]
+    fn project_discovery_for_picker_reschedules_when_cache_is_fresh()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let _persist = begin_discovery_persist();
+        let (root, _, _) = git_and_worktree_tree("discover-picker-fresh")?;
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+        let first = project_discovery_snapshot(&roots);
+        wait_for_project_discovery(first.request_id(), wait_timeout())?;
+        set_project_discovery_worker_blocked_for_test(true);
+
+        let picker = project_discovery_for_picker(&roots);
+        assert!(picker.in_progress());
+        assert_eq!(picker.last_walk_id(), 1);
+        assert_eq!(picker.candidates().len(), 2);
+
+        set_project_discovery_worker_blocked_for_test(false);
+        let refreshed = wait_for_project_discovery(picker.request_id(), wait_timeout())?;
+        assert_eq!(refreshed.last_walk_id(), 2);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn project_discovery_superseded_scan_is_dropped() -> Result<(), Box<dyn std::error::Error>> {
         let _lock = discovery_test_lock();
-        reset_project_discovery_cache();
+        let _persist = begin_discovery_persist();
         let (root, _, _) = git_and_worktree_tree("discover-cache-cancel")?;
         let roots = [ProjectSearchRoot::new(&root, 3)];
         set_project_discovery_worker_blocked_for_test(true);
@@ -1065,7 +1133,7 @@ mod tests {
     fn project_discovery_blocked_snapshot_is_empty_until_scan_completes()
     -> Result<(), Box<dyn std::error::Error>> {
         let _lock = discovery_test_lock();
-        reset_project_discovery_cache();
+        let _persist = begin_discovery_persist();
         let (root, _, _) = git_and_worktree_tree("discover-cache-blocked")?;
         let roots = [ProjectSearchRoot::new(&root, 3)];
         set_project_discovery_worker_blocked_for_test(true);
@@ -1077,6 +1145,70 @@ mod tests {
         assert_eq!(ready.last_walk_id(), 1);
         assert_eq!(ready.candidates().len(), 2);
 
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_persists_and_reseeds_cache_from_disk()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let _persist = begin_discovery_persist();
+        let (root, repo, _) = git_and_worktree_tree("discover-persist-reseed")?;
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+        let scanning = project_discovery_snapshot(&roots);
+        let ready = wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+        assert_eq!(ready.candidates().len(), 2);
+        assert!(project_discovery_persist_path().is_file());
+
+        reset_project_discovery_cache();
+        set_project_discovery_worker_blocked_for_test(true);
+        let seeded = project_discovery_snapshot(&roots);
+        assert!(seeded.in_progress());
+        assert_eq!(seeded.candidates().len(), 2);
+        assert!(
+            seeded
+                .candidates()
+                .iter()
+                .any(|project| project.root() == repo)
+        );
+
+        set_project_discovery_worker_blocked_for_test(false);
+        wait_for_project_discovery(seeded.request_id(), wait_timeout())?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn project_discovery_forget_candidate_updates_memory_and_disk()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let _persist = begin_discovery_persist();
+        let (root, _, worktree) = git_and_worktree_tree("discover-forget")?;
+        let roots = [ProjectSearchRoot::new(&root, 3)];
+        let scanning = project_discovery_snapshot(&roots);
+        wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+
+        set_project_discovery_worker_blocked_for_test(true);
+        project_discovery_forget_candidate(&worktree);
+        let after_forget = super::current_project_discovery_snapshot();
+        assert!(
+            after_forget
+                .candidates()
+                .iter()
+                .all(|project| project.root() != worktree)
+        );
+        assert!(!after_forget.in_progress());
+        let body = fs::read_to_string(project_discovery_persist_path())?;
+        let parsed: serde_json::Value = serde_json::from_str(&body)?;
+        let projects = parsed["projects"].as_array().expect("projects array");
+        assert!(projects.iter().all(|project| {
+            project["root"]
+                .as_str()
+                .is_none_or(|root_path| Path::new(root_path) != worktree.as_path())
+        }));
+
+        set_project_discovery_worker_blocked_for_test(false);
         fs::remove_dir_all(root)?;
         Ok(())
     }

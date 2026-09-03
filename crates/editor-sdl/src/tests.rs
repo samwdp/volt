@@ -1962,22 +1962,29 @@ fn project_discovery_test_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-struct ProjectDiscoveryTestGuard;
+struct ProjectDiscoveryTestGuard {
+    persist_dir: PathBuf,
+}
 
 impl Drop for ProjectDiscoveryTestGuard {
     fn drop(&mut self) {
         user::workspace::override_project_search_roots_for_test(None);
         editor_fs::reset_project_discovery_cache();
+        editor_fs::set_project_discovery_persist_path_for_test(None);
         editor_fs::set_project_discovery_worker_blocked_for_test(false);
+        let _ = std::fs::remove_dir_all(&self.persist_dir);
     }
 }
 
 fn begin_project_discovery_test(
     roots: Vec<editor_fs::ProjectSearchRoot>,
 ) -> Result<ProjectDiscoveryTestGuard, Box<dyn std::error::Error>> {
+    let persist_dir = temp_workspace_root("discovery-persist");
+    std::fs::create_dir_all(&persist_dir)?;
+    editor_fs::set_project_discovery_persist_path_for_test(Some(persist_dir.join("projects.json")));
     editor_fs::reset_project_discovery_cache();
     user::workspace::override_project_search_roots_for_test(Some(roots));
-    Ok(ProjectDiscoveryTestGuard)
+    Ok(ProjectDiscoveryTestGuard { persist_dir })
 }
 
 fn discovery_fixture() -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {

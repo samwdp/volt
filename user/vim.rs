@@ -1015,6 +1015,7 @@ pub fn package() -> PluginPackage {
         leader_binding("a a", "acp.pick-client", PluginKeymapScope::Workspace),
         leader_binding("a n", "acp.new-session", PluginKeymapScope::Workspace),
         leader_binding("a p", "acp.pick-session", PluginKeymapScope::Workspace),
+        leader_binding("a d", "acp.dock.toggle", PluginKeymapScope::Workspace),
         // buffer
         leader_binding("b b", "picker.open-buffers", PluginKeymapScope::Workspace),
         leader_binding("d w", "pane.close", PluginKeymapScope::Workspace),

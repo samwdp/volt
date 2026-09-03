@@ -996,7 +996,10 @@ fn create_acp_buffer(
     Ok((buffer_id, workspace_id, workspace_name))
 }
 
-fn focus_acp_buffer(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+pub(super) fn focus_acp_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
     let workspace_id = runtime
         .model()
         .active_workspace_id()
@@ -2315,7 +2318,7 @@ fn open_file_mention_picker(
     Ok(())
 }
 
-struct AcpManager {
+pub(super) struct AcpManager {
     runtime: AcpRuntime,
     events: mpsc::Receiver<AcpEvent>,
     deferred_events: VecDeque<AcpEvent>,
@@ -2381,7 +2384,7 @@ impl AcpManager {
         self.buffers.get(&buffer_id).cloned()
     }
 
-    fn client_id_for_buffer(&self, buffer_id: BufferId) -> Option<String> {
+    pub(super) fn client_id_for_buffer(&self, buffer_id: BufferId) -> Option<String> {
         let session_id = self.session_for_buffer(buffer_id)?;
         self.sessions
             .get(&session_id)

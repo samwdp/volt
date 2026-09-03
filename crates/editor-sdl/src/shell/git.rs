@@ -2877,6 +2877,8 @@ pub(super) fn worktree_remove_from_one_shot(runtime: &mut EditorRuntime) -> Resu
         return Ok(());
     };
 
+    project_discovery_forget_candidate(&plan.request.path);
+
     for workspace_id in plan.workspace_ids_to_close {
         delete_runtime_workspace(runtime, workspace_id)?;
     }
@@ -2900,7 +2902,7 @@ pub(super) fn worktree_remove_from_one_shot(runtime: &mut EditorRuntime) -> Resu
             "Worktree Remove",
             args,
             cwd,
-            StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer,
+            StreamedCommandExitAction::RefreshGitStatusCloseAndRescanProjects,
         ),
     )?;
     Ok(())

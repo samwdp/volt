@@ -1,4 +1,5 @@
 mod acp;
+mod acp_dock;
 mod autocomplete_tokens;
 mod browser;
 mod clipboard;
@@ -24,6 +25,7 @@ mod ui_overlays;
 mod workspace_dock;
 mod workspace_search;
 
+use acp_dock::*;
 use autocomplete_tokens::{AutocompleteTokenCache, is_completion_word_char};
 use browser::*;
 use command_line::*;
@@ -114,7 +116,11 @@ use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
     DbSessionId, QualifiedName, parse_db_connect_prompt, split_sql_statements, sql_scope_from_text,
 };
-use editor_fs::{DirectoryBuffer, DirectoryEntry, DirectoryEntryKind};
+use editor_fs::{
+    DirectoryBuffer, DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot,
+    project_discovery_background_tick, project_discovery_forget_candidate,
+    project_discovery_rescan_cached_roots, project_discovery_snapshot,
+};
 use editor_git::{
     GitLogEntry, GitStatusSnapshot, detect_in_progress, git_probe_snapshot,
     git_probe_snapshot_with_numstat, invalidate_git_probe_cache_for,
@@ -346,6 +352,7 @@ const HOOK_POPUP_PREVIOUS: &str = "ui.popup.previous";
 const HOOK_WORKSPACE_DOCK_TOGGLE: &str = "ui.workspace-dock.toggle";
 const HOOK_WORKSPACE_DOCK_PREVIOUS: &str = "ui.workspace-dock.previous";
 const HOOK_WORKSPACE_DOCK_NEXT: &str = "ui.workspace-dock.next";
+const HOOK_ACP_DOCK_TOGGLE: &str = "ui.acp-dock.toggle";
 const HOOK_ACP_DISCONNECT: &str = "ui.acp.disconnect";
 const HOOK_ACP_PERMISSION_APPROVE: &str = "ui.acp.permission-approve";
 const HOOK_ACP_PERMISSION_DENY: &str = "ui.acp.permission-deny";
@@ -9421,6 +9428,11 @@ impl PickerOverlay {
         self.project_discovery_revision = Some(revision);
     }
 
+    fn with_project_discovery_revision(mut self, revision: u64) -> Self {
+        self.project_discovery_revision = Some(revision);
+        self
+    }
+
     fn replace_entries_preserving_selection(&mut self, entries: Vec<PickerEntry>) {
         let selected_id = self
             .session
@@ -9735,6 +9747,7 @@ pub(crate) struct ShellUiState {
     workspace_dock_open: bool,
     workspace_dock_focus: bool,
     workspace_dock_branches: WorkspaceDockBranchCache,
+    acp_dock_open: bool,
     dismissed_popups: BTreeMap<WorkspaceId, DismissedPopupState>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
@@ -9811,6 +9824,7 @@ impl ShellUiState {
             workspace_dock_open: false,
             workspace_dock_focus: false,
             workspace_dock_branches: WorkspaceDockBranchCache::new(),
+            acp_dock_open: false,
             dismissed_popups: BTreeMap::new(),
             yank_flash: None,
             git_summary: GitSummaryState::new(),
@@ -9948,6 +9962,14 @@ impl ShellUiState {
 
     fn workspace_dock_branches_mut(&mut self) -> &mut WorkspaceDockBranchCache {
         &mut self.workspace_dock_branches
+    }
+
+    fn acp_dock_open(&self) -> bool {
+        self.acp_dock_open
+    }
+
+    fn toggle_acp_dock_open(&mut self) {
+        self.acp_dock_open = !self.acp_dock_open;
     }
 
     fn popup_focus_allowed(&self, popup: &RuntimePopupSnapshot) -> bool {
@@ -11900,6 +11922,7 @@ impl ShellState {
             .insert(UserLibraryReloadState::default());
         load_auto_loaded_packages(&mut runtime, &user_library.packages())
             .map_err(|error| ShellError::Runtime(error.to_string()))?;
+        warm_project_discovery(user_library.as_ref());
         picker::ensure_picker_keybindings(&mut runtime).map_err(ShellError::Runtime)?;
         if let Some(trace) = startup_trace.as_mut() {
             trace.mark("shell.user-packages");
@@ -11936,6 +11959,7 @@ impl ShellState {
         }
         let user_library = shell_user_library(&self.runtime);
         install_optional_runtime_services(&mut self.runtime, &*user_library)?;
+        warm_project_discovery(&*user_library);
         self.deferred_startup_pending = false;
         Ok(())
     }
@@ -12131,7 +12155,7 @@ impl ShellState {
                     return Ok(false);
                 }
                 let user_library = shell_user_library(&self.runtime);
-                let dock = workspace_dock_layout(
+                let docks = shell_docks_layout(
                     &*user_library,
                     self.ui()?,
                     render_width,
@@ -12139,11 +12163,11 @@ impl ShellState {
                     cell_width,
                 );
                 if mouse_btn == MouseButton::Left {
-                    let entries = collect_workspace_dock_entries(&self.runtime)
+                    let workspace_entries = collect_workspace_dock_entries(&self.runtime)
                         .map_err(ShellError::Runtime)?;
                     if let Some(workspace_id) = workspace_dock_entry_at_point(
-                        &dock,
-                        &entries,
+                        &docks.workspace,
+                        &workspace_entries,
                         line_height,
                         mouse_x,
                         mouse_y,
@@ -12156,6 +12180,26 @@ impl ShellState {
                             .map_err(ShellError::Runtime)?
                             .set_popup_focus(false);
                         switch_runtime_workspace(&mut self.runtime, workspace_id)
+                            .map_err(ShellError::Runtime)?;
+                        return Ok(false);
+                    }
+                    let acp_entries =
+                        collect_acp_dock_entries(&self.runtime).map_err(ShellError::Runtime)?;
+                    if let Some(buffer_id) = acp_dock_entry_at_point(
+                        &docks.acp,
+                        &acp_entries,
+                        line_height,
+                        mouse_x,
+                        mouse_y,
+                    ) {
+                        self.mouse_drag = None;
+                        shell_ui_mut(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?
+                            .set_workspace_dock_focus(false);
+                        shell_ui_mut(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?
+                            .set_popup_focus(false);
+                        acp::focus_acp_buffer(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
                         return Ok(false);
                     }
@@ -12186,8 +12230,8 @@ impl ShellState {
                     browser_surface_buffer_at_point(&browser_plan, mouse_x, mouse_y);
                 let in_popup = runtime_popup.is_some()
                     && mouse_y >= pane_height as i32
-                    && mouse_x >= dock.content_x
-                    && mouse_x < dock.content_x.saturating_add(dock.content_width as i32);
+                    && mouse_x >= docks.content_x
+                    && mouse_x < docks.content_x.saturating_add(docks.content_width as i32);
                 if in_popup {
                     self.mouse_drag = None;
                     if let Some(popup) = runtime_popup.as_ref() {
@@ -12980,16 +13024,16 @@ impl ShellState {
             return Ok(None);
         };
         let user_library = shell_user_library(&self.runtime);
-        let dock = workspace_dock_layout(&*user_library, ui, width, height, cell_width);
+        let docks = shell_docks_layout(&*user_library, ui, width, height, cell_width);
         let mut pane_rects = workspace_pane_rects(
             &*user_library,
             ui,
-            dock.content_width,
+            docks.content_width,
             pane_height,
             panes.len(),
         );
         for rect in &mut pane_rects {
-            rect.x = rect.x.saturating_add(dock.content_x);
+            rect.x = rect.x.saturating_add(docks.content_x);
         }
         Ok(panes
             .iter()
@@ -13266,6 +13310,8 @@ impl ShellState {
         };
         let dock_entries =
             collect_workspace_dock_entries(&self.runtime).map_err(ShellError::Runtime)?;
+        let acp_dock_entries =
+            collect_acp_dock_entries(&self.runtime).map_err(ShellError::Runtime)?;
         if dock_visible {
             let roots = workspace_dock_project_roots(&self.runtime).map_err(ShellError::Runtime)?;
             let cache = self.ui_mut()?.workspace_dock_branches_mut();
@@ -13288,7 +13334,10 @@ impl ShellState {
             fonts,
             ui,
             runtime_popup.as_ref(),
-            &dock_entries,
+            ShellDockEntries {
+                workspace: &dock_entries,
+                acp: &acp_dock_entries,
+            },
             ShellChrome {
                 user_library: &*shell_user_library(&self.runtime),
                 theme_registry,
@@ -15272,6 +15321,14 @@ impl ShellState {
         self.refresh_pending_project_discovery()
     }
 
+    fn tick_project_discovery_background(&self) {
+        let roots = project_search_roots_from_user_library(&*shell_user_library(&self.runtime));
+        if roots.is_empty() {
+            return;
+        }
+        project_discovery_background_tick(&roots);
+    }
+
     fn try_runtime_keybinding_cached(
         &mut self,
         keycode: Keycode,
@@ -15401,10 +15458,26 @@ impl ShellState {
             return Ok(true);
         }
         let overlay_modes = self.overlay_minor_modes()?;
-        if self
-            .runtime
-            .execute_key_binding_in_scopes(&overlay_modes, vim_mode, chord)
-            .map_err(|error| ShellError::Runtime(error.to_string()))?
+        // Popup Minor Mode keeps Enter bound to picker.submit for picker UIs.
+        // When a non-picker popup is focused (terminal, etc.), skip that binding
+        // so Enter reaches terminal/input handling instead of erroring with
+        // "picker has no selected item" and swallowing the key.
+        let skip_picker_submit = !picker_visible
+            && self
+                .runtime
+                .keymaps()
+                .find_in_scopes(&overlay_modes, vim_mode, chord)
+                .is_some_and(|binding| {
+                    binding
+                        .command_names()
+                        .iter()
+                        .any(|name| name.as_str() == "picker.submit")
+                });
+        if !skip_picker_submit
+            && self
+                .runtime
+                .execute_key_binding_in_scopes(&overlay_modes, vim_mode, chord)
+                .map_err(|error| ShellError::Runtime(error.to_string()))?
         {
             return Ok(true);
         }
@@ -15616,14 +15689,14 @@ impl ShellState {
             .unwrap_or(0);
         let pane_height = render_height.saturating_sub(popup_height);
         let user_library = shell_user_library(&self.runtime);
-        let dock = workspace_dock_layout(&*user_library, ui, render_width, render_height, 8);
+        let docks = shell_docks_layout(&*user_library, ui, render_width, render_height, 8);
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
         let pane_rects = workspace_pane_rects(
             &*user_library,
             ui,
-            dock.content_width,
+            docks.content_width,
             pane_height,
             panes.len(),
         );
@@ -15662,15 +15735,14 @@ impl ShellState {
             .unwrap_or(0);
         let pane_height = render_height.saturating_sub(popup_height);
         let user_library = shell_user_library(&self.runtime);
-        let dock =
-            workspace_dock_layout(&*user_library, ui, render_width, render_height, cell_width);
+        let docks = shell_docks_layout(&*user_library, ui, render_width, render_height, cell_width);
         let panes = ui
             .panes()
             .ok_or_else(|| ShellError::Runtime("active workspace view is missing".to_owned()))?;
         let pane_rects = workspace_pane_rects(
             &*user_library,
             ui,
-            dock.content_width,
+            docks.content_width,
             pane_height,
             panes.len(),
         );
@@ -15695,7 +15767,7 @@ impl ShellState {
         if let Some(popup) = runtime_popup.as_ref() {
             visible_buffers.push((
                 popup.active_buffer,
-                dock.content_width,
+                docks.content_width,
                 popup_height.max(1),
                 ui.popup_focus_active(popup),
             ));
@@ -16350,6 +16422,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                             ShellError::Runtime(error),
                         );
                     }
+                    state.tick_project_discovery_background();
                 }
                 let typing_refresh_budget_active = state.typing_refresh_budget_active(refresh_now);
                 let text_texture_cache_mode = if secondary_refresh_deferred {
@@ -18043,6 +18116,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_WORKSPACE_DOCK_NEXT,
         "Moves to the next workspace in the dock list.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_DOCK_TOGGLE,
+        "Shows or hides the ACP dock for the active workspace.",
+    )?;
     register_hook(runtime, HOOK_POPUP_NEXT, "Cycles to the next popup buffer.")?;
     register_hook(
         runtime,
@@ -19444,6 +19522,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.workspace-dock-next",
             |_, runtime| {
                 cycle_workspace_dock(runtime, true)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_ACP_DOCK_TOGGLE,
+            "shell.acp-dock-toggle",
+            |_, runtime| {
+                toggle_acp_dock(runtime)?;
                 Ok(())
             },
         )
@@ -25855,6 +25943,10 @@ fn runtime_db_candidates_for_buffer(
 enum HoverProviderFragment {
     PlainLines(Vec<String>),
     MarkdownText(String),
+    SignatureHelpMarkdown {
+        text: String,
+        active_parameter: Option<editor_lsp::LspSignatureActiveParameter>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25915,9 +26007,9 @@ fn hover_overlay_draft_for_buffer(
                 HoverProviderKind::Lsp => {
                     hover_lsp_provider_fragments(buffer, lsp_client, lsp_context)
                 }
-                HoverProviderKind::SignatureHelp => vec![HoverProviderFragment::PlainLines(
-                    hover_signature_provider_lines(buffer, lsp_client, lsp_context),
-                )],
+                HoverProviderKind::SignatureHelp => {
+                    hover_signature_provider_fragments(buffer, lsp_client, lsp_context)
+                }
                 HoverProviderKind::Diagnostics => {
                     hover_diagnostic_provider_fragments(buffer, user_library)
                 }
@@ -26039,6 +26131,7 @@ fn hover_provider_fragments_empty(fragments: &[HoverProviderFragment]) -> bool {
     fragments.iter().all(|fragment| match fragment {
         HoverProviderFragment::PlainLines(lines) => lines.is_empty(),
         HoverProviderFragment::MarkdownText(text) => text.trim().is_empty(),
+        HoverProviderFragment::SignatureHelpMarkdown { text, .. } => text.trim().is_empty(),
     })
 }
 
@@ -26072,6 +26165,16 @@ fn finalize_hover_provider_content(
             HoverProviderFragment::PlainLines(lines) => plain_hover_rendered_content(lines),
             HoverProviderFragment::MarkdownText(text) => {
                 render_markdown_hover_content(runtime, &text)
+            }
+            HoverProviderFragment::SignatureHelpMarkdown {
+                text,
+                active_parameter,
+            } => {
+                let mut rendered = render_markdown_hover_content(runtime, &text);
+                if let Some(active_parameter) = active_parameter {
+                    apply_signature_active_parameter_emphasis(&mut rendered, &active_parameter);
+                }
+                rendered
             }
         };
         append_hover_rendered_content(&mut content, rendered);
@@ -26221,6 +26324,97 @@ fn apply_markdown_code_fence_syntax(
                 .insert(block.code_start_line + line_index, spans);
         }
     }
+}
+
+pub(super) const HOVER_SIGNATURE_ACTIVE_PARAMETER_TOKEN: &str =
+    "ui.hover.signature.active_parameter";
+
+fn apply_signature_active_parameter_emphasis(
+    rendered: &mut HoverRenderedContent,
+    emphasis: &editor_lsp::LspSignatureActiveParameter,
+) {
+    if emphasis.start >= emphasis.end {
+        return;
+    }
+    let blocks = markdown_code_fence_blocks(&rendered.lines);
+    let Some(block) = blocks.get(emphasis.signature_index) else {
+        return;
+    };
+    let (start_line, start_col) = char_offset_to_line_col(&emphasis.label, emphasis.start);
+    let (end_line, end_col) = char_offset_to_line_col(&emphasis.label, emphasis.end);
+    if start_line == end_line {
+        insert_signature_active_parameter_span(
+            rendered,
+            block.code_start_line + start_line,
+            start_col,
+            end_col,
+        );
+        return;
+    }
+    let first_line = block.code_start_line + start_line;
+    let first_line_len = rendered
+        .lines
+        .get(first_line)
+        .map(|line| line.chars().count())
+        .unwrap_or(0);
+    insert_signature_active_parameter_span(rendered, first_line, start_col, first_line_len);
+    for line in (start_line + 1)..end_line {
+        let rendered_line = block.code_start_line + line;
+        let line_len = rendered
+            .lines
+            .get(rendered_line)
+            .map(|line| line.chars().count())
+            .unwrap_or(0);
+        if line_len > 0 {
+            insert_signature_active_parameter_span(rendered, rendered_line, 0, line_len);
+        }
+    }
+    if end_col > 0 {
+        insert_signature_active_parameter_span(
+            rendered,
+            block.code_start_line + end_line,
+            0,
+            end_col,
+        );
+    }
+}
+
+fn char_offset_to_line_col(text: &str, char_offset: usize) -> (usize, usize) {
+    let mut line = 0usize;
+    let mut col = 0usize;
+    for (index, character) in text.chars().enumerate() {
+        if index >= char_offset {
+            break;
+        }
+        if character == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+fn insert_signature_active_parameter_span(
+    rendered: &mut HoverRenderedContent,
+    line_index: usize,
+    start_col: usize,
+    end_col: usize,
+) {
+    if start_col >= end_col {
+        return;
+    }
+    rendered
+        .syntax_lines
+        .entry(line_index)
+        .or_default()
+        .push(LineSyntaxSpan {
+            start: start_col,
+            end: end_col,
+            capture_name: Arc::from("signature.active_parameter"),
+            theme_token: Arc::from(HOVER_SIGNATURE_ACTIVE_PARAMETER_TOKEN),
+        });
 }
 
 fn resolve_markdown_code_fence_language_id(
@@ -26375,30 +26569,37 @@ fn hover_lsp_provider_fragments(
     fragments
 }
 
-fn hover_signature_provider_lines(
+fn hover_signature_provider_fragments(
     buffer: &ShellBuffer,
     lsp_client: Option<&Arc<LspClientManager>>,
     lsp_context: Option<&ActiveLspBufferContext>,
-) -> Vec<String> {
+) -> Vec<HoverProviderFragment> {
     let signatures = synced_hover_lsp_request_at_point(
         lsp_client,
         lsp_context,
         hover_signature_request_point(buffer),
         LspClientManager::signature_help,
     );
+    let language = buffer.language_id();
     let show_server_labels = signatures.len() > 1;
-    let mut lines = Vec::new();
+    let mut fragments = Vec::new();
     for signature in signatures {
         if show_server_labels {
-            lines.push(format!(
+            fragments.push(HoverProviderFragment::PlainLines(vec![format!(
                 "{} {}",
                 editor_icons::symbols::md::MD_SIGNATURE,
                 signature.server_id()
-            ));
+            )]));
         }
-        lines.extend(signature.lines().iter().cloned());
+        let text = signature.markdown_text(language);
+        if !text.trim().is_empty() {
+            fragments.push(HoverProviderFragment::SignatureHelpMarkdown {
+                text,
+                active_parameter: signature.active_parameter_range(),
+            });
+        }
     }
-    lines
+    fragments
 }
 
 fn synced_hover_lsp_request<T>(
@@ -35701,6 +35902,11 @@ fn toggle_workspace_dock(runtime: &mut EditorRuntime) -> Result<(), String> {
     Ok(())
 }
 
+fn toggle_acp_dock(runtime: &mut EditorRuntime) -> Result<(), String> {
+    shell_ui_mut(runtime)?.toggle_acp_dock_open();
+    Ok(())
+}
+
 fn workspace_dock_enter_direction(side: WorkspaceDockSide) -> WindowMoveDirection {
     match side {
         WorkspaceDockSide::Left => WindowMoveDirection::Left,
@@ -35777,6 +35983,77 @@ fn collect_workspace_dock_entries(
         });
     }
     Ok(entries)
+}
+
+fn collect_acp_dock_entries(runtime: &EditorRuntime) -> Result<Vec<AcpDockEntry>, String> {
+    let ui = shell_ui(runtime)?;
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let workspace = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?;
+    let active_buffer = ui.active_buffer_id();
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<acp::AcpManager>>>()
+        .cloned();
+    let manager = match manager.as_ref() {
+        Some(manager) => Some(
+            manager
+                .lock()
+                .map_err(|_| "acp manager lock was poisoned".to_owned())?,
+        ),
+        None => None,
+    };
+    let mut entries = Vec::new();
+    for buffer in workspace.buffers() {
+        let BufferKind::Plugin(plugin_kind) = buffer.kind() else {
+            continue;
+        };
+        if plugin_kind != ACP_BUFFER_KIND {
+            continue;
+        }
+        let shell = ui.buffer(buffer.id());
+        let session = shell
+            .and_then(|buffer| buffer.acp_state.as_ref())
+            .and_then(|state| state.session_title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "New session".to_owned());
+        let client = manager
+            .as_ref()
+            .and_then(|manager| manager.client_id_for_buffer(buffer.id()))
+            .and_then(|client_id| {
+                shell_user_library(runtime)
+                    .acp_client_by_id(&client_id)
+                    .map(|client| client.label)
+                    .or(Some(client_id))
+            })
+            .unwrap_or_else(|| "ACP".to_owned());
+        let name = acp_dock_buffer_label(buffer.name());
+        entries.push(AcpDockEntry {
+            buffer_id: buffer.id(),
+            name,
+            session,
+            client,
+            active: active_buffer == Some(buffer.id()),
+        });
+    }
+    Ok(entries)
+}
+
+fn acp_dock_buffer_label(name: &str) -> String {
+    let trimmed = name
+        .strip_prefix("*acp ")
+        .and_then(|rest| rest.strip_suffix('*'))
+        .unwrap_or(name);
+    if trimmed.is_empty() {
+        "ACP".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn workspace_dock_project_roots(runtime: &EditorRuntime) -> Result<Vec<PathBuf>, String> {
@@ -36787,6 +37064,25 @@ fn queue_buffer_syntax_refresh(
     };
     buffer.force_syntax_refresh();
     Ok(())
+}
+
+fn project_search_roots_from_user_library(
+    user_library: &dyn UserLibrary,
+) -> Vec<ProjectSearchRoot> {
+    user_library
+        .workspace_roots()
+        .into_iter()
+        .map(|root| ProjectSearchRoot::new(root.path, root.max_depth))
+        .filter(|root| root.root().exists())
+        .collect()
+}
+
+fn warm_project_discovery(user_library: &dyn UserLibrary) {
+    let roots = project_search_roots_from_user_library(user_library);
+    if roots.is_empty() {
+        return;
+    }
+    let _ = project_discovery_snapshot(&roots);
 }
 
 fn install_optional_runtime_services(
