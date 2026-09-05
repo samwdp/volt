@@ -24,6 +24,7 @@
 - `crates/editor-core` - shared runtime and editor domain concepts
 - `crates/editor-buffer` - text storage and editing engine
 - `crates/editor-render` - rendering abstractions and viewport drawing
+- `crates/editor-ui` - shared chrome widgets used by the SDL shell
 - `crates/editor-sdl` - SDL3 platform and windowing integration
 - `crates/editor-theme` - theme token registry and palette resolution
 - `crates/editor-syntax` - tree-sitter orchestration

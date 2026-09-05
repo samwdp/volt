@@ -85,6 +85,9 @@ path = "../editor-theme"
 [dependencies.editor-tool-install]
 path = "../editor-tool-install"
 
+[dependencies.editor-ui]
+path = "../editor-ui"
+
 [dependencies.image]
 version = "0.25.1"
 features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"]

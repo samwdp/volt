@@ -306,6 +306,20 @@
                         </div>
 
                         <div class="cl-section">
+                            <p class="cl-section-label">Internals</p>
+                            <ul>
+                                <li>
+                                    <strong>Editor crates are easier to navigate.</strong>
+                                    Tests live in sibling files instead of inline in production
+                                    sources, oversized modules are split into smaller files, and a
+                                    new <code>editor-ui</code> crate holds the shell chrome widgets
+                                    already used for overlays, panels, and selection highlights.
+                                    Rendering output is unchanged.
+                                </li>
+                            </ul>
+                        </div>
+
+                        <div class="cl-section">
                             <p class="cl-section-label">Performance</p>
                             <ul>
                                 <li>

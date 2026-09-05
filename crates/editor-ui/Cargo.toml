@@ -1,0 +1,26 @@
+[package]
+name = "editor-ui"
+
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[dependencies.editor-render]
+path = "../editor-render"
+
+[lib]
+path = "src/lib.rs"
+name = "editor_ui"
+required-features = []
+crate-type = ["lib"]
+
+[lints]
+workspace = true
