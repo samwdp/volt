@@ -109,6 +109,12 @@ pub enum DrawCommand {
         radius: u32,
         color: RenderColor,
     },
+    /// Fills a rectangle with only the top corners rounded (square bottom edge).
+    FillTopRoundedRect {
+        rect: PixelRect,
+        radius: u32,
+        color: RenderColor,
+    },
     /// Draws a diagnostic undercurl at the given text baseline.
     Undercurl {
         x: i32,

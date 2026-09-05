@@ -900,18 +900,7 @@ pub(super) fn render_browser_buffer_body(
     else {
         return Ok(());
     };
-    let panel_background = theme_color(
-        theme_registry,
-        "ui.panel.background",
-        adjust_color(
-            base_background,
-            if is_dark_color(base_background) {
-                8
-            } else {
-                -8
-            },
-        ),
-    );
+    let panel_background = buffer_section_panel_background(base_background);
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     let corner_radius = shared_corner_radius(theme_registry);
     fill_window_surface_rounded_rect(

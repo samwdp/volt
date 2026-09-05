@@ -232,12 +232,21 @@ pub(super) fn render_shell_state(
         } else {
             pane_inactive_background
         };
-        fill_window_surface_rect(
-            target,
-            PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
-            background,
-            window_effects,
-        )?;
+        // CONTEXT: ACP and plugin-section buffers paint their own translucent
+        // panel chrome. Filling the pane first would stack another opacity
+        // layer and make those sections look darker/more opaque than the
+        // editor. Leave gaps at the cleared window surface so acrylic shows.
+        let paints_own_panels = state
+            .buffer(pane.buffer_id)
+            .is_some_and(|buffer| buffer.is_acp_buffer() || buffer.has_plugin_sections());
+        if !paints_own_panels {
+            fill_window_surface_rect(
+                target,
+                PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+                background,
+                window_effects,
+            )?;
+        }
 
         if let Some(buffer) = state.buffer(pane.buffer_id) {
             let input_mode = state.input_mode_for_buffer(buffer.id(), active);
@@ -655,24 +664,92 @@ fn fill_overlay_top_header_band(
     color: Color,
     window_effects: WindowEffects,
 ) -> Result<(), ShellError> {
+    // CONTEXT: top-only rounded fill with no self-overlap. The old "rounded rect
+    // then square overpaint" stacked alpha on the lower header and left the
+    // rounded cap looking broken once window.opacity < 1.
     let radius = radius
         .min(header_rect.width() / 2)
-        .min(header_rect.height() / 2);
-    fill_overlay_surface_rounded_rect(target, header_rect, radius, color, window_effects)?;
-    if header_rect.height() > radius {
-        fill_overlay_surface_rect(
+        .min(header_rect.height());
+    fill_overlay_surface_top_rounded_rect(target, header_rect, radius, color, window_effects)
+}
+
+fn fill_window_top_header_band(
+    target: &mut DrawTarget<'_>,
+    header_rect: Rect,
+    radius: u32,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    // CONTEXT: top-only rounded fill with no self-overlap. The old "rounded rect
+    // then square overpaint" stacked alpha on the lower header and left the
+    // rounded cap looking broken once window.opacity < 1.
+    let radius = radius
+        .min(header_rect.width() / 2)
+        .min(header_rect.height());
+    fill_window_surface_top_rounded_rect(target, header_rect, radius, color, window_effects)
+}
+
+/// Panel frame for ACP/plugin/input sections. When `window.opacity` < 1, paint a
+/// single rounded fill so every section shares one opacity layer (no border+inner
+/// stack). Opaque windows keep the 1px border ring.
+fn fill_window_panel_frame(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    border: Color,
+    background: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    let opacity = crate::window_effects::window_surface_opacity(window_effects);
+    if opacity < 1.0 {
+        fill_window_surface_rounded_rect(target, rect, radius, background, window_effects)
+    } else {
+        fill_window_surface_rounded_rect(target, rect, radius, border, window_effects)?;
+        let inner_rect = PixelRectToRect::rect(
+            rect.x() + 1,
+            rect.y() + 1,
+            rect.width().saturating_sub(2),
+            rect.height().saturating_sub(2),
+        );
+        fill_window_surface_rounded_rect(
             target,
-            PixelRectToRect::rect(
-                header_rect.x(),
-                header_rect.y() + radius as i32,
-                header_rect.width(),
-                header_rect.height().saturating_sub(radius),
-            ),
-            color,
+            inner_rect,
+            radius.saturating_sub(1),
+            background,
             window_effects,
-        )?;
+        )
     }
-    Ok(())
+}
+
+/// Darken (or lighten on light themes) from the editor base so ACP/plugin section
+/// bodies stay distinct once `window.opacity` scales their alpha.
+pub(super) fn buffer_section_panel_background(base_background: Color) -> Color {
+    adjust_color(
+        base_background,
+        if is_dark_color(base_background) {
+            -10
+        } else {
+            10
+        },
+    )
+}
+
+pub(super) fn buffer_section_header_background(
+    theme_registry: Option<&ThemeRegistry>,
+    panel_background: Color,
+) -> Color {
+    theme_color(
+        theme_registry,
+        "ui.panel.header.background",
+        adjust_color(
+            panel_background,
+            if is_dark_color(panel_background) {
+                12
+            } else {
+                -12
+            },
+        ),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4218,30 +4295,8 @@ pub(super) fn render_plugin_section_buffer_body(
     else {
         return Ok(());
     };
-    let panel_background = theme_color(
-        theme_registry,
-        "ui.panel.background",
-        adjust_color(
-            base_background,
-            if is_dark_color(base_background) {
-                8
-            } else {
-                -8
-            },
-        ),
-    );
-    let header_background = theme_color(
-        theme_registry,
-        "ui.panel.header.background",
-        adjust_color(
-            panel_background,
-            if is_dark_color(panel_background) {
-                12
-            } else {
-                -12
-            },
-        ),
-    );
+    let panel_background = buffer_section_panel_background(base_background);
+    let header_background = buffer_section_header_background(theme_registry, panel_background);
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     for (index, pane_layout) in section_layout.panes.iter().copied().enumerate() {
         let pane_active = active && state.active_section == index;
@@ -4364,18 +4419,11 @@ pub(super) fn render_text_panel(
     } else {
         border_color
     };
-    fill_overlay_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
-    let inner_rect = PixelRectToRect::rect(
-        rect.x() + 1,
-        rect.y() + 1,
-        rect.width().saturating_sub(2),
-        rect.height().saturating_sub(2),
-    );
-    let inner_radius = corner_radius.saturating_sub(1);
-    fill_overlay_surface_rounded_rect(
+    fill_window_panel_frame(
         target,
-        inner_rect,
-        inner_radius,
+        rect,
+        corner_radius,
+        border,
         panel_background,
         window_effects,
     )?;
@@ -4387,12 +4435,12 @@ pub(super) fn render_text_panel(
             rect.width().saturating_sub(2),
             header_height as u32,
         );
-        let header_color = header_background;
-        fill_overlay_top_header_band(
+        let inner_radius = corner_radius.saturating_sub(1);
+        fill_window_top_header_band(
             target,
             header_rect,
             inner_radius,
-            header_color,
+            header_background,
             window_effects,
         )?;
         draw_text(target, rect.x() + 10, rect.y() + 6, title, foreground)?;
@@ -4550,18 +4598,11 @@ pub(super) fn render_input_panel(
     } else {
         border_color
     };
-    fill_overlay_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
-    let inner_rect = PixelRectToRect::rect(
-        rect.x() + 1,
-        rect.y() + 1,
-        rect.width().saturating_sub(2),
-        rect.height().saturating_sub(2),
-    );
-    let inner_radius = corner_radius.saturating_sub(1);
-    fill_overlay_surface_rounded_rect(
+    fill_window_panel_frame(
         target,
-        inner_rect,
-        inner_radius,
+        rect,
+        corner_radius,
+        border,
         panel_background,
         window_effects,
     )?;
@@ -4800,30 +4841,8 @@ pub(super) fn render_acp_buffer_body(
     let Some(acp_layout) = acp_buffer_layout(buffer, rect, layout, cell_width, line_height) else {
         return Ok(());
     };
-    let panel_background = theme_color(
-        theme_registry,
-        "ui.panel.background",
-        adjust_color(
-            base_background,
-            if is_dark_color(base_background) {
-                8
-            } else {
-                -8
-            },
-        ),
-    );
-    let header_background = theme_color(
-        theme_registry,
-        "ui.panel.header.background",
-        adjust_color(
-            panel_background,
-            if is_dark_color(panel_background) {
-                12
-            } else {
-                -12
-            },
-        ),
-    );
+    let panel_background = buffer_section_panel_background(base_background);
+    let header_background = buffer_section_header_background(theme_registry, panel_background);
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     let active_pane = state.active_pane;
     let corner_radius = shared_corner_radius(theme_registry);
@@ -5017,18 +5036,11 @@ pub(super) fn render_acp_pane(
     } else {
         border_color
     };
-    fill_overlay_surface_rounded_rect(target, rect, corner_radius, border, window_effects)?;
-    let inner_rect = PixelRectToRect::rect(
-        rect.x() + 1,
-        rect.y() + 1,
-        rect.width().saturating_sub(2),
-        rect.height().saturating_sub(2),
-    );
-    let inner_radius = corner_radius.saturating_sub(1);
-    fill_overlay_surface_rounded_rect(
+    fill_window_panel_frame(
         target,
-        inner_rect,
-        inner_radius,
+        rect,
+        corner_radius,
+        border,
         panel_background,
         window_effects,
     )?;
@@ -5039,16 +5051,14 @@ pub(super) fn render_acp_pane(
         rect.width().saturating_sub(2),
         header_height as u32,
     );
-    let header_color = if pane_active {
-        blend_color(selection, header_background, 0.45)
-    } else {
-        header_background
-    };
-    fill_overlay_top_header_band(
+    // CONTEXT: keep ACP headers neutral like plugin sections. Blending selection
+    // into the active header produced a washed-out top bar once opacity scaled
+    // the alpha, and made the focused section look uniquely translucent.
+    fill_window_top_header_band(
         target,
         header_rect,
-        inner_radius,
-        header_color,
+        corner_radius.saturating_sub(1),
+        header_background,
         window_effects,
     )?;
     draw_text(target, rect.x() + 12, rect.y() + 6, title, foreground)?;
@@ -6661,6 +6671,16 @@ pub(super) fn present_scene_to_canvas<'texture>(
                 *radius,
                 from_render_color(*color),
             )?,
+            DrawCommand::FillTopRoundedRect {
+                rect,
+                radius,
+                color,
+            } => fill_top_rounded_rect_canvas(
+                canvas,
+                PixelRectToRect::from_pixel_rect(*rect),
+                *radius,
+                from_render_color(*color),
+            )?,
             DrawCommand::Undercurl {
                 x,
                 y,
@@ -8015,22 +8035,6 @@ fn paint_buffer_scrollbar(
     )
 }
 
-pub(super) fn fill_rounded_rect(
-    target: &mut DrawTarget<'_>,
-    rect: Rect,
-    radius: u32,
-    color: Color,
-) -> Result<(), ShellError> {
-    match target {
-        DrawTarget::Scene(scene) => scene.push(DrawCommand::FillRoundedRect {
-            rect: to_pixel_rect(rect),
-            radius,
-            color: to_render_color(color),
-        }),
-    }
-    Ok(())
-}
-
 pub(super) fn fill_window_surface_rounded_rect(
     target: &mut DrawTarget<'_>,
     rect: Rect,
@@ -8039,6 +8043,21 @@ pub(super) fn fill_window_surface_rounded_rect(
     window_effects: WindowEffects,
 ) -> Result<(), ShellError> {
     fill_rounded_rect(
+        target,
+        rect,
+        radius,
+        window_surface_color(color, window_effects),
+    )
+}
+
+pub(super) fn fill_window_surface_top_rounded_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_top_rounded_rect(
         target,
         rect,
         radius,
@@ -8059,6 +8078,53 @@ pub(super) fn fill_overlay_surface_rounded_rect(
         radius,
         overlay_window_surface_color(color, window_effects),
     )
+}
+
+pub(super) fn fill_overlay_surface_top_rounded_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+    window_effects: WindowEffects,
+) -> Result<(), ShellError> {
+    fill_top_rounded_rect(
+        target,
+        rect,
+        radius,
+        overlay_window_surface_color(color, window_effects),
+    )
+}
+
+pub(super) fn fill_rounded_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+) -> Result<(), ShellError> {
+    match target {
+        DrawTarget::Scene(scene) => scene.push(DrawCommand::FillRoundedRect {
+            rect: to_pixel_rect(rect),
+            radius,
+            color: to_render_color(color),
+        }),
+    }
+    Ok(())
+}
+
+pub(super) fn fill_top_rounded_rect(
+    target: &mut DrawTarget<'_>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+) -> Result<(), ShellError> {
+    match target {
+        DrawTarget::Scene(scene) => scene.push(DrawCommand::FillTopRoundedRect {
+            rect: to_pixel_rect(rect),
+            radius,
+            color: to_render_color(color),
+        }),
+    }
+    Ok(())
 }
 
 pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(
@@ -8137,6 +8203,66 @@ pub(super) fn fill_rounded_rect_canvas<T: RenderTarget>(
             radius,
             color,
             RoundedCorner::BottomRight,
+        )?;
+        Ok(())
+    })();
+
+    canvas.set_blend_mode(previous_blend_mode);
+    result
+}
+
+pub(super) fn fill_top_rounded_rect_canvas<T: RenderTarget>(
+    canvas: &mut Canvas<T>,
+    rect: Rect,
+    radius: u32,
+    color: Color,
+) -> Result<(), ShellError> {
+    // Only the top edge is rounded; clamp radius by full height so short header
+    // bands can still use the panel corner radius.
+    let radius = radius.min(rect.width() / 2).min(rect.height()) as i32;
+    if radius <= 0 {
+        canvas.set_draw_color(color);
+        return canvas
+            .fill_rect(rect)
+            .map_err(|error| ShellError::Sdl(error.to_string()));
+    }
+
+    let previous_blend_mode = canvas.blend_mode();
+    canvas.set_blend_mode(sdl3::render::BlendMode::Blend);
+    let rect_height = rect.height() as i32;
+    let rect_width = rect.width() as i32;
+    let x0 = rect.x();
+    let y0 = rect.y();
+
+    let result = (|| {
+        if rect_height > radius {
+            canvas.set_draw_color(color);
+            canvas
+                .fill_rect(Rect::new(
+                    x0,
+                    y0 + radius,
+                    rect_width as u32,
+                    (rect_height - radius) as u32,
+                ))
+                .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        }
+
+        let mid_width = rect_width - radius * 2;
+        if mid_width > 0 {
+            canvas.set_draw_color(color);
+            canvas
+                .fill_rect(Rect::new(x0 + radius, y0, mid_width as u32, radius as u32))
+                .map_err(|error| ShellError::Sdl(error.to_string()))?;
+        }
+
+        fill_rounded_corner_canvas(canvas, x0, y0, radius, color, RoundedCorner::TopLeft)?;
+        fill_rounded_corner_canvas(
+            canvas,
+            x0 + rect_width - radius,
+            y0,
+            radius,
+            color,
+            RoundedCorner::TopRight,
         )?;
         Ok(())
     })();

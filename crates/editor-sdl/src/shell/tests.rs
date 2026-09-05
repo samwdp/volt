@@ -11093,16 +11093,8 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
         header_height,
     );
     let base_background = Color::RGB(15, 16, 20);
-    let panel_background = theme_color(
-        None,
-        "ui.panel.background",
-        adjust_color(base_background, 8),
-    );
-    let header_background = theme_color(
-        None,
-        "ui.panel.header.background",
-        adjust_color(panel_background, 12),
-    );
+    let panel_background = buffer_section_panel_background(base_background);
+    let header_background = buffer_section_header_background(None, panel_background);
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
     render_plugin_section_buffer_body(
@@ -11136,7 +11128,7 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRoundedRect { rect, color, .. }
+        DrawCommand::FillTopRoundedRect { rect, color, .. }
             if rect.x == header_rect.x()
                 && rect.y == header_rect.y()
                 && rect.width == header_rect.width()
@@ -11147,7 +11139,8 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
 }
 
 #[test]
-fn render_plugin_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
+fn render_plugin_sections_apply_window_opacity_to_panel_chrome() -> Result<(), String> {
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -11211,22 +11204,23 @@ fn render_plugin_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
                 && rect.y == pane_layout.panes[0].rect.y()
                 && rect.width == pane_layout.panes[0].rect.width()
                 && rect.height == pane_layout.panes[0].rect.height()
-                && color.a == 255
+                && color.a == 128
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRoundedRect { rect, color, .. }
+        DrawCommand::FillTopRoundedRect { rect, color, .. }
             if rect.x == header_rect.x()
                 && rect.y == header_rect.y()
                 && rect.width == header_rect.width()
                 && rect.height == header_rect.height()
-                && color.a == 255
+                && color.a == 128
     )));
     Ok(())
 }
 
 #[test]
-fn render_acp_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
+fn render_acp_sections_apply_window_opacity_to_panel_chrome() -> Result<(), String> {
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -11283,21 +11277,32 @@ fn render_acp_sections_keep_opaque_overlay_chrome() -> Result<(), String> {
                 && rect.y == acp_layout.input.rect.y()
                 && rect.width == acp_layout.input.rect.width()
                 && rect.height == acp_layout.input.rect.height()
-                && color.a == 255
+                && color.a == 128
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
         DrawCommand::FillRoundedRect { rect, color, .. }
-            if rect.x == acp_layout.plan.rect.x() + 1
-                && rect.y == acp_layout.plan.rect.y() + 1
-                && rect.width == acp_layout.plan.rect.width().saturating_sub(2)
-                && color.a == 255
+            if rect.x == acp_layout.plan.rect.x()
+                && rect.y == acp_layout.plan.rect.y()
+                && rect.width == acp_layout.plan.rect.width()
+                && rect.height == acp_layout.plan.rect.height()
+                && color.a == 128
+    )));
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRoundedRect { rect, color, .. }
+            if rect.x == acp_layout.output.rect.x()
+                && rect.y == acp_layout.output.rect.y()
+                && rect.width == acp_layout.output.rect.width()
+                && rect.height == acp_layout.output.rect.height()
+                && color.a == 128
     )));
     Ok(())
 }
 
 #[test]
-fn render_browser_selected_section_border_stays_opaque() -> Result<(), String> {
+fn render_browser_selected_section_applies_window_opacity() -> Result<(), String> {
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -11360,7 +11365,7 @@ fn render_browser_selected_section_border_stays_opaque() -> Result<(), String> {
                 && rect.y == browser_layout.input.rect.y()
                 && rect.width == browser_layout.input.rect.width()
                 && rect.height == browser_layout.input.rect.height()
-                && color.a == 255
+                && color.a == 128
     )));
     Ok(())
 }
@@ -12231,7 +12236,7 @@ fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
         .ok_or_else(|| "missing ACP layout".to_owned())?;
     let header_height = (16 + 10) as u32;
     let inner_radius = shared_corner_radius(None).saturating_sub(1);
-    let header_radius = inner_radius.min(header_height / 2);
+    let header_radius = inner_radius.min(header_height);
     let mut scene = Vec::new();
     let mut target = DrawTarget::Scene(&mut scene);
     render_acp_buffer_body(
@@ -12266,7 +12271,7 @@ fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
     for pane in [acp_layout.plan, acp_layout.output] {
         assert!(scene.iter().any(|command| matches!(
             command,
-            DrawCommand::FillRoundedRect { rect, radius, .. }
+            DrawCommand::FillTopRoundedRect { rect, radius, .. }
                 if rect.x == pane.rect.x() + 1
                     && rect.y == pane.rect.y() + 1
                     && rect.width == pane.rect.width().saturating_sub(2)
