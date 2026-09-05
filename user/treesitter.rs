@@ -1,3 +1,4 @@
+use crate::icon_font::symbols::fa;
 use editor_plugin_api::{
     PickerActionSpec, PickerItemSpec, PickerProviderContext, PluginAction, PluginCommand,
     PluginPackage,
@@ -35,9 +36,15 @@ pub fn picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
         .syntax_languages
         .iter()
         .map(|language| {
+            let icon = if language.is_installed {
+                fa::FA_CHECK
+            } else {
+                fa::FA_PLUS
+            };
+            let label = format!("{icon} {}", language.id);
             let mut item = PickerItemSpec::new(
                 language.id.clone(),
-                language.id.clone(),
+                label,
                 language.detail.clone(),
                 PickerActionSpec::install_tree_sitter_language(language.id.clone()),
             );

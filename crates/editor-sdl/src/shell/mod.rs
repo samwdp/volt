@@ -353,6 +353,8 @@ const HOOK_WORKSPACE_DOCK_TOGGLE: &str = "ui.workspace-dock.toggle";
 const HOOK_WORKSPACE_DOCK_PREVIOUS: &str = "ui.workspace-dock.previous";
 const HOOK_WORKSPACE_DOCK_NEXT: &str = "ui.workspace-dock.next";
 const HOOK_ACP_DOCK_TOGGLE: &str = "ui.acp-dock.toggle";
+const HOOK_ACP_DOCK_PREVIOUS: &str = "ui.acp-dock.previous";
+const HOOK_ACP_DOCK_NEXT: &str = "ui.acp-dock.next";
 const HOOK_ACP_DISCONNECT: &str = "ui.acp.disconnect";
 const HOOK_ACP_PERMISSION_APPROVE: &str = "ui.acp.permission-approve";
 const HOOK_ACP_PERMISSION_DENY: &str = "ui.acp.permission-deny";
@@ -4297,7 +4299,7 @@ fn acp_pane_cursor_visual_row(pane: &AcpPaneState) -> usize {
     for (line_index, rendered_line) in pane.render_lines.iter().enumerate() {
         if line_index == cursor.line {
             let extra = match rendered_line {
-                AcpRenderedLine::Text(line) => segment_index_for_column(
+                AcpRenderedLine::Text(line) => acp_segment_index_for_column(
                     &acp_rendered_text_segments(line, pane.wrap_cols()),
                     cursor.column,
                 ),
@@ -4674,6 +4676,12 @@ fn acp_chat_bubble_cols(wrap_cols: usize) -> usize {
         .min(wrap_cols.max(1))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AcpWrapSegment {
+    start_col: usize,
+    end_col: usize,
+}
+
 fn acp_rendered_text_wrap_cols(line: &AcpRenderedTextLine, wrap_cols: usize) -> usize {
     let available = match line.align {
         AcpChatAlign::Full => wrap_cols,
@@ -4684,16 +4692,91 @@ fn acp_rendered_text_wrap_cols(line: &AcpRenderedTextLine, wrap_cols: usize) -> 
         .max(1)
 }
 
-fn acp_rendered_text_segments(
-    line: &AcpRenderedTextLine,
-    wrap_cols: usize,
-) -> Vec<LineWrapSegment> {
+fn acp_rendered_text_segments(line: &AcpRenderedTextLine, wrap_cols: usize) -> Vec<AcpWrapSegment> {
     let text_wrap_cols = acp_rendered_text_wrap_cols(line, wrap_cols);
-    wrap_line_segments(
-        &LineCharMap::new(&line.text),
-        text_wrap_cols,
-        text_wrap_cols,
-    )
+    acp_wrap_line_segments(&LineCharMap::new(&line.text), text_wrap_cols)
+}
+
+fn acp_wrap_line_segments(map: &LineCharMap, wrap_cols: usize) -> Vec<AcpWrapSegment> {
+    let wrap_cols = wrap_cols.max(1);
+    let len = map.len();
+    if len == 0 {
+        return vec![AcpWrapSegment {
+            start_col: 0,
+            end_col: 0,
+        }];
+    }
+
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    while start < len {
+        let remaining = map.display_cols_between(start, len);
+        if remaining <= wrap_cols {
+            segments.push(AcpWrapSegment {
+                start_col: start,
+                end_col: len,
+            });
+            break;
+        }
+
+        let mut wrap_limit = start;
+        while wrap_limit < len && map.display_cols_between(start, wrap_limit + 1) <= wrap_cols {
+            wrap_limit = wrap_limit.saturating_add(1);
+        }
+        if wrap_limit == start {
+            wrap_limit = (start + 1).min(len);
+        }
+        let content_start = (start..wrap_limit)
+            .find(|&idx| !map.whitespace.get(idx).copied().unwrap_or(false))
+            .unwrap_or(wrap_limit);
+        let end = (content_start..wrap_limit)
+            .rev()
+            .find(|&idx| map.whitespace.get(idx).copied().unwrap_or(false))
+            .map(|idx| idx + 1)
+            .unwrap_or(wrap_limit);
+        let mut end = end;
+        if end == wrap_limit && acp_wrap_window_all_whitespace(map, end, wrap_cols) {
+            let mut rebalance = end;
+            while rebalance > start.saturating_add(1) {
+                rebalance = rebalance.saturating_sub(1);
+                if !acp_wrap_window_all_whitespace(map, rebalance, wrap_cols) {
+                    end = rebalance;
+                    break;
+                }
+            }
+        }
+        segments.push(AcpWrapSegment {
+            start_col: start,
+            end_col: end,
+        });
+        start = end;
+    }
+
+    if segments.is_empty() {
+        segments.push(AcpWrapSegment {
+            start_col: 0,
+            end_col: 0,
+        });
+    }
+
+    segments
+}
+
+fn acp_wrap_window_all_whitespace(map: &LineCharMap, start: usize, wrap_cols: usize) -> bool {
+    let end = start.saturating_add(wrap_cols).min(map.len());
+    start < end && (start..end).all(|idx| map.whitespace.get(idx).copied().unwrap_or(false))
+}
+
+fn acp_segment_index_for_column(segments: &[AcpWrapSegment], column: usize) -> usize {
+    if segments.is_empty() {
+        return 0;
+    }
+    for (index, segment) in segments.iter().enumerate() {
+        if column < segment.end_col || index == segments.len().saturating_sub(1) {
+            return index;
+        }
+    }
+    segments.len().saturating_sub(1)
 }
 
 fn acp_rendered_line_row_count(line: &AcpRenderedLine, wrap_cols: usize) -> usize {
@@ -7944,6 +8027,15 @@ impl ShellBuffer {
         if self.line_count() == 0 {
             return false;
         }
+        if let Some(pane) = self.acp_active_pane_state_mut() {
+            let target_visual = pane
+                .viewport_scroll_top()
+                .saturating_add(offset)
+                .min(acp_pane_total_visual_rows(pane).saturating_sub(1));
+            let before = pane.cursor();
+            pane.set_cursor(acp_pane_point_for_visual_row(pane, target_visual));
+            return pane.cursor() != before;
+        }
         let target_line = self.line_at_viewport_offset(offset);
         self.goto_line(target_line)
     }
@@ -9748,6 +9840,7 @@ pub(crate) struct ShellUiState {
     workspace_dock_focus: bool,
     workspace_dock_branches: WorkspaceDockBranchCache,
     acp_dock_open: bool,
+    acp_dock_focus: bool,
     dismissed_popups: BTreeMap<WorkspaceId, DismissedPopupState>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
@@ -9825,6 +9918,7 @@ impl ShellUiState {
             workspace_dock_focus: false,
             workspace_dock_branches: WorkspaceDockBranchCache::new(),
             acp_dock_open: false,
+            acp_dock_focus: false,
             dismissed_popups: BTreeMap::new(),
             yank_flash: None,
             git_summary: GitSummaryState::new(),
@@ -9920,6 +10014,7 @@ impl ShellUiState {
         }
         if focus {
             self.workspace_dock_focus = false;
+            self.acp_dock_focus = false;
         }
         self.persist_active_buffer_vim_state();
         self.popup_focus = focus;
@@ -9948,6 +10043,7 @@ impl ShellUiState {
         }
         if focus {
             self.popup_focus = false;
+            self.acp_dock_focus = false;
         }
         self.workspace_dock_focus = focus;
     }
@@ -9970,6 +10066,28 @@ impl ShellUiState {
 
     fn toggle_acp_dock_open(&mut self) {
         self.acp_dock_open = !self.acp_dock_open;
+        if !self.acp_dock_open {
+            self.acp_dock_focus = false;
+        }
+    }
+
+    fn acp_dock_focus(&self) -> bool {
+        self.acp_dock_focus
+    }
+
+    fn set_acp_dock_focus(&mut self, focus: bool) {
+        if self.acp_dock_focus == focus {
+            return;
+        }
+        if focus {
+            self.popup_focus = false;
+            self.workspace_dock_focus = false;
+        }
+        self.acp_dock_focus = focus;
+    }
+
+    fn acp_dock_focus_active(&self) -> bool {
+        self.acp_dock_focus() && acp_dock_visible(self)
     }
 
     fn popup_focus_allowed(&self, popup: &RuntimePopupSnapshot) -> bool {
@@ -12195,10 +12313,10 @@ impl ShellState {
                         self.mouse_drag = None;
                         shell_ui_mut(&mut self.runtime)
                             .map_err(ShellError::Runtime)?
-                            .set_workspace_dock_focus(false);
+                            .set_popup_focus(false);
                         shell_ui_mut(&mut self.runtime)
                             .map_err(ShellError::Runtime)?
-                            .set_popup_focus(false);
+                            .set_acp_dock_focus(true);
                         acp::focus_acp_buffer(&mut self.runtime, buffer_id)
                             .map_err(ShellError::Runtime)?;
                         return Ok(false);
@@ -13060,6 +13178,7 @@ impl ShellState {
         let ui = self.ui_mut()?;
         ui.set_popup_focus(false);
         ui.set_workspace_dock_focus(false);
+        ui.set_acp_dock_focus(false);
         ui.focus_pane(pane_id);
         Ok(())
     }
@@ -13816,6 +13935,8 @@ impl ShellState {
             modes.push(KeymapScope::Popup);
         } else if ui.workspace_dock_focus_active(&*shell_user_library(&self.runtime)) {
             modes.push(KeymapScope::WorkspaceDock);
+        } else if ui.acp_dock_focus_active() {
+            modes.push(KeymapScope::AcpDock);
         }
         if ui
             .autocomplete()
@@ -13825,10 +13946,12 @@ impl ShellState {
         } else if ui.hover().is_some() {
             modes.push(KeymapScope::Hover);
         }
-        if !modes
-            .iter()
-            .any(|mode| matches!(mode, KeymapScope::Popup | KeymapScope::WorkspaceDock))
-            && active_workspace_has_debug_session(&self.runtime)
+        if !modes.iter().any(|mode| {
+            matches!(
+                mode,
+                KeymapScope::Popup | KeymapScope::WorkspaceDock | KeymapScope::AcpDock
+            )
+        }) && active_workspace_has_debug_session(&self.runtime)
         {
             modes.push(KeymapScope::Dap);
         }
@@ -18121,6 +18244,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         HOOK_ACP_DOCK_TOGGLE,
         "Shows or hides the ACP dock for the active workspace.",
     )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_DOCK_PREVIOUS,
+        "Moves to the previous ACP buffer in the dock list.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_DOCK_NEXT,
+        "Moves to the next ACP buffer in the dock list.",
+    )?;
     register_hook(runtime, HOOK_POPUP_NEXT, "Cycles to the next popup buffer.")?;
     register_hook(
         runtime,
@@ -19535,6 +19668,22 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 Ok(())
             },
         )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_ACP_DOCK_PREVIOUS,
+            "shell.acp-dock-previous",
+            |_, runtime| {
+                cycle_acp_dock(runtime, false)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_ACP_DOCK_NEXT, "shell.acp-dock-next", |_, runtime| {
+            cycle_acp_dock(runtime, true)?;
+            Ok(())
+        })
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_POPUP_NEXT, "shell.popup-next", |_, runtime| {
@@ -32522,6 +32671,18 @@ fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> 
 }
 
 fn scroll_buffer_with_cursor(buffer: &mut ShellBuffer, delta: i32) {
+    if let Some(pane) = buffer.acp_active_pane_state_mut() {
+        let screen_offset = pane.cursor_viewport_offset();
+        let max_scroll = pane.max_scroll_row() as i32;
+        pane.scroll_visual_row =
+            ((pane.scroll_visual_row as i32) + delta).clamp(0, max_scroll) as usize;
+        let target_visual = pane
+            .scroll_visual_row
+            .saturating_add(screen_offset)
+            .min(acp_pane_total_visual_rows(pane).saturating_sub(1));
+        pane.set_cursor(acp_pane_point_for_visual_row(pane, target_visual));
+        return;
+    }
     let screen_offset = buffer.cursor_viewport_offset();
     buffer.scroll_by(delta);
     let target_line = buffer.line_at_viewport_offset(screen_offset);
@@ -35941,6 +36102,33 @@ fn cycle_workspace_dock(runtime: &mut EditorRuntime, forward: bool) -> Result<()
     switch_runtime_workspace(runtime, entries[next_index].workspace_id)
 }
 
+fn cycle_acp_dock(runtime: &mut EditorRuntime, forward: bool) -> Result<(), String> {
+    let entries = collect_acp_dock_entries(runtime)?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    if entries.len() == 1 {
+        acp::focus_acp_buffer(runtime, entries[0].buffer_id)?;
+        shell_ui_mut(runtime)?.set_acp_dock_focus(true);
+        return Ok(());
+    }
+    let active = shell_ui(runtime)?.active_buffer_id();
+    let current_index = entries
+        .iter()
+        .position(|entry| Some(entry.buffer_id) == active)
+        .unwrap_or(0);
+    let next_index = if forward {
+        (current_index + 1) % entries.len()
+    } else if current_index == 0 {
+        entries.len() - 1
+    } else {
+        current_index - 1
+    };
+    acp::focus_acp_buffer(runtime, entries[next_index].buffer_id)?;
+    shell_ui_mut(runtime)?.set_acp_dock_focus(true);
+    Ok(())
+}
+
 fn collect_workspace_dock_entries(
     runtime: &EditorRuntime,
 ) -> Result<Vec<WorkspaceDockEntry>, String> {
@@ -36909,11 +37097,35 @@ fn move_workspace_window(
     let dock_config = user_library.workspace_dock_config();
     let dock_visible = workspace_dock_visible(&*user_library, shell_ui(runtime)?);
     let dock_focused = shell_ui(runtime)?.workspace_dock_focus_active(&*user_library);
+    let acp_visible = acp_dock_visible(shell_ui(runtime)?);
+    let acp_focused = shell_ui(runtime)?.acp_dock_focus_active();
     if dock_focused {
         if direction == workspace_dock_exit_direction(dock_config.side) {
             shell_ui_mut(runtime)?.set_workspace_dock_focus(false);
+            if dock_config.side == WorkspaceDockSide::Right && acp_visible {
+                shell_ui_mut(runtime)?.set_acp_dock_focus(true);
+            }
             return Ok(());
         }
+        return Ok(());
+    }
+    if acp_focused {
+        if direction == WindowMoveDirection::Left {
+            shell_ui_mut(runtime)?.set_acp_dock_focus(false);
+            return Ok(());
+        }
+        if direction == WindowMoveDirection::Right
+            && dock_visible
+            && dock_config.side == WorkspaceDockSide::Right
+        {
+            shell_ui_mut(runtime)?.set_acp_dock_focus(false);
+            shell_ui_mut(runtime)?.set_workspace_dock_focus(true);
+            return Ok(());
+        }
+        return Ok(());
+    }
+    if acp_visible && direction == WindowMoveDirection::Right {
+        shell_ui_mut(runtime)?.set_acp_dock_focus(true);
         return Ok(());
     }
     if dock_visible && direction == workspace_dock_enter_direction(dock_config.side) {
@@ -37919,6 +38131,7 @@ fn plugin_buffer_binding_scope_active(
         | editor_plugin_api::PluginKeymapScope::Hover
         | editor_plugin_api::PluginKeymapScope::Dap
         | editor_plugin_api::PluginKeymapScope::WorkspaceDock
+        | editor_plugin_api::PluginKeymapScope::AcpDock
         | editor_plugin_api::PluginKeymapScope::Multicursor => false,
     }
 }

@@ -8,11 +8,61 @@ use crate::ShellError;
 
 pub(crate) const OPTION_WINDOW_OPACITY: &str = "window.opacity";
 pub(crate) const OPTION_WINDOW_BLUR: &str = "window.blur";
+pub(crate) const OPTION_WINDOW_TRANSPARENCY: &str = "window.transparency";
 
 const DEFAULT_WINDOW_OPACITY: f32 = 1.0;
 const DEFAULT_WINDOW_BLUR: f32 = 0.0;
 const SDL_VIDEO_DRIVER_X11: &str = "x11";
 const SDL_VIDEO_DRIVER_WAYLAND: &str = "wayland";
+
+/// Windows compositor material selected by `window.transparency` in `global.toml`.
+///
+/// Values (case-insensitive):
+/// - `none` — no compositor backdrop effect
+/// - `blur` — classic Windows blur (Win10+)
+/// - `acrylic` — frosted acrylic (usually more transparent than blur; Win10+)
+/// - `mica` — Windows 11 mica
+/// - `mica-tabbed` / `tabbed` — Windows 11 tabbed mica
+///
+/// When the option is omitted, a positive `window.blur` still enables `blur`
+/// for backward compatibility. On macOS any non-`none` type maps to vibrancy
+/// and `window.blur` is the corner radius. Linux ignores the material type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WindowTransparency {
+    #[default]
+    None = 0,
+    Blur = 1,
+    Acrylic = 2,
+    Mica = 3,
+    MicaTabbed = 4,
+}
+
+impl WindowTransparency {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" | "opaque" => Some(Self::None),
+            "blur" => Some(Self::Blur),
+            "acrylic" => Some(Self::Acrylic),
+            "mica" => Some(Self::Mica),
+            "mica-tabbed" | "tabbed" | "mica_tabbed" => Some(Self::MicaTabbed),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Blur => "blur",
+            Self::Acrylic => "acrylic",
+            Self::Mica => "mica",
+            Self::MicaTabbed => "mica-tabbed",
+        }
+    }
+
+    pub(crate) fn is_enabled(self) -> bool {
+        self != Self::None
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WindowOpacityMode {
@@ -38,6 +88,7 @@ static WINDOW_EFFECTS_TEST_LOCK: Mutex<()> = Mutex::new(());
 pub(crate) struct WindowEffects {
     pub(crate) opacity: f32,
     pub(crate) blur: f32,
+    pub(crate) transparency: WindowTransparency,
 }
 
 impl Default for WindowEffects {
@@ -45,6 +96,7 @@ impl Default for WindowEffects {
         Self {
             opacity: DEFAULT_WINDOW_OPACITY,
             blur: DEFAULT_WINDOW_BLUR,
+            transparency: WindowTransparency::None,
         }
     }
 }
@@ -59,7 +111,12 @@ impl WindowEffects {
             .and_then(|registry| registry.resolve_number(OPTION_WINDOW_BLUR))
             .map(normalize_window_blur)
             .unwrap_or(DEFAULT_WINDOW_BLUR);
-        Self { opacity, blur }
+        let transparency = resolve_window_transparency(theme_registry, blur);
+        Self {
+            opacity,
+            blur,
+            transparency,
+        }
     }
 }
 
@@ -72,8 +129,15 @@ pub(crate) fn window_creation_flags(settings: WindowEffects) -> WindowFlags {
 
 trait NativeWindowEffectsTarget {
     fn set_native_window_opacity(&mut self, opacity: f32) -> Result<(), String>;
-    fn apply_native_window_blur(&mut self, blur: f32) -> Result<(), String>;
-    fn clear_native_window_blur(&mut self) -> Result<(), String>;
+    fn apply_native_window_transparency(
+        &mut self,
+        transparency: WindowTransparency,
+        blur: f32,
+    ) -> Result<(), String>;
+    fn clear_native_window_transparency(
+        &mut self,
+        transparency: WindowTransparency,
+    ) -> Result<(), String>;
 }
 
 impl NativeWindowEffectsTarget for Window {
@@ -81,12 +145,19 @@ impl NativeWindowEffectsTarget for Window {
         self.set_opacity(opacity).map_err(|error| error.to_string())
     }
 
-    fn apply_native_window_blur(&mut self, blur: f32) -> Result<(), String> {
-        platform::apply_blur(self, blur)
+    fn apply_native_window_transparency(
+        &mut self,
+        transparency: WindowTransparency,
+        blur: f32,
+    ) -> Result<(), String> {
+        platform::apply_transparency(self, transparency, blur)
     }
 
-    fn clear_native_window_blur(&mut self) -> Result<(), String> {
-        platform::clear_blur(self)
+    fn clear_native_window_transparency(
+        &mut self,
+        transparency: WindowTransparency,
+    ) -> Result<(), String> {
+        platform::clear_transparency(self, transparency)
     }
 }
 
@@ -157,6 +228,17 @@ pub(crate) fn normalize_window_blur(value: f64) -> f32 {
     value.clamp(0.0, f64::from(f32::MAX)) as f32
 }
 
+fn resolve_window_transparency(
+    theme_registry: Option<&ThemeRegistry>,
+    blur: f32,
+) -> WindowTransparency {
+    match theme_registry.and_then(|registry| registry.resolve_string(OPTION_WINDOW_TRANSPARENCY)) {
+        Some(raw) => WindowTransparency::parse(raw).unwrap_or(WindowTransparency::None),
+        None if blur > DEFAULT_WINDOW_BLUR => WindowTransparency::Blur,
+        None => WindowTransparency::None,
+    }
+}
+
 pub(crate) fn window_surface_opacity(settings: WindowEffects) -> f32 {
     match current_window_opacity_mode() {
         WindowOpacityMode::NativeWindow => DEFAULT_WINDOW_OPACITY,
@@ -165,6 +247,10 @@ pub(crate) fn window_surface_opacity(settings: WindowEffects) -> f32 {
 }
 
 pub(crate) fn overlay_window_surface_opacity(_settings: WindowEffects) -> f32 {
+    // CONTEXT: overlay chrome (pickers, popups, hover, notifications, ACP/plugin
+    // section panels) stays fully opaque so text stays crisp and panels do not
+    // muddy-stack translucent border/body fills. Window opacity still applies to
+    // editor pane/background surfaces via window_surface_opacity.
     DEFAULT_WINDOW_OPACITY
 }
 
@@ -196,7 +282,7 @@ fn apply_window_effects_to_target(
         settings.opacity,
         requested_window_opacity_mode(),
     ));
-    apply_window_blur(window, settings.blur)
+    apply_window_transparency(window, settings.transparency, settings.blur)
 }
 
 fn update_window_effects_to_target(
@@ -211,34 +297,52 @@ fn update_window_effects_to_target(
             requested_window_opacity_mode(),
         ));
     }
-    if next.blur > DEFAULT_WINDOW_BLUR {
-        return apply_window_blur(window, next.blur);
+    if previous.transparency == next.transparency && previous.blur == next.blur {
+        return Ok(());
     }
-    if previous.blur > DEFAULT_WINDOW_BLUR {
-        return clear_window_blur(window);
+    if previous.transparency.is_enabled() && previous.transparency != next.transparency {
+        clear_window_transparency(window, previous.transparency)?;
+    }
+    if next.transparency.is_enabled() {
+        return apply_window_transparency(window, next.transparency, next.blur);
     }
     Ok(())
 }
 
-fn apply_window_blur(
+fn apply_window_transparency(
     window: &mut impl NativeWindowEffectsTarget,
+    transparency: WindowTransparency,
     blur: f32,
 ) -> Result<(), ShellError> {
-    if blur <= DEFAULT_WINDOW_BLUR {
+    if !transparency.is_enabled() {
         return Ok(());
     }
 
-    window.apply_native_window_blur(blur).map_err(|error| {
-        ShellError::Runtime(format!(
-            "failed to apply {OPTION_WINDOW_BLUR}={blur}: {error}"
-        ))
-    })
+    window
+        .apply_native_window_transparency(transparency, blur)
+        .map_err(|error| {
+            ShellError::Runtime(format!(
+                "failed to apply {OPTION_WINDOW_TRANSPARENCY}={}: {error}",
+                transparency.as_str()
+            ))
+        })
 }
 
-fn clear_window_blur(window: &mut impl NativeWindowEffectsTarget) -> Result<(), ShellError> {
-    window.clear_native_window_blur().map_err(|error| {
-        ShellError::Runtime(format!("failed to clear {OPTION_WINDOW_BLUR}: {error}"))
-    })
+fn clear_window_transparency(
+    window: &mut impl NativeWindowEffectsTarget,
+    transparency: WindowTransparency,
+) -> Result<(), ShellError> {
+    if !transparency.is_enabled() {
+        return Ok(());
+    }
+    window
+        .clear_native_window_transparency(transparency)
+        .map_err(|error| {
+            ShellError::Runtime(format!(
+                "failed to clear {OPTION_WINDOW_TRANSPARENCY}={}: {error}",
+                transparency.as_str()
+            ))
+        })
 }
 
 fn current_window_opacity_mode() -> WindowOpacityMode {
@@ -276,28 +380,80 @@ fn window_opacity_mode_for_driver(driver: Option<&str>) -> WindowOpacityMode {
 
 #[cfg(target_os = "windows")]
 mod platform {
+    use super::WindowTransparency;
     use sdl3::video::Window;
 
-    pub(super) fn apply_blur(window: &Window, blur: f32) -> Result<(), String> {
+    pub(super) fn apply_transparency(
+        window: &Window,
+        transparency: WindowTransparency,
+        blur: f32,
+    ) -> Result<(), String> {
         let _ = blur;
-        window_vibrancy::apply_blur(window, None).map_err(|error| {
-            format!("Windows compositor blur is unavailable for this SDL window: {error}")
-        })
+        match transparency {
+            WindowTransparency::None => Ok(()),
+            WindowTransparency::Blur => {
+                window_vibrancy::apply_blur(window, None).map_err(|error| {
+                    format!("Windows compositor blur is unavailable for this SDL window: {error}")
+                })
+            }
+            WindowTransparency::Acrylic => {
+                window_vibrancy::apply_acrylic(window, None).map_err(|error| {
+                    format!("Windows acrylic is unavailable for this SDL window: {error}")
+                })
+            }
+            WindowTransparency::Mica => {
+                window_vibrancy::apply_mica(window, None).map_err(|error| {
+                    format!("Windows mica is unavailable for this SDL window: {error}")
+                })
+            }
+            WindowTransparency::MicaTabbed => {
+                window_vibrancy::apply_tabbed(window, None).map_err(|error| {
+                    format!("Windows tabbed mica is unavailable for this SDL window: {error}")
+                })
+            }
+        }
     }
 
-    pub(super) fn clear_blur(window: &Window) -> Result<(), String> {
-        window_vibrancy::clear_blur(window).map_err(|error| {
-            format!("Windows compositor blur could not be cleared for this SDL window: {error}")
-        })
+    pub(super) fn clear_transparency(
+        window: &Window,
+        transparency: WindowTransparency,
+    ) -> Result<(), String> {
+        match transparency {
+            WindowTransparency::None => Ok(()),
+            WindowTransparency::Blur => window_vibrancy::clear_blur(window).map_err(|error| {
+                format!("Windows compositor blur could not be cleared for this SDL window: {error}")
+            }),
+            WindowTransparency::Acrylic => {
+                window_vibrancy::clear_acrylic(window).map_err(|error| {
+                    format!("Windows acrylic could not be cleared for this SDL window: {error}")
+                })
+            }
+            WindowTransparency::Mica => window_vibrancy::clear_mica(window).map_err(|error| {
+                format!("Windows mica could not be cleared for this SDL window: {error}")
+            }),
+            WindowTransparency::MicaTabbed => {
+                window_vibrancy::clear_tabbed(window).map_err(|error| {
+                    format!("Windows tabbed mica could not be cleared for this SDL window: {error}")
+                })
+            }
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use super::WindowTransparency;
     use sdl3::video::Window;
     use window_vibrancy::{NSVisualEffectMaterial, apply_vibrancy};
 
-    pub(super) fn apply_blur(window: &Window, blur: f32) -> Result<(), String> {
+    pub(super) fn apply_transparency(
+        window: &Window,
+        transparency: WindowTransparency,
+        blur: f32,
+    ) -> Result<(), String> {
+        if !transparency.is_enabled() {
+            return Ok(());
+        }
         apply_vibrancy(
             window,
             NSVisualEffectMaterial::UnderWindowBackground,
@@ -307,7 +463,13 @@ mod platform {
         .map_err(|error| format!("macOS vibrancy is unavailable for this SDL window: {error}"))
     }
 
-    pub(super) fn clear_blur(window: &Window) -> Result<(), String> {
+    pub(super) fn clear_transparency(
+        window: &Window,
+        transparency: WindowTransparency,
+    ) -> Result<(), String> {
+        if !transparency.is_enabled() {
+            return Ok(());
+        }
         window_vibrancy::clear_vibrancy(window)
             .map(|_| ())
             .map_err(|error| {
@@ -318,30 +480,50 @@ mod platform {
 
 #[cfg(target_os = "linux")]
 mod platform {
+    use super::WindowTransparency;
     use sdl3::video::Window;
 
-    pub(super) fn apply_blur(_window: &Window, _blur: f32) -> Result<(), String> {
+    pub(super) fn apply_transparency(
+        _window: &Window,
+        _transparency: WindowTransparency,
+        _blur: f32,
+    ) -> Result<(), String> {
         // Linux compositor blur remains backend-specific; keep this as an
         // intentional no-op so window.opacity can still be applied.
         Ok(())
     }
 
-    pub(super) fn clear_blur(_window: &Window) -> Result<(), String> {
+    pub(super) fn clear_transparency(
+        _window: &Window,
+        _transparency: WindowTransparency,
+    ) -> Result<(), String> {
         Ok(())
     }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 mod platform {
+    use super::WindowTransparency;
     use sdl3::video::Window;
 
-    pub(super) fn apply_blur(_window: &Window, blur: f32) -> Result<(), String> {
+    pub(super) fn apply_transparency(
+        _window: &Window,
+        transparency: WindowTransparency,
+        blur: f32,
+    ) -> Result<(), String> {
+        if !transparency.is_enabled() {
+            return Ok(());
+        }
         Err(format!(
-            "window blur is not implemented for this target platform (requested {blur})"
+            "window transparency `{}` is not implemented for this target platform (blur={blur})",
+            transparency.as_str()
         ))
     }
 
-    pub(super) fn clear_blur(_window: &Window) -> Result<(), String> {
+    pub(super) fn clear_transparency(
+        _window: &Window,
+        _transparency: WindowTransparency,
+    ) -> Result<(), String> {
         Ok(())
     }
 }
@@ -349,8 +531,9 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::{
-        NativeWindowEffectsTarget, OPTION_WINDOW_BLUR, OPTION_WINDOW_OPACITY, WindowEffects,
-        WindowOpacityMode, apply_window_effects_to_target, configure_window_opacity_driver,
+        NativeWindowEffectsTarget, OPTION_WINDOW_BLUR, OPTION_WINDOW_OPACITY,
+        OPTION_WINDOW_TRANSPARENCY, WindowEffects, WindowOpacityMode, WindowTransparency,
+        apply_window_effects_to_target, configure_window_opacity_driver,
         current_window_opacity_mode, lock_window_effects_for_tests, normalize_window_blur,
         normalize_window_opacity, requested_window_opacity_mode, set_window_opacity_mode,
         sync_window_opacity, update_window_effects_to_target, window_creation_flags,
@@ -362,10 +545,10 @@ mod tests {
     #[derive(Default)]
     struct RecordingWindow {
         opacity_calls: Vec<f32>,
-        blur_calls: Vec<f32>,
-        clear_calls: usize,
+        transparency_calls: Vec<(WindowTransparency, f32)>,
+        clear_calls: Vec<WindowTransparency>,
         opacity_error: Option<String>,
-        blur_error: Option<String>,
+        transparency_error: Option<String>,
         clear_error: Option<String>,
     }
 
@@ -378,16 +561,23 @@ mod tests {
             }
         }
 
-        fn apply_native_window_blur(&mut self, blur: f32) -> Result<(), String> {
-            self.blur_calls.push(blur);
-            match &self.blur_error {
+        fn apply_native_window_transparency(
+            &mut self,
+            transparency: WindowTransparency,
+            blur: f32,
+        ) -> Result<(), String> {
+            self.transparency_calls.push((transparency, blur));
+            match &self.transparency_error {
                 Some(error) => Err(error.clone()),
                 None => Ok(()),
             }
         }
 
-        fn clear_native_window_blur(&mut self) -> Result<(), String> {
-            self.clear_calls += 1;
+        fn clear_native_window_transparency(
+            &mut self,
+            transparency: WindowTransparency,
+        ) -> Result<(), String> {
+            self.clear_calls.push(transparency);
             match &self.clear_error {
                 Some(error) => Err(error.clone()),
                 None => Ok(()),
@@ -429,8 +619,63 @@ mod tests {
             WindowEffects {
                 opacity: 1.0,
                 blur: 0.0,
+                transparency: WindowTransparency::None,
             }
         );
+    }
+
+    #[test]
+    fn window_effects_resolve_transparency_type_from_theme_string() {
+        let _guard = lock_window_effects_for_tests();
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
+        let mut registry = ThemeRegistry::new();
+        must(
+            registry.register(
+                Theme::new("test-theme", "Test Theme")
+                    .with_option(OPTION_WINDOW_OPACITY, 0.4)
+                    .with_option(OPTION_WINDOW_BLUR, 0.0)
+                    .with_option(OPTION_WINDOW_TRANSPARENCY, "acrylic"),
+            ),
+        );
+
+        assert_eq!(
+            WindowEffects::resolve(Some(&registry)),
+            WindowEffects {
+                opacity: 0.4,
+                blur: 0.0,
+                transparency: WindowTransparency::Acrylic,
+            }
+        );
+    }
+
+    #[test]
+    fn window_effects_legacy_blur_option_implies_blur_transparency() {
+        let _guard = lock_window_effects_for_tests();
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
+        let mut registry = ThemeRegistry::new();
+        must(registry.register(
+            Theme::new("test-theme", "Test Theme").with_option(OPTION_WINDOW_BLUR, 12.0),
+        ));
+
+        assert_eq!(
+            WindowEffects::resolve(Some(&registry)).transparency,
+            WindowTransparency::Blur
+        );
+    }
+
+    #[test]
+    fn window_transparency_parse_accepts_aliases() {
+        assert_eq!(
+            WindowTransparency::parse("Mica-Tabbed"),
+            Some(WindowTransparency::MicaTabbed)
+        );
+        assert_eq!(
+            WindowTransparency::parse("tabbed"),
+            Some(WindowTransparency::MicaTabbed)
+        );
+        assert_eq!(WindowTransparency::parse("nope"), None);
     }
 
     #[test]
@@ -453,6 +698,7 @@ mod tests {
             window_creation_flags(WindowEffects {
                 opacity: 0.75,
                 blur: 0.0,
+                transparency: WindowTransparency::None,
             })
             .contains(WindowFlags::TRANSPARENT)
         );
@@ -460,10 +706,31 @@ mod tests {
             window_creation_flags(WindowEffects {
                 opacity: 1.0,
                 blur: 12.0,
+                transparency: WindowTransparency::Blur,
             })
             .contains(WindowFlags::TRANSPARENT)
         );
         assert!(window_creation_flags(WindowEffects::default()).contains(WindowFlags::TRANSPARENT));
+    }
+
+    #[test]
+    fn overlay_window_surface_opacity_stays_opaque_when_window_is_transparent() {
+        let _guard = lock_window_effects_for_tests();
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
+        let settings = WindowEffects {
+            opacity: 0.25,
+            blur: 0.0,
+            transparency: WindowTransparency::Acrylic,
+        };
+        assert_eq!(
+            crate::window_effects::overlay_window_surface_opacity(settings),
+            1.0
+        );
+        assert_eq!(
+            crate::window_effects::window_surface_opacity(settings),
+            0.25
+        );
     }
 
     #[test]
@@ -478,16 +745,17 @@ mod tests {
             WindowEffects {
                 opacity: 0.5,
                 blur: 0.0,
+                transparency: WindowTransparency::None,
             },
         ));
 
         assert!(window.opacity_calls.is_empty());
-        assert!(window.blur_calls.is_empty());
-        assert_eq!(window.clear_calls, 0);
+        assert!(window.transparency_calls.is_empty());
+        assert!(window.clear_calls.is_empty());
     }
 
     #[test]
-    fn apply_window_effects_still_calls_native_blur_backend_when_requested() {
+    fn apply_window_effects_calls_native_transparency_backend_when_requested() {
         let _guard = lock_window_effects_for_tests();
         configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
@@ -498,16 +766,20 @@ mod tests {
             WindowEffects {
                 opacity: 0.5,
                 blur: 18.0,
+                transparency: WindowTransparency::Acrylic,
             },
         ));
 
         assert!(window.opacity_calls.is_empty());
-        assert_eq!(window.blur_calls, vec![18.0]);
-        assert_eq!(window.clear_calls, 0);
+        assert_eq!(
+            window.transparency_calls,
+            vec![(WindowTransparency::Acrylic, 18.0)]
+        );
+        assert!(window.clear_calls.is_empty());
     }
 
     #[test]
-    fn update_window_effects_clears_native_blur_when_disabled() {
+    fn update_window_effects_clears_native_transparency_when_disabled() {
         let _guard = lock_window_effects_for_tests();
         configure_window_opacity_driver(None);
         set_window_opacity_mode(WindowOpacityMode::Surface);
@@ -518,16 +790,46 @@ mod tests {
             WindowEffects {
                 opacity: 1.0,
                 blur: 18.0,
+                transparency: WindowTransparency::Mica,
             },
             WindowEffects {
                 opacity: 1.0,
                 blur: 0.0,
+                transparency: WindowTransparency::None,
             },
         ));
 
         assert!(window.opacity_calls.is_empty());
-        assert!(window.blur_calls.is_empty());
-        assert_eq!(window.clear_calls, 1);
+        assert!(window.transparency_calls.is_empty());
+        assert_eq!(window.clear_calls, vec![WindowTransparency::Mica]);
+    }
+
+    #[test]
+    fn update_window_effects_switches_transparency_types() {
+        let _guard = lock_window_effects_for_tests();
+        configure_window_opacity_driver(None);
+        set_window_opacity_mode(WindowOpacityMode::Surface);
+        let mut window = RecordingWindow::default();
+
+        must(update_window_effects_to_target(
+            &mut window,
+            WindowEffects {
+                opacity: 1.0,
+                blur: 0.0,
+                transparency: WindowTransparency::Blur,
+            },
+            WindowEffects {
+                opacity: 1.0,
+                blur: 0.0,
+                transparency: WindowTransparency::Acrylic,
+            },
+        ));
+
+        assert_eq!(window.clear_calls, vec![WindowTransparency::Blur]);
+        assert_eq!(
+            window.transparency_calls,
+            vec![(WindowTransparency::Acrylic, 0.0)]
+        );
     }
 
     #[test]

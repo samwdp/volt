@@ -202,6 +202,7 @@ normalized (`"C-c C-c"` resolves the same as `"Ctrl+c Ctrl+c"`).
 | `PluginKeymapScope::Workspace` | Only when a workspace pane is focused |
 | `PluginKeymapScope::Popup`   | Only inside a popup window              |
 | `PluginKeymapScope::WorkspaceDock` | Only while the workspace dock is focused |
+| `PluginKeymapScope::AcpDock` | Only while the ACP dock is focused |
 
 Bindings can also be restricted to a **Vim mode**:
 
@@ -276,6 +277,8 @@ through `user/config.rs`.
 
 Theme colors and shared editor options still live in `user/themes/*.toml` and
 `user/themes/global.toml` and are reloaded separately from the theme watcher.
+Window compositor materials are set with `window.transparency` (`none`, `blur`,
+`acrylic`, `mica`, `mica-tabbed`) — see `docs/config.html#window-transparency`.
 
 #### Example — change the terminal shell without rebuilding
 

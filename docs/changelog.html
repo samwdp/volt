@@ -324,6 +324,23 @@
                             <p class="cl-section-label">Rendering</p>
                             <ul>
                                 <li>
+                                    <strong>Fix transparency chrome regressions.</strong>
+                                    Overlay panels (pickers, popups, ACP/plugin sections) stay opaque
+                                    again, the modeline keeps a solid backdrop, and glyph “coverage
+                                    sealing” that caused black text halos under the cursor is removed.
+                                    <span class="cl-tag cl-tag-fix">fix</span>
+                                </li>
+                                <li>
+                                    <strong>Configurable Windows transparency materials.</strong>
+                                    <code>window.transparency</code> in
+                                    <code>user/themes/global.toml</code> selects
+                                    <code>none</code>, <code>blur</code>, <code>acrylic</code>,
+                                    <code>mica</code>, or <code>mica-tabbed</code>. Default is
+                                    <code>acrylic</code> for a more transparent backdrop. Documented in
+                                    <a href="config.html#window-transparency">config.html</a>.
+                                    <span class="cl-tag cl-tag-new">new</span>
+                                </li>
+                                <li>
                                     <strong>All multicursor cursors now render in the SDL shell.</strong>
                                     Previously only the primary cursor was drawn; secondary cursors
                                     added via <code>multicursor.add-next-match</code> or

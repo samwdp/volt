@@ -5360,6 +5360,44 @@ fn acp_wrapped_text_uses_full_width_on_continuation_rows() {
 }
 
 #[test]
+fn acp_rendered_text_segments_break_long_tokens_before_future_whitespace() {
+    let line = acp_text_line(
+        Vec::new(),
+        "src\\AssetFusion.Shared.EntityFrameworkCore\\AssetFusion.Shared.EntityFrameworkCore.csproj --no-restore",
+        AcpColorRole::Default,
+    );
+    let map = LineCharMap::new(&line.text);
+    let widths = acp_rendered_text_segments(&line, 13)
+        .into_iter()
+        .map(|segment| map.display_cols_between(segment.start_col, segment.end_col))
+        .collect::<Vec<_>>();
+
+    assert!(
+        widths.iter().all(|width| *width <= 13),
+        "segment widths must stay within the wrap width: {widths:?}"
+    );
+}
+
+#[test]
+fn acp_rendered_text_segments_skip_whitespace_only_rows_after_hard_break() {
+    let line = acp_text_line(
+        Vec::new(),
+        "abcdefghijklm              --flag more",
+        AcpColorRole::Default,
+    );
+    let map = LineCharMap::new(&line.text);
+    let texts = acp_rendered_text_segments(&line, 13)
+        .iter()
+        .map(|segment| map.slice(&line.text, segment.start_col, segment.end_col))
+        .collect::<Vec<_>>();
+
+    assert!(
+        texts.iter().all(|text| !text.trim().is_empty()),
+        "segments must not collapse to whitespace-only rows: {texts:?}"
+    );
+}
+
+#[test]
 fn acp_multiline_text_lines_strip_carriage_returns() {
     let lines = acp_multiline_text_lines(
         vec![
@@ -9498,6 +9536,91 @@ fn render_buffer_paints_modeline_mode_chip_and_right_aligned_segment() -> Result
 }
 
 #[test]
+fn render_buffer_paints_opaque_modeline_band_when_window_is_transparent() -> Result<(), String> {
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
+    let mut registry = ThemeRegistry::new();
+    let base_background = Color::RGB(15, 16, 20);
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.25)
+                .with_token(
+                    "ui.background",
+                    editor_theme::Color::rgb(
+                        base_background.r,
+                        base_background.g,
+                        base_background.b,
+                    ),
+                ),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let rect = PixelRectToRect::rect(0, 0, 320, 180);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot { rect, active: true },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            workspace_name: "test-workspace",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRect { rect: fill, color }
+                if fill.x == rect.x()
+                    && fill.y == layout.statusline_y
+                    && fill.width == rect.width()
+                    && fill.height == 16
+                    && *color
+                        == to_render_color(Color::RGBA(
+                            base_background.r,
+                            base_background.g,
+                            base_background.b,
+                            255,
+                        ))
+        )),
+        "modeline band must stay fully opaque when window.opacity < 1"
+    );
+    Ok(())
+}
+
+#[test]
 fn render_buffer_uses_statusline_foreground_tokens() -> Result<(), String> {
     let mut registry = ThemeRegistry::new();
     let active_text = Color::RGB(212, 218, 226);
@@ -9766,7 +9889,7 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
 
     assert!(scene.iter().any(|command| matches!(
         command,
-        DrawCommand::Clear { color } if color.a == 128
+        DrawCommand::Clear { color } if color.a == 0
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
@@ -10138,6 +10261,7 @@ fn theme_runtime_settings_resolve_window_effects_from_theme_options() {
         crate::window_effects::WindowEffects {
             opacity: 0.65,
             blur: 18.0,
+            transparency: crate::window_effects::WindowTransparency::Blur,
         }
     );
 }
@@ -10226,7 +10350,6 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
 
 #[test]
 fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
-    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -10328,7 +10451,6 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
 
 #[test]
 fn render_hover_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
-    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -10701,6 +10823,7 @@ fn hidden_window_startup_smoke_supports_window_effects() -> Result<(), String> {
     let window_effects = crate::window_effects::WindowEffects {
         opacity: 0.35,
         blur: 0.0,
+        transparency: crate::window_effects::WindowTransparency::None,
     };
 
     let mut window_builder = video.window("Volt Smoke", 320, 180);
@@ -11651,6 +11774,51 @@ fn acp_output_scroll_reaches_wrapped_tail() -> Result<(), String> {
 }
 
 #[test]
+fn acp_output_wraps_long_tool_tokens_within_bubble_width() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot");
+    let title = "dotnet build src\\AssetFusion.Shared.EntityFrameworkCore\\AssetFusion.Shared.EntityFrameworkCore.csproj --no-restore 2>&1";
+    buffer.acp_upsert_tool_call(
+        ToolCall::new("tool-1", title)
+            .kind(ToolKind::Execute)
+            .status(ToolCallStatus::InProgress),
+    );
+
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
+
+    let acp = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "ACP state missing".to_owned())?;
+    let wrap_cols = acp.output_pane.wrap_cols();
+    let rendered_line = acp
+        .output_pane
+        .render_lines
+        .iter()
+        .find_map(|line| match line {
+            AcpRenderedLine::Text(text) if text.text == title => Some(text),
+            _ => None,
+        })
+        .ok_or_else(|| "tool title line missing".to_owned())?;
+    let text_wrap_cols = acp_rendered_text_wrap_cols(rendered_line, wrap_cols);
+    let map = LineCharMap::new(&rendered_line.text);
+    let segment_widths = acp_rendered_text_segments(rendered_line, wrap_cols)
+        .into_iter()
+        .map(|segment| map.display_cols_between(segment.start_col, segment.end_col))
+        .collect::<Vec<_>>();
+
+    assert!(
+        segment_widths.iter().all(|width| *width <= text_wrap_cols),
+        "segment widths {segment_widths:?} exceeded bubble width {text_wrap_cols}"
+    );
+    Ok(())
+}
+
+#[test]
 fn acp_viewport_scroll_does_not_treat_visual_row_as_line_index() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
@@ -11699,6 +11867,85 @@ fn acp_viewport_scroll_does_not_treat_visual_row_as_line_index() -> Result<(), S
         buffer.cursor_point().line,
         0,
         "scrolling one visual row inside wrapped line 0 must not jump cursor to line index == scroll_visual_row"
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_screen_top_motion_targets_wrapped_visual_row() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_push_system_message("word ".repeat(40));
+    for index in 0..12 {
+        buffer.acp_push_system_message(format!("tail line {index}"));
+    }
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
+    {
+        let acp = buffer
+            .acp_state
+            .as_mut()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        acp.active_pane = AcpPane::Output;
+        acp.output_pane.scroll_visual_row = 1;
+    }
+
+    assert!(buffer.move_to_viewport_offset(0));
+    assert_eq!(buffer.cursor_point().line, 0);
+    assert!(
+        buffer.cursor_point().column > 0,
+        "screen-top motion should target the wrapped visual row, not the logical line start"
+    );
+    Ok(())
+}
+
+#[test]
+fn acp_page_scroll_preserves_wrapped_visual_row_alignment() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_push_system_message("word ".repeat(40));
+    for index in 0..20 {
+        buffer.acp_push_system_message(format!("tail line {index}"));
+    }
+    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
+    {
+        let acp = buffer
+            .acp_state
+            .as_mut()
+            .ok_or_else(|| "ACP state missing".to_owned())?;
+        acp.active_pane = AcpPane::Output;
+        acp.output_pane.set_cursor(TextPoint::new(0, 0));
+    }
+
+    apply_motion_command(&mut state.runtime, ShellMotion::Down)?;
+    let before = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .cursor_point();
+    scroll_buffer_with_cursor(
+        state
+            .active_buffer_mut()
+            .map_err(|error| error.to_string())?,
+        1,
+    );
+    let after = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?
+        .cursor_point();
+
+    assert_eq!(before.line, 0);
+    assert!(before.column > 0);
+    assert_eq!(after.line, 0);
+    assert!(
+        after.column >= before.column,
+        "page scroll should keep the cursor aligned to the wrapped ACP visual row"
     );
     Ok(())
 }
@@ -19598,7 +19845,7 @@ fn render_terminal_buffer_keeps_terminal_content_opaque_with_window_opacity() ->
         DrawCommand::FillRect { rect, color }
             if rect.y == layout.statusline_y - 6
                 && rect.height == 1
-                && color.a == 128
+                && color.a == 255
     )));
     assert!(scene.iter().any(|command| matches!(
         command,
@@ -21820,6 +22067,74 @@ fn acp_dock_toggle_shows_and_hides() -> Result<(), String> {
     toggle_acp_dock(&mut state.runtime)?;
     assert!(!shell_ui(&state.runtime)?.acp_dock_open());
     assert!(!acp_dock_visible(shell_ui(&state.runtime)?));
+    Ok(())
+}
+
+#[test]
+fn acp_dock_ctrl_l_enters_focus_when_open() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    toggle_acp_dock(&mut state.runtime)?;
+    assert!(!shell_ui(&state.runtime)?.acp_dock_focus());
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_WINDOW_RIGHT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.acp_dock_focus_active());
+    Ok(())
+}
+
+#[test]
+fn acp_dock_ctrl_h_exits_focus_back_to_panes() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    toggle_acp_dock(&mut state.runtime)?;
+    shell_ui_mut(&mut state.runtime)?.set_acp_dock_focus(true);
+
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_WINDOW_LEFT, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    assert!(!shell_ui(&state.runtime)?.acp_dock_focus());
+    Ok(())
+}
+
+#[test]
+fn acp_dock_focus_j_k_cycle_buffers() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let first = install_user_plugin_buffer(&mut state, "*acp Claude*", user::acp::ACP_BUFFER_KIND)?;
+    let second = install_user_plugin_buffer(&mut state, "*acp Codex*", user::acp::ACP_BUFFER_KIND)?;
+    shell_buffer_mut(&mut state.runtime, first)?.init_acp_view("Claude");
+    shell_buffer_mut(&mut state.runtime, second)?.init_acp_view("Codex");
+    acp::focus_acp_buffer(&mut state.runtime, first)?;
+    toggle_acp_dock(&mut state.runtime)?;
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_acp_dock_focus(true);
+        ui.enter_normal_mode();
+    }
+
+    let modes = state
+        .overlay_minor_modes()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        modes.contains(&KeymapScope::AcpDock),
+        "dock focus must activate ACP Dock Minor Mode: {modes:?}"
+    );
+    assert!(
+        !modes.contains(&KeymapScope::WorkspaceDock),
+        "ACP dock focus must not activate Workspace Dock Minor Mode: {modes:?}"
+    );
+
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_buffer_id(), Some(second));
+    assert!(shell_ui(&state.runtime)?.acp_dock_focus_active());
+    state
+        .handle_text_input("k")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.active_buffer_id(), Some(first));
+    assert!(shell_ui(&state.runtime)?.acp_dock_focus_active());
     Ok(())
 }
 

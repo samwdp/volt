@@ -8,6 +8,16 @@ emoji_font_size = 18
 cursor_roundness = 4
 corner_radius = 12
 "acp.chat.rounded" = true
+# Window backdrop (Windows compositor materials). Change without rebuilding.
+# Types: none | blur | acrylic | mica | mica-tabbed
+#   none        — no blur/mica/acrylic
+#   blur        — classic Windows blur (Win10+)
+#   acrylic     — frosted acrylic; usually more transparent than blur (Win10+)
+#   mica        — Windows 11 mica
+#   mica-tabbed — Windows 11 tabbed mica (alias: tabbed)
+# Opacity is surface alpha (0 = fully clear chrome, 1 = opaque). On macOS,
+# window.blur is the vibrancy corner radius; Windows materials ignore it.
+"window.transparency" = "acrylic"
 "window.opacity" = 0.1
 "window.blur" = 1.0
 

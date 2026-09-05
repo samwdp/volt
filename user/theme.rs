@@ -735,6 +735,9 @@ red = "#cc241d"
         let blur = theme
             .option_number("window.blur")
             .unwrap_or_else(|| panic!("shared config missing window.blur"));
+        let transparency = theme
+            .option_string("window.transparency")
+            .unwrap_or_else(|| panic!("shared config missing window.transparency"));
 
         assert!(corner_radius >= 0.0);
         assert!((0.0..=1.0).contains(&opacity));
@@ -743,6 +746,7 @@ red = "#cc241d"
         assert_eq!(theme.option_bool("acp.chat.rounded"), Some(true));
         assert_eq!(opacity, 0.1);
         assert_eq!(blur, 1.0);
+        assert_eq!(transparency, "acrylic");
     }
 
     #[test]
@@ -756,6 +760,7 @@ font_size = 14
 corner_radius = 10
 "window.opacity" = 0.75
 "window.blur" = 12.0
+"window.transparency" = "mica"
 
 [langs.rust]
 indent = 4
@@ -784,6 +789,7 @@ background = "#112233"
         assert_eq!(theme.option_number("corner_radius"), Some(10.0));
         assert_eq!(theme.option_number("window.opacity"), Some(0.75));
         assert_eq!(theme.option_number("window.blur"), Some(12.0));
+        assert_eq!(theme.option_string("window.transparency"), Some("mica"));
         assert_eq!(theme.option_number("langs.rust.indent"), Some(4.0));
         assert_eq!(theme.option_bool("langs.rust.format_on_save"), Some(true));
         assert_eq!(theme.option_bool("langs.rust.use_tabs"), Some(false));

@@ -146,6 +146,7 @@
                     <h2>Contents</h2>
                     <ul>
                         <li><a href="#overview">Overview</a></li>
+                        <li><a href="#window-transparency">Window transparency</a></li>
                         <li><a href="#file-layout">File layout</a></li>
                         <li><a href="#sections">Config sections</a></li>
                         <li><a href="#hot-reload">Hot reload</a></li>
@@ -175,8 +176,79 @@
                     <p class="reveal">
                         Theme colors and shared editor options still live in
                         <code>user/themes/*.toml</code> and <code>user/themes/global.toml</code>.
-                        See the <a href="user-packages.html#editing-builtin-plugins">user packages guide</a>
-                        for theme and statusline customization.
+                        Window backdrop materials are configured there via
+                        <code>window.transparency</code> — see
+                        <a href="#window-transparency">Window transparency</a>.
+                        For theme and statusline customization, see the
+                        <a href="user-packages.html#editing-builtin-plugins">user packages guide</a>.
+                    </p>
+                </section>
+
+                <hr>
+
+                <section id="window-transparency" data-searchable>
+                    <h2 class="reveal">Window transparency</h2>
+                    <p class="reveal">
+                        Shared theme options in <code>user/themes/global.toml</code> control window
+                        opacity and the Windows compositor material. Edit the file and reload the
+                        theme (or restart) to try different looks — no Rust rebuild required for the
+                        option values themselves.
+                    </p>
+<pre class="reveal"><code># user/themes/global.toml
+[options]
+"window.transparency" = "acrylic"   # none | blur | acrylic | mica | mica-tabbed
+"window.opacity" = 0.1              # 0 = clear chrome, 1 = opaque
+"window.blur" = 1.0                 # macOS vibrancy radius; ignored by Windows materials</code></pre>
+                    <table class="reveal">
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>Platform</th>
+                                <th>Look</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><code>none</code></td>
+                                <td>all</td>
+                                <td>No compositor backdrop effect.</td>
+                            </tr>
+                            <tr>
+                                <td><code>blur</code></td>
+                                <td>Windows 10+</td>
+                                <td>Classic Windows blur behind the window.</td>
+                            </tr>
+                            <tr>
+                                <td><code>acrylic</code></td>
+                                <td>Windows 10+</td>
+                                <td>Frosted acrylic; usually more transparent than <code>blur</code>.</td>
+                            </tr>
+                            <tr>
+                                <td><code>mica</code></td>
+                                <td>Windows 11</td>
+                                <td>System mica material (follows light/dark preference).</td>
+                            </tr>
+                            <tr>
+                                <td><code>mica-tabbed</code></td>
+                                <td>Windows 11</td>
+                                <td>Tabbed mica variant (alias: <code>tabbed</code>).</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <p class="reveal">
+                        If <code>window.transparency</code> is omitted, a positive
+                        <code>window.blur</code> still enables <code>blur</code> for backward
+                        compatibility. On macOS any non-<code>none</code> type maps to vibrancy and
+                        uses <code>window.blur</code> as the corner radius. Linux ignores the material
+                        type (opacity still applies).
+                    </p>
+                    <p class="reveal">
+                        <code>window.opacity</code> scales editor pane and background fills only.
+                        Overlay chrome (pickers, popups, hover, notifications, ACP/plugin section
+                        panels) stays fully opaque so text stays crisp. The modeline band is also
+                        forced opaque for readability. When opacity is below 1, the frame clears to
+                        transparent so acrylic/mica can show through translucent pane fills without
+                        stacking an extra tinted clear under them.
                     </p>
                 </section>
 
@@ -435,6 +507,7 @@ if let Some(path) = master.myplugin.as_deref() {
                 <p class="sidebar-nav-label">On this page</p>
                 <ul>
                     <li><a href="#overview">Overview</a></li>
+                    <li><a href="#window-transparency">Window transparency</a></li>
                     <li><a href="#file-layout">File layout</a></li>
                     <li><a href="#sections">Sections</a></li>
                     <li><a href="#hot-reload">Hot reload</a></li>

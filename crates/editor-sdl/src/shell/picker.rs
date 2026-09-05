@@ -285,6 +285,9 @@ fn picker_provider_context(
                         id: language.id().into(),
                         detail: detail.into(),
                         preview: preview.map(Into::into).into(),
+                        is_installed: language
+                            .grammar()
+                            .is_some_and(|_| registry.is_installed(language.id()).unwrap_or(false)),
                     }
                 })
                 .collect::<Vec<_>>()

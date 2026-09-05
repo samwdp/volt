@@ -991,6 +991,20 @@ keybindings:
                         when building <code>OilFeatureSpec</code>.
                     </p>
 
+                    <h3 class="reveal">Window Transparency (global.toml)</h3>
+                    <p class="reveal">
+                        Edit <code>user/themes/global.toml</code> to pick the Windows compositor
+                        material. No package Rust changes needed.
+                    </p>
+<pre class="reveal"><code>[options]
+"window.transparency" = "acrylic"  # none | blur | acrylic | mica | mica-tabbed
+"window.opacity" = 0.1
+"window.blur" = 1.0</code></pre>
+                    <p class="reveal">
+                        Full type table and platform notes live in
+                        <a href="config.html#window-transparency">Configuration &#8594; Window transparency</a>.
+                    </p>
+
                     <h3 class="reveal">Editing the Statusline</h3>
                     <p class="reveal">
                         The statusline is rendered by <code>user/statusline.rs</code>.  You receive a

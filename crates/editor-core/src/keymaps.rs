@@ -178,6 +178,8 @@ pub enum KeymapScope {
     WorkspaceDock,
     /// Multicursor Mode: linked cursors active on the focused buffer.
     Multicursor,
+    /// ACP Dock Minor Mode (vertical ACP session list focus).
+    AcpDock,
 }
 
 impl fmt::Display for KeymapScope {
@@ -191,6 +193,7 @@ impl fmt::Display for KeymapScope {
             Self::Dap => formatter.write_str("dap"),
             Self::WorkspaceDock => formatter.write_str("workspace-dock"),
             Self::Multicursor => formatter.write_str("multicursor"),
+            Self::AcpDock => formatter.write_str("acp-dock"),
         }
     }
 }

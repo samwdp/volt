@@ -196,7 +196,8 @@ pub(super) fn render_shell_state(
     let popup_focus = runtime_popup
         .map(|popup| state.popup_focus_active(popup))
         .unwrap_or(false);
-    let dock_focus = state.workspace_dock_focus_active(user_library);
+    let dock_focus =
+        state.workspace_dock_focus_active(user_library) || state.acp_dock_focus_active();
     let command_line_row_visible = state.command_line().is_some() || state.input_prompt_visible();
 
     clear_window_surface(target, base_background, window_effects);
@@ -3699,6 +3700,19 @@ pub(super) fn render_buffer(
         border_color,
         window_effects,
     )?;
+    // CONTEXT: modeline stays fully opaque even when window.opacity < 1 so the
+    // status row remains readable over acrylic/mica. Pane fills still use
+    // window opacity; only this band forces alpha 255.
+    fill_rect(
+        target,
+        PixelRectToRect::rect(
+            rect.x(),
+            layout.statusline_y,
+            rect.width(),
+            line_height.max(1) as u32,
+        ),
+        Color::RGBA(base_background.r, base_background.g, base_background.b, 255),
+    )?;
     let statusline_x = rect.x() + 12;
     draw_modeline(
         target,
@@ -5067,7 +5081,7 @@ pub(super) fn render_acp_pane(
                     selection_columns_for_visual(selection_state, line_index, line_len)
                 });
                 let segments = acp_rendered_text_segments(line, pane_layout.wrap_cols);
-                let cursor_segment = segment_index_for_column(&segments, cursor_point.column);
+                let cursor_segment = acp_segment_index_for_column(&segments, cursor_point.column);
                 let origin_x = acp_chat_origin_x(line, body_x, pane_layout.wrap_cols, cell_width);
                 let bubble_width =
                     acp_chat_bubble_width_px(line, pane_layout.wrap_cols, cell_width, body_width);
@@ -5231,7 +5245,10 @@ pub(super) fn render_acp_pane(
                                 x: segment_x,
                                 y,
                                 line: &line.text,
-                                segment: *segment,
+                                segment: LineWrapSegment {
+                                    start_col: segment.start_col,
+                                    end_col: segment.end_col,
+                                },
                                 char_map: &char_map,
                                 line_syntax_spans: Some(line.syntax_spans.as_slice()),
                                 default_color,
@@ -7927,7 +7944,16 @@ pub(super) fn clear_window_surface(
     color: Color,
     window_effects: WindowEffects,
 ) {
-    target.clear(window_surface_color(color, window_effects));
+    // CONTEXT: when window.opacity < 1, clear to a fully transparent frame so
+    // later surface fills are the only opacity layer. Clearing with the scaled
+    // background first would stack under pane/panel fills and make chrome
+    // (especially ACP/plugin sections) look darker than the configured opacity.
+    let opacity = crate::window_effects::window_surface_opacity(window_effects);
+    if opacity < 1.0 {
+        target.clear(Color::RGBA(color.r, color.g, color.b, 0));
+    } else {
+        target.clear(window_surface_color(color, window_effects));
+    }
 }
 
 pub(super) fn fill_window_surface_rect(

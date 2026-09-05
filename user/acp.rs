@@ -176,6 +176,18 @@ pub fn package() -> PluginPackage {
             "ui.acp-dock.toggle",
             None,
         ),
+        hook_command(
+            "acp.dock.previous",
+            "Moves to the previous ACP buffer in the dock list.",
+            "ui.acp-dock.previous",
+            None,
+        ),
+        hook_command(
+            "acp.dock.next",
+            "Moves to the next ACP buffer in the dock list.",
+            "ui.acp-dock.next",
+            None,
+        ),
     ];
 
     let key_bindings = vec![
@@ -186,6 +198,8 @@ pub fn package() -> PluginPackage {
             .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+s", "acp.pick-session", PluginKeymapScope::Workspace)
             .with_vim_mode(PluginVimMode::Normal),
+        PluginKeyBinding::new("j", "acp.dock.next", PluginKeymapScope::AcpDock),
+        PluginKeyBinding::new("k", "acp.dock.previous", PluginKeymapScope::AcpDock),
     ];
 
     PluginPackage::new("acp", true, "Agent Client Protocol integrations.")
@@ -265,5 +279,32 @@ mod tests {
                 .iter()
                 .any(|command| command.name() == "acp.dock.toggle")
         );
+    }
+
+    #[test]
+    fn package_exports_dock_navigation_commands() {
+        let package = package();
+        let names: Vec<_> = package
+            .commands()
+            .iter()
+            .map(|command| command.name())
+            .collect();
+        assert!(names.contains(&"acp.dock.previous"));
+        assert!(names.contains(&"acp.dock.next"));
+    }
+
+    #[test]
+    fn package_binds_j_and_k_in_acp_dock_scope() {
+        let package = package();
+        for (chord, command) in [("j", "acp.dock.next"), ("k", "acp.dock.previous")] {
+            assert!(
+                package.key_bindings().iter().any(|binding| {
+                    binding.chord() == chord
+                        && binding.command_name() == command
+                        && binding.scope() == PluginKeymapScope::AcpDock
+                }),
+                "missing binding for {chord} -> {command}"
+            );
+        }
     }
 }

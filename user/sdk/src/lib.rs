@@ -1275,6 +1275,7 @@ pub struct PickerSyntaxLanguageContext {
     pub id: RString,
     pub detail: RString,
     pub preview: ROption<RString>,
+    pub is_installed: bool,
 }
 
 #[repr(C)]
@@ -3125,6 +3126,8 @@ pub enum PluginKeymapScope {
     WorkspaceDock,
     /// Multicursor Mode: linked cursors active on the focused buffer.
     Multicursor,
+    /// ACP Dock Minor Mode (vertical ACP session list focus).
+    AcpDock,
 }
 
 /// Modal Vim state that can activate a keybinding.
