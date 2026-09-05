@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn picker_entry(id: &str, label: &str) -> PickerEntry {

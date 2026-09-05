@@ -1,4 +1,3 @@
-
 use std::path::Path;
 
 use super::{PathMatcher, PathPattern, grammar_install_root, normalize_extension, volt_data_dir};

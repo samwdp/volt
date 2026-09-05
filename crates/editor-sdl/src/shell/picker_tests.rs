@@ -1,4 +1,3 @@
-
 use super::*;
 use editor_plugin_api::{PickerActionSpec, PickerItemSpec, PickerProviderSpec};
 

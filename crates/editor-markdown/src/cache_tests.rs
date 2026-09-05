@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{MarkdownPrettyRequest, plan_markdown_pretty, pretty_display_line};
 use std::cell::Cell;

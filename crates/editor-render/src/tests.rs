@@ -1,4 +1,3 @@
-
 use super::{
     centered_rect, font_data_matches_name, font_match_sort_key, horizontal_pane_rects,
     horizontal_pane_rects_for_active, normalize_font_name, preferred_font_search_roots, rect_tuple,

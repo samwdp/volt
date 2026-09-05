@@ -1,4 +1,3 @@
-
 use super::{BreakpointState, BreakpointStore, BreakpointToggle, debug_source_paths_eq};
 use std::path::Path;
 

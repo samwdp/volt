@@ -1,4 +1,3 @@
-
 use super::{
     NativeWindowEffectsTarget, OPTION_WINDOW_BLUR, OPTION_WINDOW_OPACITY,
     OPTION_WINDOW_TRANSPARENCY, WindowEffects, WindowOpacityMode, WindowTransparency,

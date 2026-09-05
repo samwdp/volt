@@ -1,4 +1,3 @@
-
 use super::*;
 use editor_git::{git_probe_snapshot, invalidate_git_probe_cache};
 use std::{

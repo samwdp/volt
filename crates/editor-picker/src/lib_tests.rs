@@ -1,4 +1,3 @@
-
 use super::{PickerItem, PickerResultOrder, PickerSession};
 
 fn item(id: &str, label: &str) -> PickerItem {

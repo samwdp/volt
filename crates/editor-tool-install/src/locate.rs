@@ -46,14 +46,5 @@ fn is_volt_install_path(path: &Path) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{ProgramLocation, locate_program};
-
-    #[test]
-    fn missing_program_is_missing() {
-        assert_eq!(
-            locate_program("volt-definitely-not-a-real-program-xyz"),
-            ProgramLocation::Missing
-        );
-    }
-}
+#[path = "locate_tests.rs"]
+mod tests;

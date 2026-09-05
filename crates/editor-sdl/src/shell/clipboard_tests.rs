@@ -1,4 +1,3 @@
-
 use super::*;
 
 const TINY_PNG: &[u8] = &[

@@ -1,4 +1,3 @@
-
 use super::*;
 use editor_buffer::{TextBuffer, TextPoint, TextRange};
 

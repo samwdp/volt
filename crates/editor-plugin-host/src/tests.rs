@@ -1,4 +1,3 @@
-
 use editor_core::{BufferKind, EditorRuntime, HookEvent, KeymapScope, builtins};
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginKeyBinding,
