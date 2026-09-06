@@ -238,10 +238,8 @@ impl LspSessionHandle {
             }]
         });
         let capabilities = client_capabilities()?;
-        #[allow(deprecated)]
         let initialize_params = InitializeParams {
             process_id: Some(std::process::id()),
-            root_uri,
             initialization_options: self.initialization_options.clone(),
             capabilities,
             trace: Some(TraceValue::Off),

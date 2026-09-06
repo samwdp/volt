@@ -152,19 +152,20 @@ fn supervise_child(
     }
 }
 
+#[cfg(unix)]
 fn terminate_supervised_child(
     child: &mut Child,
-    #[cfg_attr(windows, allow(unused_variables))] mode: ProcessSupervisionMode,
+    mode: ProcessSupervisionMode,
 ) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        terminate_supervised_child_unix(child, mode)?;
-    }
-    #[cfg(windows)]
-    {
-        terminate_supervised_child_windows(child)?;
-    }
-    Ok(())
+    terminate_supervised_child_unix(child, mode)
+}
+
+#[cfg(windows)]
+fn terminate_supervised_child(
+    child: &mut Child,
+    _mode: ProcessSupervisionMode,
+) -> Result<(), String> {
+    terminate_supervised_child_windows(child)
 }
 
 #[cfg(unix)]

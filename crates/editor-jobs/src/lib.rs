@@ -541,10 +541,11 @@ impl CompilationRunner {
 
 fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
     let started = Instant::now();
-    #[cfg_attr(not(windows), allow(unused_mut))]
-    let mut output_result = build_job_command(&spec, spec.program(), None).output();
+    #[cfg(not(windows))]
+    let output_result = build_job_command(&spec, spec.program(), None).output();
     #[cfg(windows)]
-    {
+    let output_result = {
+        let mut output_result = build_job_command(&spec, spec.program(), None).output();
         let should_retry = matches!(
             &output_result,
             Err(error) if windows_should_retry_spawn_error(error)
@@ -593,7 +594,8 @@ fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
                 }
             }
         }
-    }
+        output_result
+    };
 
     let output = output_result?;
     Ok(JobResult {

@@ -64,26 +64,24 @@ pub(crate) async fn spawn_background_command(
         }
     }
 
-    // `launch_env` carries the refreshed environment into the Windows-only node-manager
-    // retry below; on other platforms the initial value is intentionally never read.
-    #[cfg_attr(not(windows), allow(unused_assignments))]
-    let mut launch_env = None;
     let should_retry = matches!(
         &spawn_result,
         Err(error) if background_spawn_should_retry(error)
     );
-    if should_retry {
-        launch_env = refreshed_launch_environment(cwd).await;
-        if let Some(launch_env) = launch_env.as_deref() {
-            for candidate in background_command_candidates(program, env, Some(launch_env)) {
-                spawn_result =
-                    build_background_command(&candidate, args, cwd, env, pipes, Some(launch_env))
-                        .spawn();
-                match &spawn_result {
-                    Ok(_) => break,
-                    Err(error) if background_spawn_should_retry(error) => {}
-                    Err(_) => break,
-                }
+    let launch_env = if should_retry {
+        refreshed_launch_environment(cwd).await
+    } else {
+        None
+    };
+    if let Some(launch_env) = launch_env.as_deref() {
+        for candidate in background_command_candidates(program, env, Some(launch_env)) {
+            spawn_result =
+                build_background_command(&candidate, args, cwd, env, pipes, Some(launch_env))
+                    .spawn();
+            match &spawn_result {
+                Ok(_) => break,
+                Err(error) if background_spawn_should_retry(error) => {}
+                Err(_) => break,
             }
         }
     }
