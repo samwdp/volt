@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use ropey::{Rope, iter::Chunks as RopeChunks};
+use ropey::{Rope, RopeSlice, iter::Chunks as RopeChunks};
 
 use crate::buffer::TextBuffer;
 
@@ -448,4 +448,24 @@ pub(crate) fn advance_point_by_text(mut point: TextPoint, text: &str) -> TextPoi
         }
     }
     point
+}
+
+pub(crate) fn visible_line_len(slice: RopeSlice<'_>) -> usize {
+    let len = slice.len_chars();
+    if len == 0 {
+        return 0;
+    }
+
+    match slice.get_char(len - 1) {
+        Some('\n') => len - 1,
+        _ => len,
+    }
+}
+
+pub(crate) fn trimmed_line(slice: RopeSlice<'_>) -> String {
+    let mut line = slice.to_string();
+    if line.ends_with('\n') {
+        line.pop();
+    }
+    line
 }
