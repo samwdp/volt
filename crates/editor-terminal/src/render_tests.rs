@@ -1,4 +1,3 @@
-
 use alacritty_terminal::{
     index::{Column, Line, Point},
     term::test::mock_term,

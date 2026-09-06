@@ -1,4 +1,3 @@
-
 use super::{TOKEN_MISMATCHED, TOKEN_UNMATCHED, apply_rainbow_delimiter_spans, depth_theme_token};
 use crate::{
     CaptureThemeMapping, HighlightWindow, LanguageConfiguration, SyntaxRegistry, SyntaxSnapshot,

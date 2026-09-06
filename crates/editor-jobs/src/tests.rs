@@ -1,4 +1,3 @@
-
 use super::{CompilationRunner, JobKind, JobManager, JobSpec};
 
 fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {

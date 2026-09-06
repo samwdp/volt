@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::{Diagnostic, DiagnosticSeverity, LanguageServerRegistry};
 use editor_buffer::{TextPoint, TextRange};
