@@ -1,4 +1,11 @@
 #![doc = r#"Terminal transcript sessions and editor-facing command execution surfaces."#]
 
-include!("terminal_01.rs");
-include!("terminal_02.rs");
+mod render;
+mod session;
+
+pub use render::*;
+pub use session::*;
+
+#[cfg(test)]
+#[path = "render_tests.rs"]
+mod tests;

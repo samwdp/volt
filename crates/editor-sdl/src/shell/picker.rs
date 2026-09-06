@@ -52,7 +52,7 @@ pub(super) fn ensure_picker_keybindings(runtime: &mut EditorRuntime) -> Result<(
     Ok(())
 }
 
-pub(super) fn picker_overlay(
+pub(crate) fn picker_overlay(
     runtime: &EditorRuntime,
     provider: &str,
 ) -> Result<PickerOverlay, String> {
@@ -596,7 +596,7 @@ pub(super) fn buffer_close_confirm_overlay(
     PickerOverlay::from_entries(format!("Close {buffer_name}?"), entries)
 }
 
-pub(super) fn render_picker_overlay(
+pub(crate) fn render_picker_overlay(
     target: &mut DrawTarget<'_>,
     fonts: &FontSet<'_>,
     draw: PickerOverlayDraw<'_>,
