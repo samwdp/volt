@@ -1056,7 +1056,7 @@ fn windows_msvc_target_triple_matches_current_architecture() {
         _ => "x86_64-pc-windows-msvc",
     };
 
-    assert_eq!(super::windows_msvc_target_triple(), expected);
+    assert_eq!(crate::install::windows_msvc_target_triple(), expected);
 }
 
 #[test]
