@@ -1299,6 +1299,7 @@ dependencies = [
  "editor-terminal",
  "editor-theme",
  "editor-tool-install",
+ "editor-ui",
  "fontdue",
  "gtk",
  "image",
@@ -1352,6 +1353,13 @@ version = "0.1.0"
 dependencies = [
  "editor-jobs",
  "editor-path",
+]
+
+[[package]]
+name = "editor-ui"
+version = "0.1.0"
+dependencies = [
+ "editor-render",
 ]
 
 [[package]]

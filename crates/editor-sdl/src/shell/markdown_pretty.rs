@@ -106,7 +106,7 @@ pub(super) fn cached_plan_for_buffer(
 }
 
 #[cfg(test)]
-pub(super) fn last_cached_pretty_plan(buffer: &ShellBuffer) -> Option<Arc<MarkdownPrettyPlan>> {
+pub(crate) fn last_cached_pretty_plan(buffer: &ShellBuffer) -> Option<Arc<MarkdownPrettyPlan>> {
     buffer
         .markdown_pretty_plan_cache
         .lock()
