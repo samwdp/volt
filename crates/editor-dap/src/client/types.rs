@@ -1,6 +1,3 @@
-#![allow(unused_imports)]
-use super::super::*;
-
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
@@ -12,35 +9,23 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use dap_types::{
-    AttachRequestArguments, ContinueArguments, DisconnectArguments, EvaluateArguments,
-    EvaluateArgumentsContext, InitializeRequestArguments, LaunchRequestArguments, NextArguments,
-    PauseArguments, RestartArguments, ScopesArguments, SetBreakpointsArguments, Source,
-    SourceBreakpoint, StackTraceArguments, StepInArguments, StepOutArguments, VariablesArguments,
-    requests::{
-        Attach, Continue, Disconnect, Evaluate, Initialize, Launch, Next, Pause,
-        Request as DapRequest, Restart, Scopes, SetBreakpoints, StackTrace, StepIn, StepOut,
-        Threads, Variables,
-    },
+    EvaluateArguments, EvaluateArgumentsContext, ScopesArguments, StackTraceArguments,
+    VariablesArguments,
+    requests::{Evaluate, Request as DapRequest, Scopes, StackTrace, Variables},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    BreakpointStore, BreakpointToggle, DebugAdapterRegistry, DebugAdapterSpec,
-    DebugAdapterTransport, DebugConfiguration, DebugRequestKind, DebugSessionPlan,
-    StoredBreakpoint,
-};
+use crate::{DebugAdapterSpec, DebugAdapterTransport, DebugConfiguration, DebugRequestKind};
 
-#[allow(unused_imports)]
 use super::session::*;
-#[allow(unused_imports)]
 use super::transport::*;
 
 pub(crate) const TRANSPORT_LOG_MAX_ENTRIES: usize = 256;

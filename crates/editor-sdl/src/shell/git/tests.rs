@@ -1,3 +1,4 @@
+use super::super::*;
 use super::*;
 use editor_git::{GitStatusSnapshot, invalidate_git_probe_cache};
 use std::fs;

@@ -1,4 +1,3 @@
-#![allow(unused_imports)]
 use crate::{HighlightSpan, SyntaxSnapshot};
 use editor_buffer::SyntaxText;
 use std::sync::Arc;

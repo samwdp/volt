@@ -1,34 +1,12 @@
-#![allow(unused_imports)]
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    env,
-    error::Error,
-    fmt, fs,
-    mem::ManuallyDrop,
-    ops::ControlFlow,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use editor_buffer::{SyntaxText, TextBuffer, TextByteChunks, TextEdit, TextPoint};
-use editor_path::PathMatcher;
-use tree_sitter::Language;
-use tree_sitter::{
-    InputEdit, Node, Parser, Point, Query, QueryCursor, QueryCursorOptions, QueryPredicateArg,
-    QueryProperty, Range, StreamingIterator, TextProvider, Tree,
-};
-use tree_sitter_language::LanguageFn;
-
-#[allow(unused_imports)]
-use crate::highlight::*;
-#[allow(unused_imports)]
 use crate::language::*;
-#[allow(unused_imports)]
 use crate::query::*;
-#[allow(unused_imports)]
-use crate::registry::*;
 
 pub(crate) fn configure_background_command(_command: &mut Command) {
     #[cfg(windows)]

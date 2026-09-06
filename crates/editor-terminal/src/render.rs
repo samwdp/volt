@@ -1,33 +1,11 @@
-#![allow(unused_imports)]
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    error::Error,
-    fmt,
-    path::PathBuf,
-    sync::{
-        Arc,
-        mpsc::{self, Receiver, Sender, TryRecvError},
-    },
-};
+use std::collections::HashMap;
 
 use alacritty_terminal::{
-    event::{Event as AlacrittyEvent, EventListener, WindowSize},
-    event_loop::{EventLoop, EventLoopSendError, EventLoopSender, Msg},
-    grid::{Dimensions, Scroll as GridScroll},
-    sync::FairMutex,
-    term::{
-        Config as AlacrittyConfig, Term,
-        cell::{Cell as TerminalCell, Flags},
-        color::Colors as TerminalColors,
-        point_to_viewport,
-    },
+    term::{cell::Flags, color::Colors as TerminalColors},
     tty::{self, Options as TtyOptions, Shell as TtyShell},
-    vte::ansi::{Color as TerminalColor, CursorShape, NamedColor, Rgb},
+    vte::ansi::{Color as TerminalColor, NamedColor, Rgb},
 };
-use editor_jobs::{JobError, JobManager, JobResult, JobSpec};
 
-#[allow(unused_imports)]
 use crate::session::*;
 
 /// Styled text run for a visible terminal row.

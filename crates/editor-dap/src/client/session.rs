@@ -1,46 +1,35 @@
-#![allow(unused_imports)]
-use super::super::*;
-
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    error::Error,
     fmt,
-    io::{self, BufRead, BufReader, Read, Write},
-    mem,
-    net::TcpStream,
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    io::Write,
+    path::PathBuf,
+    process::Child,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    thread::JoinHandle,
 };
 
 use dap_types::{
-    AttachRequestArguments, ContinueArguments, DisconnectArguments, EvaluateArguments,
-    EvaluateArgumentsContext, InitializeRequestArguments, LaunchRequestArguments, NextArguments,
-    PauseArguments, RestartArguments, ScopesArguments, SetBreakpointsArguments, Source,
-    SourceBreakpoint, StackTraceArguments, StepInArguments, StepOutArguments, VariablesArguments,
+    AttachRequestArguments, ContinueArguments, DisconnectArguments, InitializeRequestArguments,
+    LaunchRequestArguments, NextArguments, PauseArguments, RestartArguments,
+    SetBreakpointsArguments, Source, SourceBreakpoint, StackTraceArguments, StepInArguments,
+    StepOutArguments,
     requests::{
-        Attach, Continue, Disconnect, Evaluate, Initialize, Launch, Next, Pause,
-        Request as DapRequest, Restart, Scopes, SetBreakpoints, StackTrace, StepIn, StepOut,
-        Threads, Variables,
+        Attach, Continue, Disconnect, Initialize, Launch, Next, Pause, Request as DapRequest,
+        Restart, SetBreakpoints, StackTrace, StepIn, StepOut, Threads,
     },
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::{
-    BreakpointStore, BreakpointToggle, DebugAdapterRegistry, DebugAdapterSpec,
-    DebugAdapterTransport, DebugConfiguration, DebugRequestKind, DebugSessionPlan,
-    StoredBreakpoint,
+    BreakpointStore, BreakpointToggle, DebugAdapterRegistry, DebugAdapterSpec, DebugConfiguration,
+    DebugRequestKind, DebugSessionPlan, StoredBreakpoint,
 };
 
-#[allow(unused_imports)]
 use super::transport::*;
-#[allow(unused_imports)]
 use super::types::*;
 
 pub(crate) struct DapSessionHandle {

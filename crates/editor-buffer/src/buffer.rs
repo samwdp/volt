@@ -1,4 +1,3 @@
-#![allow(unused_imports)]
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
@@ -6,13 +5,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ropey::{Rope, RopeBuilder, RopeSlice, iter::Chunks as RopeChunks};
+use ropey::{Rope, RopeBuilder};
 
-#[allow(unused_imports)]
 use crate::geometry::*;
-#[allow(unused_imports)]
-use crate::motion::*;
-#[allow(unused_imports)]
 use crate::objects::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,35 +1,12 @@
-#![allow(unused_imports)]
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    env, fs, io,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, path::Path};
 
-#[cfg(test)]
-use std::sync::Mutex;
-
-use editor_plugin_api::{
-    DbActionSpec, DbBrowserContext, DbBrowserItemContext, DbBrowserItemKind, DbBrowserItemSpec,
-    DbBrowserKind,
-};
-use keyring_core::Entry;
 use postgres::{Client as PostgresClient, NoTls, SimpleQueryMessage};
 use rusqlite::{Connection as SqliteConnection, types::ValueRef as SqliteValueRef};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tiberius::{Client as SqlServerClient, Config as SqlServerConfig, Row as SqlServerRow};
-use tokio::{net::TcpStream, runtime::Runtime};
+use tiberius::{Client as SqlServerClient, Config as SqlServerConfig};
+use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-#[allow(unused_imports)]
 use crate::connection::*;
-#[allow(unused_imports)]
-use crate::secrets::*;
-#[allow(unused_imports)]
-use crate::service::*;
-#[allow(unused_imports)]
 use crate::types::*;
 
 /// Follow-up outcome when activating a browser-buffer action.

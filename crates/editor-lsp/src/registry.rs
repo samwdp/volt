@@ -1,19 +1,17 @@
-#![allow(unused_imports)]
 use std::{
     collections::BTreeMap,
     error::Error,
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
 };
 
 use editor_buffer::TextRange;
 use editor_jobs::JobSpec;
-use editor_path::{PathMatcher, PathPattern, normalize_extension};
+use editor_path::{PathMatcher, normalize_extension};
 use serde_json::{Number, Value};
 
 pub use editor_tool_install::InstallRecipe;
 
-#[allow(unused_imports)]
 use crate::workspace_roots::*;
 
 /// Human-readable summary of this crate's responsibility.

@@ -1,30 +1,7 @@
-#![allow(unused_imports)]
 use super::super::*;
 
-#[allow(unused_imports)]
-use super::commands::*;
-#[allow(unused_imports)]
-use super::commit::*;
-#[allow(unused_imports)]
-use super::diff::*;
-#[allow(unused_imports)]
-use super::fringe::*;
-#[allow(unused_imports)]
-use super::log::*;
-#[allow(unused_imports)]
-use super::merge_rebase::*;
-#[allow(unused_imports)]
-use super::pickers::*;
-#[allow(unused_imports)]
 use super::process::*;
-#[allow(unused_imports)]
-use super::remote::*;
-#[allow(unused_imports)]
-use super::stash::*;
-#[allow(unused_imports)]
 use super::status::*;
-#[allow(unused_imports)]
-use super::worktree::*;
 
 pub(crate) fn stage_git_files(runtime: &mut EditorRuntime, paths: &[String]) -> Result<(), String> {
     if paths.is_empty() {

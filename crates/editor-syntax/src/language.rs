@@ -1,35 +1,18 @@
-#![allow(unused_imports)]
-
-#[allow(unused_imports)]
-use crate::highlight::*;
-#[allow(unused_imports)]
 use crate::install::*;
-#[allow(unused_imports)]
 use crate::query::*;
-#[allow(unused_imports)]
 use crate::registry::*;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    env,
     error::Error,
     fmt, fs,
-    mem::ManuallyDrop,
-    ops::ControlFlow,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
 
-use editor_buffer::{SyntaxText, TextBuffer, TextByteChunks, TextEdit, TextPoint};
+use editor_buffer::{SyntaxText, TextByteChunks};
 use editor_path::PathMatcher;
 pub use tree_sitter::Language;
-use tree_sitter::{
-    InputEdit, Node, Parser, Point, Query, QueryCursor, QueryCursorOptions, QueryPredicateArg,
-    QueryProperty, Range, StreamingIterator, TextProvider, Tree,
-};
-use tree_sitter_language::LanguageFn;
+use tree_sitter::{Parser, TextProvider, Tree};
 
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str =

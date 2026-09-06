@@ -1,56 +1,22 @@
-#![allow(unused_imports)]
 use std::{
-    cell::RefCell,
     collections::{HashMap, VecDeque},
-    env,
     path::{Path, PathBuf},
-    rc::Rc,
     sync::{Arc, Mutex, mpsc},
-    thread,
 };
 
-use agent_client_protocol::{Agent, Client, ClientSideConnection};
 use agent_client_protocol::{
-    AuthCapabilities, AvailableCommand, ClientCapabilities, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, Error, FileSystemCapabilities, ImageContent, Implementation,
-    InitializeRequest, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
-    LoadSessionRequest, Meta, ModelId, ModelInfo, NewSessionRequest, PermissionOption,
-    PermissionOptionId, PermissionOptionKind, Plan, ProtocolVersion, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionInfo, SessionInfoUpdate, SessionMode, SessionModeId,
-    SessionModeState, SessionModelState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCall,
-    ToolCallUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    AvailableCommand, ContentBlock, ImageContent, ModelId, ResourceLink, SessionConfigValueId,
+    SessionModeId, SessionModeState, SessionModelState,
 };
-use async_trait::async_trait;
-use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
+use base64::Engine as _;
 use editor_picker::PickerResultOrder;
 use editor_plugin_api::AcpClient as AcpClientConfig;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-    process::Command,
-    sync::{mpsc as tokio_mpsc, oneshot},
-    task::LocalSet,
-};
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::super::*;
 
-#[allow(unused_imports)]
-use super::client::*;
-#[allow(unused_imports)]
 use super::input::*;
-#[allow(unused_imports)]
 use super::launch::*;
-#[allow(unused_imports)]
 use super::runtime::*;
-#[allow(unused_imports)]
-use super::session::*;
 
 pub(crate) fn acp_file_mention_at_cursor(text: &str, cursor: usize) -> Option<FileMention> {
     let chars: Vec<char> = text.chars().collect();

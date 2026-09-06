@@ -1,30 +1,8 @@
-#![allow(unused_imports)]
 use super::super::*;
 
-#[allow(unused_imports)]
-use super::commands::*;
-#[allow(unused_imports)]
-use super::commit::*;
-#[allow(unused_imports)]
-use super::diff::*;
-#[allow(unused_imports)]
-use super::fringe::*;
-#[allow(unused_imports)]
-use super::log::*;
-#[allow(unused_imports)]
-use super::merge_rebase::*;
-#[allow(unused_imports)]
-use super::pickers::*;
-#[allow(unused_imports)]
 use super::remote::*;
-#[allow(unused_imports)]
-use super::staging::*;
-#[allow(unused_imports)]
-use super::stash::*;
-#[allow(unused_imports)]
 use super::status::*;
-#[allow(unused_imports)]
-use super::worktree::*;
+use std::process::Stdio;
 
 pub(crate) fn git_args_with_no_pager(command: &str, extra: &[&str]) -> Vec<String> {
     let mut args = Vec::with_capacity(2 + extra.len());

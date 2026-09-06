@@ -1,39 +1,25 @@
-#![allow(unused_imports)]
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
-    env,
     path::{Path, PathBuf},
     rc::Rc,
-    sync::{Arc, Mutex, mpsc},
+    sync::mpsc,
     thread,
 };
 
-use agent_client_protocol::{Agent, Client, ClientSideConnection};
+use agent_client_protocol::{Agent, ClientSideConnection};
 use agent_client_protocol::{
-    AuthCapabilities, AvailableCommand, ClientCapabilities, ContentBlock, CreateTerminalRequest,
-    CreateTerminalResponse, Error, FileSystemCapabilities, ImageContent, Implementation,
-    InitializeRequest, KillTerminalRequest, KillTerminalResponse, ListSessionsRequest,
-    LoadSessionRequest, Meta, ModelId, ModelInfo, NewSessionRequest, PermissionOption,
-    PermissionOptionId, PermissionOptionKind, Plan, ProtocolVersion, ReadTextFileRequest,
-    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
-    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionInfo, SessionInfoUpdate, SessionMode, SessionModeId,
-    SessionModeState, SessionModelState, SessionNotification, SessionUpdate,
-    SetSessionConfigOptionRequest, SetSessionModeRequest, SetSessionModelRequest, StopReason,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse, ToolCall,
-    ToolCallUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    AuthCapabilities, AvailableCommand, ClientCapabilities, ContentBlock, FileSystemCapabilities,
+    Implementation, InitializeRequest, ListSessionsRequest, LoadSessionRequest, Meta, ModelId,
+    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
+    ProtocolVersion, RequestPermissionOutcome, SelectedPermissionOutcome, SessionConfigId,
+    SessionConfigOption, SessionConfigValueId, SessionInfo, SessionInfoUpdate, SessionModeId,
+    SessionModeState, SessionModelState, SetSessionConfigOptionRequest, SetSessionModeRequest,
+    SetSessionModelRequest, StopReason, TerminalExitStatus, TerminalId, ToolCall, ToolCallUpdate,
 };
-use async_trait::async_trait;
-use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
-use editor_picker::PickerResultOrder;
 use editor_plugin_api::AcpClient as AcpClientConfig;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
-    process::Command,
+    io::{AsyncBufReadExt, BufReader},
     sync::{mpsc as tokio_mpsc, oneshot},
     task::LocalSet,
 };
@@ -41,16 +27,8 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::super::*;
 
-#[allow(unused_imports)]
 use super::client::*;
-#[allow(unused_imports)]
-use super::input::*;
-#[allow(unused_imports)]
 use super::launch::*;
-#[allow(unused_imports)]
-use super::manager::*;
-#[allow(unused_imports)]
-use super::session::*;
 
 pub(crate) struct PendingAcpClient {
     pub(crate) client_id: String,
@@ -215,7 +193,7 @@ pub(crate) fn refresh_acp_output_markdown(
     buffer_id: BufferId,
     follow_output: bool,
 ) -> Result<(), String> {
-    super::rebuild_acp_output_markdown(runtime, buffer_id, follow_output)
+    super::super::rebuild_acp_output_markdown(runtime, buffer_id, follow_output)
 }
 
 pub(crate) fn acp_session_buffer_name(session_title: &str) -> String {
@@ -1012,7 +990,7 @@ impl AcpRuntimeState {
 
     pub(crate) fn emit(&self, event: AcpEvent) {
         if self.event_tx.send(event).is_ok() {
-            super::ping_shell_wakeup();
+            super::super::ping_shell_wakeup();
         }
     }
 }

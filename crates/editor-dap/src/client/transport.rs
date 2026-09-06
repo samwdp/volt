@@ -1,46 +1,5 @@
-#![allow(unused_imports)]
-use super::super::*;
+use std::sync::{Arc, Mutex};
 
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    error::Error,
-    fmt,
-    io::{self, BufRead, BufReader, Read, Write},
-    mem,
-    net::TcpStream,
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
-};
-
-use dap_types::{
-    AttachRequestArguments, ContinueArguments, DisconnectArguments, EvaluateArguments,
-    EvaluateArgumentsContext, InitializeRequestArguments, LaunchRequestArguments, NextArguments,
-    PauseArguments, RestartArguments, ScopesArguments, SetBreakpointsArguments, Source,
-    SourceBreakpoint, StackTraceArguments, StepInArguments, StepOutArguments, VariablesArguments,
-    requests::{
-        Attach, Continue, Disconnect, Evaluate, Initialize, Launch, Next, Pause,
-        Request as DapRequest, Restart, Scopes, SetBreakpoints, StackTrace, StepIn, StepOut,
-        Threads, Variables,
-    },
-};
-use serde::Deserialize;
-use serde_json::{Value, json};
-
-use crate::{
-    BreakpointStore, BreakpointToggle, DebugAdapterRegistry, DebugAdapterSpec,
-    DebugAdapterTransport, DebugConfiguration, DebugRequestKind, DebugSessionPlan,
-    StoredBreakpoint,
-};
-
-#[allow(unused_imports)]
-use super::session::*;
-#[allow(unused_imports)]
 use super::types::*;
 
 /// One transport log entry.

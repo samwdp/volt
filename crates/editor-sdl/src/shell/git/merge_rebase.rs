@@ -1,30 +1,12 @@
-#![allow(unused_imports)]
 use super::super::*;
 
-#[allow(unused_imports)]
-use super::commands::*;
-#[allow(unused_imports)]
-use super::commit::*;
-#[allow(unused_imports)]
 use super::diff::*;
-#[allow(unused_imports)]
-use super::fringe::*;
-#[allow(unused_imports)]
 use super::log::*;
-#[allow(unused_imports)]
 use super::pickers::*;
-#[allow(unused_imports)]
 use super::process::*;
-#[allow(unused_imports)]
 use super::remote::*;
-#[allow(unused_imports)]
 use super::staging::*;
-#[allow(unused_imports)]
-use super::stash::*;
-#[allow(unused_imports)]
 use super::status::*;
-#[allow(unused_imports)]
-use super::worktree::*;
 
 pub(crate) fn git_merge_in_progress(runtime: &mut EditorRuntime) -> Result<bool, String> {
     let root = git_root(runtime)?;

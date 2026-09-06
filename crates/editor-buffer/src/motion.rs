@@ -1,18 +1,5 @@
-#![allow(unused_imports)]
-use std::{
-    fs::File,
-    io::{self, BufRead, BufReader, BufWriter, Read, Write},
-    ops::Range,
-    path::{Path, PathBuf},
-};
-
-use ropey::{Rope, RopeBuilder, RopeSlice, iter::Chunks as RopeChunks};
-
-#[allow(unused_imports)]
 use crate::buffer::*;
-#[allow(unused_imports)]
 use crate::geometry::*;
-#[allow(unused_imports)]
 use crate::objects::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

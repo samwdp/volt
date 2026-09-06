@@ -1,8 +1,3 @@
-#![allow(unused_imports)]
-use super::super::*;
-#[allow(unused_imports)]
-use crate::workspace_roots::*;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
@@ -11,7 +6,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, Sender},
+        mpsc::Sender,
     },
     thread,
     time::{Duration, SystemTime},
@@ -20,45 +15,21 @@ use std::{
 use editor_buffer::{TextPoint, TextRange};
 use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
 use lsp_types::{
-    ClientCapabilities, ClientInfo, CodeActionContext, CodeActionParams, CodeActionTriggerKind,
-    CompletionParams, Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentFormattingParams, DocumentRangeFormattingParams,
-    Documentation, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
-    HoverParams, InitializeParams, InitializeResult, InitializedParams, Location, LocationLink,
-    MarkedString, MarkupKind, NumberOrString, ParameterLabel, PartialResultParams, Position, Range,
-    ReferenceContext, ReferenceParams, SignatureHelp, SignatureHelpParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TraceValue, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceFolder,
-    notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
-        Initialized, Notification,
-    },
-    request::{
-        CodeActionRequest, Completion, Formatting, GotoDefinition, GotoImplementation,
-        HoverRequest, Initialize, RangeFormatting, References, Request, SignatureHelpRequest,
-    },
+    ClientCapabilities, CodeActionContext, CodeActionParams, CodeActionTriggerKind,
+    Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity, Documentation,
+    FormattingOptions, GotoDefinitionResponse, HoverContents, Location, LocationLink, MarkedString,
+    MarkupKind, NumberOrString, ParameterLabel, PartialResultParams, Position, Range,
+    SignatureHelp, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
+    WorkDoneProgressParams,
+    request::{CodeActionRequest, Initialize, Request},
 };
-use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::{
     Diagnostic, DiagnosticSeverity, LanguageServerRegistry, LanguageServerSession, LspError,
-    LspWorkspaceDiagnostic,
 };
 
-#[allow(unused_imports)]
-use super::completion::*;
-#[allow(unused_imports)]
-use super::documents::*;
-#[allow(unused_imports)]
-use super::manager::*;
-#[allow(unused_imports)]
-use super::notifications::*;
-#[allow(unused_imports)]
-use super::requests::*;
-#[allow(unused_imports)]
 use super::session::*;
 
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);

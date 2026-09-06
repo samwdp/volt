@@ -1,5 +1,5 @@
-#![allow(unused_imports)]
 use super::*;
+use editor_ui::OVERLAY_ACCENT_BAR_WIDTH;
 
 #[test]
 fn file_reload_notifications_target_only_matching_buffers() -> Result<(), String> {

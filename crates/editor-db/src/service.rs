@@ -1,35 +1,17 @@
-#![allow(unused_imports)]
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    env, fs, io,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
-
-#[cfg(test)]
-use std::sync::Mutex;
 
 use editor_plugin_api::{
-    DbActionSpec, DbBrowserContext, DbBrowserItemContext, DbBrowserItemKind, DbBrowserItemSpec,
-    DbBrowserKind,
+    DbActionSpec, DbBrowserContext, DbBrowserItemContext, DbBrowserItemKind, DbBrowserKind,
 };
-use keyring_core::Entry;
-use postgres::{Client as PostgresClient, NoTls, SimpleQueryMessage};
-use rusqlite::{Connection as SqliteConnection, types::ValueRef as SqliteValueRef};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tiberius::{Client as SqlServerClient, Config as SqlServerConfig, Row as SqlServerRow};
-use tokio::{net::TcpStream, runtime::Runtime};
-use tokio_util::compat::TokioAsyncWriteCompatExt;
 
-#[allow(unused_imports)]
-use crate::connection::*;
-#[allow(unused_imports)]
 use crate::engines::*;
-#[allow(unused_imports)]
 use crate::secrets::*;
-#[allow(unused_imports)]
 use crate::types::*;
 
 /// Central DB runtime service used by Volt.

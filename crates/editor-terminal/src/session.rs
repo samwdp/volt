@@ -1,7 +1,5 @@
-#![allow(unused_imports)]
 use std::{
     borrow::Cow,
-    collections::HashMap,
     error::Error,
     fmt,
     path::PathBuf,
@@ -22,12 +20,11 @@ use alacritty_terminal::{
         color::Colors as TerminalColors,
         point_to_viewport,
     },
-    tty::{self, Options as TtyOptions, Shell as TtyShell},
+    tty::{self},
     vte::ansi::{Color as TerminalColor, CursorShape, NamedColor, Rgb},
 };
 use editor_jobs::{JobError, JobManager, JobResult, JobSpec};
 
-#[allow(unused_imports)]
 use crate::render::*;
 
 /// Human-readable summary of this crate's responsibility.

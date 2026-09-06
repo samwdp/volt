@@ -310,8 +310,6 @@ const TOKEN_GHOST_TEXT: &str = "ui.ghost-text";
 const TOKEN_HEADERLINE: &str = "ui.headerline";
 const TOKEN_HEADERLINE_BACKGROUND: &str = "ui.headerline.background";
 const GIT_FRINGE_BAR_WIDTH: u32 = 3;
-#[allow(unused_imports)]
-pub(super) use editor_ui::{OVERLAY_ACCENT_BAR_WIDTH, OVERLAY_SHADOW_OFFSET};
 const MOUSE_WHEEL_SCROLL_LINES: i32 = 3;
 const OIL_BUFFER_NAME: &str = "*oil*";
 const OIL_PREVIEW_BUFFER_NAME: &str = "*oil-preview*";

@@ -1,20 +1,10 @@
-#![allow(unused_imports)]
 use std::{
     collections::BTreeMap,
-    error::Error,
-    fmt, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
-use editor_buffer::TextRange;
-use editor_jobs::JobSpec;
-use editor_path::{PathMatcher, PathPattern, normalize_extension};
-use serde_json::{Number, Value};
-
-pub use editor_tool_install::InstallRecipe;
-
-#[allow(unused_imports)]
-use crate::registry::*;
+use editor_path::{PathPattern, normalize_extension};
 
 pub(crate) fn normalize_unique_entries<I, S>(values: I) -> Vec<String>
 where

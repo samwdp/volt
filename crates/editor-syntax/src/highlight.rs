@@ -1,33 +1,10 @@
-#![allow(unused_imports)]
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    env,
-    error::Error,
-    fmt, fs,
-    mem::ManuallyDrop,
-    ops::ControlFlow,
-    path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeSet, sync::Arc};
 
-use editor_buffer::{SyntaxText, TextBuffer, TextByteChunks, TextEdit, TextPoint};
-use editor_path::PathMatcher;
-use tree_sitter::Language;
-use tree_sitter::{
-    InputEdit, Node, Parser, Point, Query, QueryCursor, QueryCursorOptions, QueryPredicateArg,
-    QueryProperty, Range, StreamingIterator, TextProvider, Tree,
-};
-use tree_sitter_language::LanguageFn;
+use editor_buffer::{SyntaxText, TextBuffer, TextEdit};
+use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, Range, StreamingIterator, Tree};
 
-#[allow(unused_imports)]
-use crate::install::*;
-#[allow(unused_imports)]
 use crate::language::*;
-#[allow(unused_imports)]
 use crate::query::*;
-#[allow(unused_imports)]
 use crate::registry::*;
 
 impl SyntaxSnapshot {

@@ -1,33 +1,23 @@
-#![allow(unused_imports)]
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    env,
-    error::Error,
-    fmt, fs,
+    collections::BTreeMap,
+    fs,
     mem::ManuallyDrop,
     ops::ControlFlow,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
 
-use editor_buffer::{SyntaxText, TextBuffer, TextByteChunks, TextEdit, TextPoint};
-use editor_path::PathMatcher;
+use editor_buffer::{SyntaxText, TextPoint};
 use tree_sitter::Language;
 use tree_sitter::{
-    InputEdit, Node, Parser, Point, Query, QueryCursor, QueryCursorOptions, QueryPredicateArg,
-    QueryProperty, Range, StreamingIterator, TextProvider, Tree,
+    Node, Point, Query, QueryCursor, QueryCursorOptions, QueryPredicateArg, QueryProperty,
+    StreamingIterator,
 };
 use tree_sitter_language::LanguageFn;
 
-#[allow(unused_imports)]
 use crate::highlight::*;
-#[allow(unused_imports)]
 use crate::install::*;
-#[allow(unused_imports)]
 use crate::language::*;
-#[allow(unused_imports)]
 use crate::registry::*;
 
 pub(crate) fn load_language(
