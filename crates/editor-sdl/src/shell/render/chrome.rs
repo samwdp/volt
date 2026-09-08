@@ -104,9 +104,11 @@ fn fill_window_top_header_band(
     Ok(())
 }
 
-/// Panel frame for ACP/plugin/input sections. When `window.opacity` < 1, paint a
-/// single rounded fill so every section shares one opacity layer (no border+inner
-/// stack). Opaque windows keep the 1px border ring.
+/// Panel frame for ACP/plugin/input sections.
+///
+/// Inactive translucent panels (`window.opacity` < 1) use a single rounded fill
+/// so neighboring sections do not stack border+inner alpha. Focused panels always
+/// keep the 1px border ring so the cursor section stays obvious.
 fn fill_window_panel_frame(
     target: &mut DrawTarget<'_>,
     rect: Rect,
@@ -114,6 +116,7 @@ fn fill_window_panel_frame(
     border: Color,
     background: Color,
     window_effects: WindowEffects,
+    focused: bool,
 ) -> Result<(), ShellError> {
     let opacity = crate::window_effects::window_surface_opacity(window_effects);
     paint_panel_frame(
@@ -123,7 +126,7 @@ fn fill_window_panel_frame(
             radius,
             border: to_render_color(window_surface_color(border, window_effects)),
             background: to_render_color(window_surface_color(background, window_effects)),
-            opaque_border: opacity >= 1.0,
+            paint_border: focused || opacity >= 1.0,
         },
     );
     Ok(())
@@ -194,14 +197,24 @@ pub(super) fn render_runtime_popup_overlay(
     let border_color = adjust_color(base_background, if is_dark { 24 } else { -24 });
     let git_summary = state.git_summary();
     let popup_radius = overlay_radius(theme_registry);
-    fill_overlay_surface_rounded_rect(
-        target,
-        popup_rect,
-        popup_radius,
-        popup_background,
-        window_effects,
-    )?;
-    fill_overlay_surface_rounded_rect(
+    // CONTEXT: runtime popups (terminal, browser, quickfix, …) share pane
+    // surface opacity so acrylic / window.opacity show through. Floating
+    // chrome (pickers, hover, autocomplete) stays on overlay fills.
+    // ACP / plugin buffers paint their own panels — skip the base fill so
+    // opacity does not stack darker than configured.
+    let paints_own_panels = state
+        .buffer(popup.active_buffer)
+        .is_some_and(|buffer| buffer.is_acp_buffer() || buffer.has_plugin_sections());
+    if !paints_own_panels {
+        fill_window_surface_rounded_rect(
+            target,
+            popup_rect,
+            popup_radius,
+            popup_background,
+            window_effects,
+        )?;
+    }
+    fill_window_surface_rounded_rect(
         target,
         PixelRectToRect::rect(
             popup_rect.x() + popup_rect.width() as i32 / 2 - 16,

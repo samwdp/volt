@@ -1148,6 +1148,35 @@ fn input_field_paste_shortcut_requested(keycode: Keycode, keymod: Mod) -> bool {
         && !keymod.intersects(alt_mod() | gui_mod())
 }
 
+/// Ctrl+V or Ctrl+Shift+V for minibuffer overlays (InputPrompt / command line).
+fn overlay_paste_shortcut_requested(keycode: Keycode, keymod: Mod) -> bool {
+    keycode == Keycode::V
+        && keymod.intersects(ctrl_mod())
+        && !keymod.intersects(alt_mod() | gui_mod())
+}
+
+fn paste_clipboard_text_into_input_prompt(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let ClipboardPaste::Text(text) = read_system_clipboard_paste() else {
+        return Ok(false);
+    };
+    let Some(prompt) = shell_ui_mut(runtime)?.input_prompt_mut() else {
+        return Ok(false);
+    };
+    prompt.append_text(&text);
+    Ok(true)
+}
+
+fn paste_clipboard_text_into_command_line(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let ClipboardPaste::Text(text) = read_system_clipboard_paste() else {
+        return Ok(false);
+    };
+    let Some(command_line) = shell_ui_mut(runtime)?.command_line_mut() else {
+        return Ok(false);
+    };
+    command_line.append_text(&text);
+    Ok(true)
+}
+
 fn paste_into_active_input_buffer(runtime: &mut EditorRuntime) -> Result<bool, String> {
     match read_system_clipboard_paste() {
         ClipboardPaste::Empty => Ok(false),

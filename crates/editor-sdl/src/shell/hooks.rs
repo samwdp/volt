@@ -197,6 +197,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_CLONE,
+        "Clones a remote repository (bare or full) into a chosen directory.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_FORMAT,
         "Formats the active buffer or visual selection.",
     )?;
@@ -1690,6 +1695,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_WORKSPACE_CLONE, "shell.workspace-clone", |_, runtime| {
+            open_workspace_clone_prompt(runtime)
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_PICKER_OPEN, "shell.open-picker", |event, runtime| {
             let picker =
                 picker::picker_overlay(runtime, event.detail.as_deref().unwrap_or("commands"))?;
@@ -2667,6 +2677,10 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 }
                 PickerAction::GitWorktreeDashboardCreate { base_dir } => {
                     open_git_worktree_dashboard_create(runtime, &base_dir)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::WorkspaceCloneMode { url, bare } => {
+                    begin_oil_clone_request(runtime, &url, bare)?;
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::GitBranchAction { action, branch } => match action {

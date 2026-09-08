@@ -390,6 +390,62 @@ fn input_field_paste_shortcut_requested_recognizes_ctrl_shift_v_only() {
 }
 
 #[test]
+fn overlay_paste_shortcut_requested_accepts_ctrl_v_and_ctrl_shift_v() {
+    assert!(overlay_paste_shortcut_requested(Keycode::V, ctrl_mod()));
+    assert!(overlay_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod() | shift_mod()
+    ));
+    assert!(!overlay_paste_shortcut_requested(Keycode::V, shift_mod()));
+    assert!(!overlay_paste_shortcut_requested(
+        Keycode::V,
+        ctrl_mod() | Mod::LALTMOD
+    ));
+}
+
+#[test]
+fn input_prompt_ctrl_v_pastes_clipboard_text() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("input-prompt-paste");
+    open_workspace_from_project(&mut state.runtime, "input-prompt-paste", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.clone")
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.input_prompt_visible());
+
+    let url = "https://example.com/volt-paste.git";
+    set_clipboard_text_override_for_test(Some(url));
+    let (render_width, render_height, cell_width, line_height) = markdown_table_event_dimensions();
+    let handled = state
+        .handle_event(
+            Event::KeyDown {
+                timestamp: 0,
+                window_id: 0,
+                keycode: Some(Keycode::V),
+                scancode: None,
+                keymod: ctrl_mod(),
+                repeat: false,
+                which: 0,
+                raw: 0,
+            },
+            render_width,
+            render_height,
+            cell_width,
+            line_height,
+        )
+        .map_err(|error| error.to_string())?;
+    set_clipboard_text_override_for_test(None);
+
+    assert!(!handled, "Ctrl+V paste should be consumed without quitting");
+    assert_eq!(active_input_prompt_text(&state)?, Some(url.to_owned()));
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn workspace_dock_ctrl_h_enters_focus_from_panes_when_left_docked() -> Result<(), String> {
     let mut state = state_with_workspace_dock_config(WorkspaceDockConfig {
         side: WorkspaceDockSide::Left,

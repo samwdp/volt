@@ -1057,10 +1057,15 @@ impl ShellState {
     fn handle_input_prompt_keydown(
         &mut self,
         keycode: Keycode,
-        _keymod: Mod,
+        keymod: Mod,
     ) -> Result<bool, ShellError> {
         if !self.ui()?.input_prompt_visible() {
             return Ok(false);
+        }
+        if overlay_paste_shortcut_requested(keycode, keymod) {
+            paste_clipboard_text_into_input_prompt(&mut self.runtime)
+                .map_err(ShellError::Runtime)?;
+            return Ok(true);
         }
         match keycode {
             Keycode::Escape => {
@@ -1114,7 +1119,7 @@ impl ShellState {
                 }
                 Ok(true)
             }
-            _ => Ok(keydown_chord(keycode, _keymod).is_some()),
+            _ => Ok(keydown_chord(keycode, keymod).is_some()),
         }
     }
 
@@ -1125,6 +1130,11 @@ impl ShellState {
     ) -> Result<bool, ShellError> {
         if !self.command_line_visible()? {
             return Ok(false);
+        }
+        if overlay_paste_shortcut_requested(keycode, keymod) {
+            paste_clipboard_text_into_command_line(&mut self.runtime)
+                .map_err(ShellError::Runtime)?;
+            return Ok(true);
         }
         match keycode {
             Keycode::Escape => {

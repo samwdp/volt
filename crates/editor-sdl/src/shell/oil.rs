@@ -171,12 +171,79 @@ fn oil_default_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
     oil_workspace_root(runtime)
 }
 
+/// Sentinel oil root for the Windows Drive List (not a real filesystem path).
+fn oil_volume_list_root() -> PathBuf {
+    PathBuf::from("Drives")
+}
+
+fn is_oil_volume_list_root(path: &Path) -> bool {
+    path.as_os_str() == "Drives"
+}
+
+/// True when `path` is a Windows drive root such as `P:\` (prefix + root only).
+fn is_windows_drive_root(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let mut components = path.components();
+        matches!(components.next(), Some(Component::Prefix(_)))
+            && matches!(components.next(), Some(Component::RootDir))
+            && components.next().is_none()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+fn windows_logical_drive_entries() -> Vec<DirectoryEntry> {
+    #[cfg(windows)]
+    {
+        (b'A'..=b'Z')
+            .filter_map(|letter| {
+                let root = PathBuf::from(format!("{}:\\", letter as char));
+                if root.exists() {
+                    Some(DirectoryEntry::new(
+                        format!("{}:", letter as char),
+                        root,
+                        DirectoryEntryKind::Directory,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
 fn oil_parent_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
     if let Some(root) = active_directory_root(runtime)? {
-        return Ok(root.parent().unwrap_or(root.as_path()).to_path_buf());
+        if is_oil_volume_list_root(&root) {
+            return Ok(root);
+        }
+        if let Some(parent) = root.parent() {
+            return Ok(parent.to_path_buf());
+        }
+        if cfg!(windows) && is_windows_drive_root(&root) {
+            return Ok(oil_volume_list_root());
+        }
+        return Ok(root);
     }
     let root = oil_default_root(runtime)?;
-    Ok(root.parent().unwrap_or(root.as_path()).to_path_buf())
+    if is_oil_volume_list_root(&root) {
+        return Ok(root);
+    }
+    if let Some(parent) = root.parent() {
+        return Ok(parent.to_path_buf());
+    }
+    if cfg!(windows) && is_windows_drive_root(&root) {
+        return Ok(oil_volume_list_root());
+    }
+    Ok(root)
 }
 
 fn open_oil_directory(runtime: &mut EditorRuntime, root: PathBuf) -> Result<(), String> {
@@ -240,12 +307,16 @@ fn refresh_directory_buffer(
             state.trash_enabled,
         )
     };
-    let entries = match DirectoryBuffer::read(&root) {
-        Ok(buffer) => buffer.entries().to_vec(),
-        Err(error) => {
-            let message = format!("failed to read `{}`: {error}", root.display());
-            set_directory_error(runtime, buffer_id, &message)?;
-            return Err(message);
+    let entries = if is_oil_volume_list_root(&root) {
+        windows_logical_drive_entries()
+    } else {
+        match DirectoryBuffer::read(&root) {
+            Ok(buffer) => buffer.entries().to_vec(),
+            Err(error) => {
+                let message = format!("failed to read `{}`: {error}", root.display());
+                set_directory_error(runtime, buffer_id, &message)?;
+                return Err(message);
+            }
         }
     };
     let defaults = shell_user_library(runtime).oil_defaults();
@@ -279,12 +350,16 @@ fn set_directory_root(
         )
     };
     let root_for_compare = root.clone();
-    let entries = match DirectoryBuffer::read(&root) {
-        Ok(buffer) => buffer.entries().to_vec(),
-        Err(error) => {
-            let message = format!("failed to read `{}`: {error}", root.display());
-            set_directory_error(runtime, buffer_id, &message)?;
-            return Err(message);
+    let entries = if is_oil_volume_list_root(&root) {
+        windows_logical_drive_entries()
+    } else {
+        match DirectoryBuffer::read(&root) {
+            Ok(buffer) => buffer.entries().to_vec(),
+            Err(error) => {
+                let message = format!("failed to read `{}`: {error}", root.display());
+                set_directory_error(runtime, buffer_id, &message)?;
+                return Err(message);
+            }
         }
     };
     let mut state = DirectoryViewState::new(root, entries, defaults);

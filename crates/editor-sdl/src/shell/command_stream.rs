@@ -29,6 +29,10 @@ pub(super) enum StreamedCommandExitAction {
         name: String,
         path: PathBuf,
     },
+    /// Close the stream popup, leave oil, then open Workspace Dashboard at `base_dir`.
+    CloseAndOpenWorkspaceDashboard {
+        base_dir: PathBuf,
+    },
     ContinueTreeSitterInstall(Box<TreeSitterInstallState>),
     ContinueTreeSitterRecompile(Box<TreeSitterRecompileState>),
     ContinueToolInstall(Box<ToolInstallState>),
@@ -453,6 +457,7 @@ pub(super) fn refresh_pending_streamed_commands(
     let mut refresh_git_status = false;
     let mut open_commit_after_close = false;
     let mut open_workspace_after_close: Option<(String, PathBuf)> = None;
+    let mut open_dashboard_after_close: Option<PathBuf> = None;
     let now = Instant::now();
 
     for update in updates {
@@ -534,6 +539,13 @@ pub(super) fn refresh_pending_streamed_commands(
                             refresh_git_status = true;
                             project_discovery_rescan_cached_roots();
                             open_workspace_after_close = Some((name, path));
+                        }
+                    }
+                    StreamedCommandExitAction::CloseAndOpenWorkspaceDashboard { base_dir } => {
+                        if outcome.success {
+                            buffers_to_close.push(buffer_id);
+                            project_discovery_rescan_cached_roots();
+                            open_dashboard_after_close = Some(base_dir);
                         }
                     }
                     StreamedCommandExitAction::ContinueTreeSitterInstall(state) => {
@@ -666,7 +678,13 @@ pub(super) fn refresh_pending_streamed_commands(
         changed = true;
     }
     if let Some((name, path)) = open_workspace_after_close {
+        let _ = close_active_oil_buffer(runtime);
         open_workspace_from_project(runtime, &name, &path)?;
+        changed = true;
+    }
+    if let Some(base_dir) = open_dashboard_after_close {
+        let _ = close_active_oil_buffer(runtime);
+        open_workspace_dashboard_at(runtime, &base_dir)?;
         changed = true;
     }
     Ok(changed)

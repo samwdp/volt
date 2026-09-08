@@ -50,6 +50,18 @@ _Avoid_: sidebar (as the spoken product term), ACP popup
 A git worktree checkout path that can be opened as a Project Workspace root. Distinct from the open editor Workspace itself.
 _Avoid_: project (when meaning the checkout path), branch (when meaning the directory), workspace (when meaning the on-disk checkout)
 
+**Bare Repo**:
+A git bare clone on disk used as the shared object store / common dir for Worktrees. It is not a Worktree and is not the day-to-day Project Workspace root you edit in.
+_Avoid_: bare workspace, workspace root (when meaning the bare path), worktree (when meaning the bare clone)
+
+**Workspace Clone**:
+The flow started by `workspace.clone`: paste a remote URL, choose bare or full clone, navigate oil to the parent directory, type a new directory name line (as with oil creates / worktree naming), run the clone via Command Stream, then either open Workspace Dashboard (bare) or open the clone path as a Project Workspace (full).
+_Avoid_: workspace.new-root, clone bare (as the whole feature name), new workspace (when meaning this clone flow)
+
+**Drive List**:
+The virtual oil listing of Windows logical drives shown as the parent of a drive root (reached with oil open-parent / `-`). Each drive is a normal directory entry. Not used on non-Windows hosts.
+_Avoid_: drive picker, select-drive, volume picker (as the spoken product name)
+
 **Workspace Dashboard**:
 The picker that lists Worktrees for the active context so the user can open, create, or remove them. Opened by `workspace.dashboard` / `<leader> p d`.
 _Avoid_: project dashboard, worktree list (as the spoken product name)

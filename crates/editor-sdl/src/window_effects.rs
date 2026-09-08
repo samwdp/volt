@@ -247,10 +247,12 @@ pub(crate) fn window_surface_opacity(settings: WindowEffects) -> f32 {
 }
 
 pub(crate) fn overlay_window_surface_opacity(_settings: WindowEffects) -> f32 {
-    // CONTEXT: floating overlay chrome (pickers, popups, hover, notifications)
-    // stays fully opaque so text stays crisp and cards do not muddy-stack. ACP /
-    // plugin / browser buffer sections use window_surface_opacity instead so they
-    // share the same darkened-base + transparent treatment as editor panes.
+    // CONTEXT: floating overlay chrome (pickers, hover, autocomplete,
+    // notifications) stays fully opaque so text stays crisp and cards do not
+    // muddy-stack. Runtime popups use window_surface_opacity via
+    // fill_window_surface_* in render_runtime_popup_overlay. ACP / plugin /
+    // browser buffer sections also use window_surface_opacity so they share
+    // the same darkened-base + transparent treatment as editor panes.
     DEFAULT_WINDOW_OPACITY
 }
 

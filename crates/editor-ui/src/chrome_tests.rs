@@ -52,7 +52,7 @@ fn overlay_card_shadow_and_accent_emit_expected_command_count() {
 }
 
 #[test]
-fn panel_frame_opaque_paints_border_then_inset() {
+fn panel_frame_with_border_paints_ring_then_inset() {
     let mut out = Vec::new();
     paint_panel_frame(
         &mut out,
@@ -61,7 +61,7 @@ fn panel_frame_opaque_paints_border_then_inset() {
             radius: 6,
             border: color(255),
             background: color(128),
-            opaque_border: true,
+            paint_border: true,
         },
     );
     assert_eq!(out.len(), 2);
@@ -78,7 +78,7 @@ fn panel_frame_opaque_paints_border_then_inset() {
 }
 
 #[test]
-fn panel_frame_translucent_is_single_fill() {
+fn panel_frame_without_border_is_single_fill() {
     let mut out = Vec::new();
     paint_panel_frame(
         &mut out,
@@ -87,7 +87,7 @@ fn panel_frame_translucent_is_single_fill() {
             radius: 6,
             border: color(255),
             background: color(128),
-            opaque_border: false,
+            paint_border: false,
         },
     );
     assert_eq!(out.len(), 1);

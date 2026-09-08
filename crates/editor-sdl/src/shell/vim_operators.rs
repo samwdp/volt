@@ -779,6 +779,7 @@ fn dispatch_input_prompt_confirm(
 ) -> Result<(), String> {
     match id {
         COMPILE_PROMPT_ID => run_compile_command_streamed(runtime, text),
+        WORKSPACE_CLONE_URL_PROMPT_ID => confirm_workspace_clone_url(runtime, text),
         DAP_PROGRAM_PROMPT_ID => confirm_dap_program_prompt(runtime, text),
         DAP_PROCESS_PROMPT_ID => confirm_dap_process_prompt(runtime, text),
         DAP_EXPRESSION_ADD_PROMPT_ID => add_dap_expression(runtime, text),

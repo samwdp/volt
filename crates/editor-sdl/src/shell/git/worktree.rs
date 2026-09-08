@@ -130,14 +130,24 @@ impl GitWorktreeListEntry {
 pub(crate) fn git_worktree_dashboard_picker_overlay(
     runtime: &EditorRuntime,
 ) -> Result<PickerOverlay, String> {
-    let base_dir = worktree_dashboard_base_dir(runtime)?;
-    let worktrees = git_worktree_list(&base_dir)?;
+    let base_dir = shell_ui(runtime)?
+        .pending_workspace_dashboard_base
+        .clone()
+        .map_or_else(|| worktree_dashboard_base_dir(runtime), Ok)?;
+    git_worktree_dashboard_picker_overlay_at(runtime, &base_dir)
+}
+
+pub(crate) fn git_worktree_dashboard_picker_overlay_at(
+    runtime: &EditorRuntime,
+    base_dir: &Path,
+) -> Result<PickerOverlay, String> {
+    let worktrees = git_worktree_list(base_dir)?;
     let mut entries = worktrees
         .into_iter()
         .filter(|entry| !entry.bare)
         .map(|entry| {
             let existing_workspace = find_workspace_by_root(runtime, &entry.path)?;
-            let name = entry.display_name(&base_dir);
+            let name = entry.display_name(base_dir);
             let detail = {
                 let mut detail = entry.detail();
                 if existing_workspace.is_some() {
@@ -177,12 +187,31 @@ pub(crate) fn git_worktree_dashboard_picker_overlay(
                 base_dir.display().to_string(),
                 Some("Open oil at the bare repo and choose a branch.".to_owned()),
             ),
-            action: PickerAction::GitWorktreeDashboardCreate { base_dir },
+            action: PickerAction::GitWorktreeDashboardCreate {
+                base_dir: base_dir.to_path_buf(),
+            },
             quickfix: None,
         },
     );
 
     Ok(PickerOverlay::from_entries("Workspace Dashboard", entries))
+}
+
+/// Opens Workspace Dashboard for an explicit Bare Repo / common-dir path.
+pub(crate) fn open_workspace_dashboard_at(
+    runtime: &mut EditorRuntime,
+    base_dir: &Path,
+) -> Result<(), String> {
+    shell_ui_mut(runtime)?.pending_workspace_dashboard_base = Some(base_dir.to_path_buf());
+    let opened = runtime
+        .execute_command("workspace.dashboard")
+        .map_err(|error| error.to_string());
+    shell_ui_mut(runtime)?.pending_workspace_dashboard_base = None;
+    opened?;
+    if shell_ui(runtime)?.picker().is_none() {
+        return Err("workspace.dashboard did not open picker".to_owned());
+    }
+    Ok(())
 }
 
 pub(crate) fn open_git_worktree_dashboard_create(

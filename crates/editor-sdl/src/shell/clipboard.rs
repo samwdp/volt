@@ -7,6 +7,7 @@ struct ClipboardContext {
 
 thread_local! {
     static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = const { RefCell::new(None) };
+    static CLIPBOARD_TEXT_OVERRIDE_FOR_TEST: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 const CLIPBOARD_IMAGE_MIME_TYPES: &[&str] = &[
@@ -70,7 +71,23 @@ pub(super) fn write_system_clipboard(text: &str) {
     }
 }
 
+#[cfg(test)]
+pub(super) fn set_clipboard_text_override_for_test(text: Option<&str>) {
+    CLIPBOARD_TEXT_OVERRIDE_FOR_TEST.with(|override_text| {
+        *override_text.borrow_mut() = text.map(str::to_owned);
+    });
+}
+
 pub(super) fn read_system_clipboard() -> Option<String> {
+    if let Some(text) = CLIPBOARD_TEXT_OVERRIDE_FOR_TEST.with(|override_text| {
+        override_text
+            .borrow()
+            .as_ref()
+            .filter(|text| !text.is_empty())
+            .cloned()
+    }) {
+        return Some(text);
+    }
     with_clipboard_util(|clipboard| {
         if !clipboard.has_clipboard_text() {
             return None;

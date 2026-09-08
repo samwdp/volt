@@ -39,6 +39,12 @@ pub(super) struct PendingWorktreeRequest {
     pub(super) create_new_branch: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PendingWorkspaceClone {
+    pub(super) url: String,
+    pub(super) bare: bool,
+}
+
 impl DirectoryViewState {
     pub(super) fn new(root: PathBuf, entries: Vec<DirectoryEntry>, defaults: OilDefaults) -> Self {
         Self {
@@ -831,6 +837,32 @@ pub(super) fn apply_directory_edit_queue(
     let actions = directory_edit_actions(&root, &before, &after, &*user_library)?;
     if actions.is_empty() {
         return Ok(());
+    }
+    if let Some(pending) = shell_ui(runtime)?.pending_workspace_clone.clone() {
+        let create_paths = actions
+            .iter()
+            .filter_map(|action| match action {
+                DirectoryEditAction::CreateDir(path) | DirectoryEditAction::CreateFile(path) => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let only_creates = actions.iter().all(|action| {
+            matches!(
+                action,
+                DirectoryEditAction::CreateDir(_) | DirectoryEditAction::CreateFile(_)
+            )
+        });
+        if only_creates && create_paths.len() == 1 {
+            let path = &create_paths[0];
+            if is_oil_volume_list_root(&root) {
+                return Err("navigate into a drive before naming the clone directory".to_owned());
+            }
+            shell_ui_mut(runtime)?.pending_workspace_clone = None;
+            run_workspace_clone(runtime, &pending.url, pending.bare, path)?;
+            return Ok(());
+        }
     }
     for action in &actions {
         if let DirectoryEditAction::CreateGitWorktree {

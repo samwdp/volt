@@ -168,6 +168,83 @@ fn render_browser_selected_section_applies_window_opacity() -> Result<(), String
 }
 
 #[test]
+fn render_browser_selected_section_keeps_focus_border_when_translucent() -> Result<(), String> {
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(
+            editor_theme::Theme::new("test-theme", "Test Theme")
+                .with_option(crate::window_effects::OPTION_WINDOW_OPACITY, 0.5),
+        )
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_browser_test_buffer(&mut state)?;
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "browser shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let browser_layout = browser_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "browser layout missing".to_owned())?;
+    let cursor = Color::RGB(110, 170, 255);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_browser_buffer_body(
+        &mut target,
+        BrowserBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: Some(&registry),
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(55, 71, 99, 255),
+            cursor,
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let input = browser_layout.input.rect;
+    let expected_border = to_render_color(Color::RGBA(110, 170, 255, 128));
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRoundedRect { rect, color, .. }
+                if rect.x == input.x()
+                    && rect.y == input.y()
+                    && rect.width == input.width()
+                    && rect.height == input.height()
+                    && *color == expected_border
+        )),
+        "focused translucent section must paint its active border ring"
+    );
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRoundedRect { rect, .. }
+                if rect.x == input.x() + 1
+                    && rect.y == input.y() + 1
+                    && rect.width == input.width().saturating_sub(2)
+                    && rect.height == input.height().saturating_sub(2)
+        )),
+        "focused translucent section must inset the panel fill inside the border"
+    );
+    Ok(())
+}
+
+#[test]
 fn browser_buffer_submit_tracks_requested_navigation() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let buffer_id = install_browser_test_buffer(&mut state)?;

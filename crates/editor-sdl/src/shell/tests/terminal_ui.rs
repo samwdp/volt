@@ -404,6 +404,61 @@ fn terminal_popup_command_focuses_the_popup_surface() -> Result<(), String> {
 }
 
 #[test]
+fn popup_terminal_dimensions_match_painted_content_rect() -> Result<(), String> {
+    // PTY rows/cols must match popup_content_rect paint metrics. Outer popup height
+    // oversizes the session so the live prompt sits past layout.visible_rows and is
+    // clipped with no scroll path that can reveal it.
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_terminal_popup_test_buffer(&mut state)?;
+
+    let render_width = 960u32;
+    let render_height = 720u32;
+    let cell_width = 8i32;
+    let line_height = 16i32;
+
+    let (_, rows, cols) = active_terminal_dimensions(
+        &state.runtime,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?
+    .ok_or_else(|| "popup terminal dimensions missing".to_owned())?;
+
+    let user_library = shell_user_library(&state.runtime);
+    let ui = shell_ui(&state.runtime)?;
+    let docks = shell_docks_layout(&*user_library, ui, render_width, render_height, cell_width);
+    let popup_height = popup_window_height(render_height, line_height);
+    let pane_height = render_height.saturating_sub(popup_height);
+    let content_rect = popup_content_rect(PixelRectToRect::rect(
+        docks.content_x,
+        pane_height as i32,
+        docks.content_width,
+        popup_height,
+    ));
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let painted_rows = buffer_footer_layout_with_command_line(
+        buffer,
+        content_rect,
+        line_height,
+        cell_width,
+        false,
+    )
+    .visible_rows;
+    let painted_cols = wrap_columns_for_width(content_rect.width(), cell_width).max(1);
+
+    assert_eq!(
+        rows as usize, painted_rows,
+        "popup terminal PTY rows must match painted content rows"
+    );
+    assert_eq!(
+        cols as usize, painted_cols,
+        "popup terminal PTY cols must match painted content cols"
+    );
+    Ok(())
+}
+
+#[test]
 fn dismissed_popup_toggle_restores_terminal_buffer() -> Result<(), String> {
     let mut state = state_with_user_library()?;
 

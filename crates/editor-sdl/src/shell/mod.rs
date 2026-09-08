@@ -248,6 +248,7 @@ include!("oil.rs");
 include!("compile.rs");
 include!("refresh.rs");
 include!("workspace.rs");
+include!("workspace_clone.rs");
 include!("syntax_refresh.rs");
 include!("files.rs");
 include!("input_chords.rs");

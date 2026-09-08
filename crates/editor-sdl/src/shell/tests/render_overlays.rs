@@ -666,8 +666,9 @@ fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
 }
 
 #[test]
-fn render_shell_state_uses_opaque_overlay_chrome_for_docked_runtime_popup_surface()
--> Result<(), String> {
+fn render_shell_state_applies_window_opacity_to_docked_runtime_popup_surface() -> Result<(), String>
+{
+    let _guard = crate::window_effects::force_surface_window_opacity_for_tests();
     let mut registry = ThemeRegistry::new();
     registry
         .register(
@@ -693,7 +694,7 @@ fn render_shell_state_uses_opaque_overlay_chrome_for_docked_runtime_popup_surfac
 
     assert_eq!(
         popup_surface_fills,
-        vec![to_render_color(Color::RGBA(15, 16, 20, 255))]
+        vec![to_render_color(Color::RGBA(15, 16, 20, 128))]
     );
     Ok(())
 }

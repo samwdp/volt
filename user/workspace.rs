@@ -15,7 +15,7 @@ pub fn package() -> PluginPackage {
     PluginPackage::new(
         "workspace",
         true,
-        "Workspace creation, switching, deletion, file listing, and project discovery.",
+        "Workspace creation, switching, deletion, cloning, file listing, and project discovery.",
     )
     .with_commands(vec![
         picker_command(
@@ -37,6 +37,11 @@ pub fn package() -> PluginPackage {
             "workspace.dashboard",
             "Shows checked-out git worktrees for the active workspace.",
             "workspace.dashboard",
+        ),
+        hook_command(
+            "workspace.clone",
+            "Clones a remote repository (bare or full) into a chosen oil directory.",
+            "workspace.clone",
         ),
         picker_command(
             "workspace.list-files",
@@ -542,6 +547,17 @@ mod tests {
                 .commands()
                 .iter()
                 .any(|command| command.name() == "workspace.worktree-remove")
+        );
+    }
+
+    #[test]
+    fn package_exports_clone_command() {
+        let package = package();
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "workspace.clone")
         );
     }
 

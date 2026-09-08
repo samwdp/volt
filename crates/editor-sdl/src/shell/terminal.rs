@@ -326,10 +326,25 @@ pub(super) fn active_terminal_dimensions(
         .as_ref()
         .is_some_and(|popup| popup.active_buffer == buffer_id)
     {
-        (
+        // Match render_runtime_popup_overlay: PTY size must use popup_content_rect,
+        // not the outer chrome window, or the live prompt is clipped.
+        let popup_height = popup_window_height(render_height, line_height).max(1);
+        let pane_height = render_height.saturating_sub(popup_height);
+        let ui = shell_ui(runtime)?;
+        let docks = shell_docks_layout(
+            &*shell_user_library(runtime),
+            ui,
             render_width,
-            popup_window_height(render_height, line_height).max(1),
-        )
+            render_height,
+            cell_width,
+        );
+        let content = popup_content_rect(PixelRectToRect::rect(
+            docks.content_x,
+            pane_height as i32,
+            docks.content_width,
+            popup_height,
+        ));
+        (content.width().max(1), content.height().max(1))
     } else {
         let popup_height = popup
             .as_ref()

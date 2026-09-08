@@ -48,7 +48,10 @@ impl ShellState {
         if let Some(popup) = runtime_popup.as_ref()
             && ui.popup_focus_active(popup)
         {
-            return Ok(popup_window_height(render_height, line_height).max(1));
+            let popup_height = popup_window_height(render_height, line_height).max(1);
+            return Ok(popup_content_rect(PixelRectToRect::rect(0, 0, 1, popup_height))
+                .height()
+                .max(1));
         }
         let popup_height = runtime_popup
             .as_ref()
@@ -132,10 +135,16 @@ impl ShellState {
             })
             .collect::<Vec<_>>();
         if let Some(popup) = runtime_popup.as_ref() {
-            visible_buffers.push((
-                popup.active_buffer,
+            let content = popup_content_rect(PixelRectToRect::rect(
+                docks.content_x,
+                pane_height as i32,
                 docks.content_width,
                 popup_height.max(1),
+            ));
+            visible_buffers.push((
+                popup.active_buffer,
+                content.width().max(1),
+                content.height().max(1),
                 ui.popup_focus_active(popup),
             ));
         }

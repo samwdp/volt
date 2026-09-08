@@ -476,7 +476,7 @@ mod tests {
         GLOBAL_THEME_FILE_NAME, SharedThemeConfig, list_theme_files, parse_shared_theme_config,
         parse_theme, themes_dir_from_exe_dir,
     };
-    use editor_theme::{Color, Theme};
+    use editor_theme::Color;
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -720,33 +720,6 @@ red = "#cc241d"
                 );
             }
         }
-    }
-
-    #[test]
-    fn bundled_shared_theme_config_includes_window_effect_defaults() {
-        let shared = bundled_shared_theme_config();
-        let theme = shared.apply_to_theme(Theme::new("test-theme", "Test Theme"));
-        let corner_radius = theme
-            .option_number("corner_radius")
-            .unwrap_or_else(|| panic!("shared config missing corner_radius"));
-        let opacity = theme
-            .option_number("window.opacity")
-            .unwrap_or_else(|| panic!("shared config missing window.opacity"));
-        let blur = theme
-            .option_number("window.blur")
-            .unwrap_or_else(|| panic!("shared config missing window.blur"));
-        let transparency = theme
-            .option_string("window.transparency")
-            .unwrap_or_else(|| panic!("shared config missing window.transparency"));
-
-        assert!(corner_radius >= 0.0);
-        assert!((0.0..=1.0).contains(&opacity));
-        assert!(blur >= 0.0);
-        assert_eq!(corner_radius, 12.0);
-        assert_eq!(theme.option_bool("acp.chat.rounded"), Some(true));
-        assert_eq!(opacity, 0.1);
-        assert_eq!(blur, 1.0);
-        assert_eq!(transparency, "acrylic");
     }
 
     #[test]

@@ -261,6 +261,7 @@ pub(super) fn render_text_panel(
         border,
         panel_background,
         window_effects,
+        pane_active,
     )?;
     let header_height = text_panel_header_height(title, line_height.max(1));
     if header_height > 0 {
@@ -440,6 +441,7 @@ pub(super) fn render_input_panel(
         border,
         panel_background,
         window_effects,
+        pane_active,
     )?;
     let input_x = rect.x() + INPUT_PANEL_VERTICAL_PADDING;
     let input_y = rect.y() + INPUT_PANEL_VERTICAL_PADDING;
@@ -878,6 +880,7 @@ pub(super) fn render_acp_pane(
         border,
         panel_background,
         window_effects,
+        pane_active,
     )?;
     let header_height = (line_height + 10).max(line_height);
     let header_rect = PixelRectToRect::rect(

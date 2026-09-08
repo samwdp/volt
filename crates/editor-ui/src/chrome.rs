@@ -26,20 +26,21 @@ pub struct OverlayCard {
     pub shadow: Option<RenderColor>,
 }
 
-/// Panel chrome: rounded fill, with an optional 1px border ring on opaque windows.
+/// Panel chrome: rounded fill, with an optional 1px border ring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelFrame {
     /// Panel bounds.
     pub rect: PixelRect,
     /// Corner radius.
     pub radius: u32,
-    /// Border color used when `opaque_border` is true.
+    /// Border color used when `paint_border` is true.
     pub border: RenderColor,
     /// Background fill.
     pub background: RenderColor,
     /// When true, paint a 1px border ring then inset background. When false, a
-    /// single rounded fill so translucent windows do not stack alpha.
-    pub opaque_border: bool,
+    /// single rounded fill so translucent inactive panels do not stack alpha.
+    /// Focused panels should keep this true so the active section stays visible.
+    pub paint_border: bool,
 }
 
 /// Buffer-body scrollbar thumb geometry.
@@ -190,9 +191,9 @@ pub fn paint_panel_frame(out: &mut Vec<DrawCommand>, frame: PanelFrame) {
         radius,
         border,
         background,
-        opaque_border,
+        paint_border,
     } = frame;
-    if opaque_border {
+    if paint_border {
         push_rounded(out, rect, radius, border);
         let inner_rect = PixelRect::new(
             rect.x + 1,

@@ -395,3 +395,133 @@ fn oil_open_directory_is_scoped_per_workspace() -> Result<(), String> {
     std::fs::remove_dir_all(&second_root).map_err(|error| error.to_string())?;
     Ok(())
 }
+
+#[cfg(windows)]
+#[test]
+fn oil_open_parent_at_drive_root_opens_drive_list() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("oil-drive-list");
+    open_workspace_from_project(&mut state.runtime, "oil-drive-list", &root)?;
+
+    let drive_root = PathBuf::from("C:\\");
+    open_oil_directory(&mut state.runtime, drive_root.clone())?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    state
+        .runtime
+        .execute_command("oil.open-parent")
+        .map_err(|error| error.to_string())?;
+
+    let directory = shell_buffer(&state.runtime, buffer_id)?
+        .directory_state()
+        .ok_or_else(|| "directory state missing".to_owned())?
+        .clone();
+    assert!(
+        is_oil_volume_list_root(&directory.root),
+        "expected Drive List root, got {}",
+        directory.root.display()
+    );
+    assert!(
+        directory
+            .entries
+            .iter()
+            .any(|entry| entry.path() == drive_root || entry.name() == "C:"),
+        "Drive List should include C:"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_clone_opens_url_prompt_then_mode_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-clone-prompt");
+    open_workspace_from_project(&mut state.runtime, "workspace-clone-prompt", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.clone")
+        .map_err(|error| error.to_string())?;
+    assert!(
+        shell_ui(&state.runtime)?.input_prompt_visible(),
+        "workspace.clone should open URL prompt"
+    );
+
+    confirm_input_prompt(&mut state, "https://example.com/repo.git")?;
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "clone mode picker missing".to_owned())?;
+    let labels = picker
+        .session()
+        .matches()
+        .iter()
+        .map(|entry| entry.item().label().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        vec!["Bare repo".to_owned(), "Full clone".to_owned()]
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_clone_mode_opens_oil_with_pending_clone() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-clone-oil");
+    open_workspace_from_project(&mut state.runtime, "workspace-clone-oil", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.clone")
+        .map_err(|error| error.to_string())?;
+    confirm_input_prompt(&mut state, "https://example.com/repo.git")?;
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+
+    let pending = shell_ui(&state.runtime)?
+        .pending_workspace_clone
+        .clone()
+        .ok_or_else(|| "pending workspace clone missing".to_owned())?;
+    assert!(pending.bare);
+    assert_eq!(pending.url, "https://example.com/repo.git");
+
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .directory_state()
+            .is_some(),
+        "oil should open after clone mode selection"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_clone_refuses_existing_destination() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-clone-exists");
+    let existing = root.join("already");
+    std::fs::create_dir_all(&existing).map_err(|error| error.to_string())?;
+    open_workspace_from_project(&mut state.runtime, "workspace-clone-exists", &root)?;
+
+    let error = run_workspace_clone(
+        &mut state.runtime,
+        "https://example.com/repo.git",
+        false,
+        &existing,
+    )
+    .expect_err("existing path must refuse");
+    assert!(
+        error.contains("already exists"),
+        "unexpected error: {error}"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}

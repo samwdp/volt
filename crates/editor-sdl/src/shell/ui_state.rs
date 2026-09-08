@@ -160,6 +160,10 @@ enum PickerAction {
     GitWorktreeDashboardCreate {
         base_dir: PathBuf,
     },
+    WorkspaceCloneMode {
+        url: String,
+        bare: bool,
+    },
     GitBranchAction {
         action: GitBranchActionKind,
         branch: String,
@@ -929,6 +933,10 @@ pub(crate) struct ShellUiState {
     pending_workspace_readme_opens: VecDeque<PathBuf>,
     /// Pending DAP start waiting on minibuffer hole fill.
     pending_dap_start: Option<PendingDapStartPrompt>,
+    /// Pending Workspace Clone waiting for an oil destination dirname.
+    pending_workspace_clone: Option<PendingWorkspaceClone>,
+    /// One-shot Bare Repo / common-dir override for the next Workspace Dashboard open.
+    pending_workspace_dashboard_base: Option<PathBuf>,
     failed_tool_installs: BTreeSet<String>,
 }
 
@@ -1004,6 +1012,8 @@ impl ShellUiState {
             pending_syntax_prewarm_roots: VecDeque::new(),
             pending_workspace_readme_opens: VecDeque::new(),
             pending_dap_start: None,
+            pending_workspace_clone: None,
+            pending_workspace_dashboard_base: None,
             failed_tool_installs: BTreeSet::new(),
         }
     }
