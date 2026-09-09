@@ -1552,13 +1552,13 @@ fn render_acp_footer_draws_client_logo_before_text() -> Result<(), String> {
         DrawCommand::Image { rect, .. } => Some(*rect),
         _ => None,
     });
-    let image_rect = image_rect.ok_or_else(|| "ACP footer must draw the client logo image".to_owned())?;
+    let image_rect =
+        image_rect.ok_or_else(|| "ACP footer must draw the client logo image".to_owned())?;
     let text_y = scene.iter().find_map(|command| match command {
         DrawCommand::Text { y, text, .. } if text.contains("ask") => Some(*y),
         _ => None,
     });
-    let text_y =
-        text_y.ok_or_else(|| "ACP footer text must still render after logo".to_owned())?;
+    let text_y = text_y.ok_or_else(|| "ACP footer text must still render after logo".to_owned())?;
     let line_height = 16i32;
     let logo_center = image_rect.y + (image_rect.height as i32) / 2;
     let text_center = text_y + line_height / 2;
