@@ -61,9 +61,19 @@ impl Client for AcpClient {
         args: WriteTextFileRequest,
     ) -> agent_client_protocol::Result<WriteTextFileResponse> {
         let path = args.path.clone();
-        let result = tokio::task::spawn_blocking(move || std::fs::write(&path, args.content))
-            .await
-            .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        let content = args.content.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let ending = if path.exists() {
+                let existing = std::fs::read(&path)?;
+                editor_buffer::LineEnding::detect_bytes(&existing)
+            } else {
+                editor_buffer::LineEnding::detect(&content)
+            };
+            let encoded = editor_buffer::TextBuffer::encode_text_for_disk(&content, ending);
+            std::fs::write(&path, encoded)
+        })
+        .await
+        .map_err(|error| Error::internal_error().data(error.to_string()))?;
         match result {
             Ok(()) => Ok(WriteTextFileResponse::new()),
             Err(error) => Err(Error::internal_error().data(error.to_string())),

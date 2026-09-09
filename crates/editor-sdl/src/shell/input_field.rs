@@ -272,6 +272,18 @@ impl InputField {
         self.cursor.min(self.char_count())
     }
 
+    /// Visible glyph under a block cursor, matching main-buffer invert paint.
+    fn display_glyph_at_char(&self, cursor_char: usize) -> Option<String> {
+        let (line_index, col) = self.line_col_for_char(cursor_char);
+        let line = self.text.split('\n').nth(line_index)?;
+        if col >= line.chars().count() {
+            return None;
+        }
+        let char_map = LineCharMap::new(line);
+        let text = char_map.display_text_for_range(line, col, col.saturating_add(1));
+        (!text.is_empty()).then_some(text)
+    }
+
     fn cursor_point(&self) -> TextPoint {
         let buffer = TextBuffer::from_text(&self.text);
         buffer.point_from_char_index(self.cursor_char())

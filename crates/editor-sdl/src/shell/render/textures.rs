@@ -1637,6 +1637,8 @@ pub(super) fn draw_styled_text(
     if text.is_empty() {
         return Ok(());
     }
+    let sanitized = sanitize_raster_text(text);
+    let text = sanitized.as_ref();
 
     match target {
         DrawTarget::Scene(scene) => {
@@ -1660,6 +1662,26 @@ pub(super) fn draw_styled_text(
     }
 
     Ok(())
+}
+
+/// Replace C0/C1 controls that SDL_ttf would paint as tofu. Tabs/escapes that
+/// still reach this seam (skipped LineCharMap, terminal leaks, raw ACP text)
+/// become spaces; intentional caret notation is already expanded upstream.
+pub(super) fn sanitize_raster_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(
+        text.chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect(),
+    )
 }
 
 pub(super) fn draw_image(

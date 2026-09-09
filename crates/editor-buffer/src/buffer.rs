@@ -472,6 +472,16 @@ impl TextBuffer {
         writer.flush()
     }
 
+    /// Serializes arbitrary text with `ending`, normalizing any mixed newlines first.
+    pub fn encode_text_for_disk(text: &str, ending: LineEnding) -> String {
+        ending.encode_normalized(&normalize_inline_text(text))
+    }
+
+    /// Returns the buffer contents encoded with the preferred line ending.
+    pub fn text_for_disk(&self) -> String {
+        Self::encode_text_for_disk(&self.text(), self.preferred_line_ending)
+    }
+
     /// Saves the buffer to its existing backing path.
     pub fn save(&mut self) -> io::Result<()> {
         let Some(path) = self.path.clone() else {

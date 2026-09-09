@@ -207,7 +207,7 @@ pub(crate) fn create_acp_buffer(
         .ok_or_else(|| format!("buffer `{buffer_id}` is missing"))?;
     let user_library = shell_user_library(runtime);
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &*user_library);
-    shell_buffer.init_acp_view(&client.label);
+    shell_buffer.init_acp_view(&client.label, client.logo.clone());
     shell_buffer.clear_input();
     shell_buffer.set_forced_language_id("markdown");
     shell_ui_mut(runtime)?.insert_buffer(shell_buffer);

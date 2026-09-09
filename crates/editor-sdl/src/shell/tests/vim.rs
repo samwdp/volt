@@ -55,7 +55,7 @@ fn acp_viewport_scroll_does_not_treat_visual_row_as_line_index() -> Result<(), S
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
     // Skip the Connected banner so the wrapped message is line 0.
-    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_prepare_session_replay("GitHub Copilot", None);
     buffer.acp_push_system_message("word ".repeat(40));
     for index in 0..20 {
         buffer.acp_push_system_message(format!("tail line {index}"));
@@ -107,7 +107,7 @@ fn acp_screen_top_motion_targets_wrapped_visual_row() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_prepare_session_replay("GitHub Copilot", None);
     buffer.acp_push_system_message("word ".repeat(40));
     for index in 0..12 {
         buffer.acp_push_system_message(format!("tail line {index}"));
@@ -138,7 +138,7 @@ fn acp_page_scroll_preserves_wrapped_visual_row_alignment() -> Result<(), String
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_prepare_session_replay("GitHub Copilot", None);
     buffer.acp_push_system_message("word ".repeat(40));
     for index in 0..20 {
         buffer.acp_push_system_message(format!("tail line {index}"));
@@ -186,7 +186,7 @@ fn acp_visual_selection_uses_output_text_without_prefix() -> Result<(), String> 
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_push_system_message("alpha beta");
     let line_index = buffer.line_count().saturating_sub(1);
     buffer.set_cursor(TextPoint::new(line_index, 4));
@@ -212,7 +212,7 @@ fn acp_output_visual_row_motion_aligns_with_yank() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_prepare_session_replay("GitHub Copilot", None);
     buffer.acp_push_system_message("word ".repeat(40));
     buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
     {
@@ -284,7 +284,7 @@ fn acp_output_visual_anchor_survives_streaming_rebuild() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.acp_prepare_session_replay("GitHub Copilot");
+    buffer.acp_prepare_session_replay("GitHub Copilot", None);
     buffer.acp_push_system_message("stable prefix");
     buffer.sync_acp_viewport_metrics(640, 360, 8, 16, true);
     let line_index = buffer.line_count().saturating_sub(1);
@@ -473,7 +473,7 @@ fn acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer() -> Result<(
     let buffer_id = install_user_plugin_buffer(&mut state, "*acp*", user::acp::ACP_BUFFER_KIND)?;
     {
         let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
-        buffer.init_acp_view("GitHub Copilot");
+        buffer.init_acp_view("GitHub Copilot", None);
         let acp = buffer
             .acp_state
             .as_mut()

@@ -3,8 +3,8 @@ impl ShellBuffer {
         self.acp_state.is_some()
     }
 
-    pub(crate) fn init_acp_view(&mut self, client_label: &str) {
-        self.acp_prepare_session_replay(client_label);
+    pub(crate) fn init_acp_view(&mut self, client_label: &str, logo: Option<String>) {
+        self.acp_prepare_session_replay(client_label, logo);
         self.acp_push_system_message(format!(
             "{} Connected to {client_label}.",
             editor_icons::symbols::cod::COD_ROCKET
@@ -12,12 +12,16 @@ impl ShellBuffer {
     }
 
     /// Reset ACP panes for `session/load` history replay without a fresh Connected banner.
-    pub(crate) fn acp_prepare_session_replay(&mut self, client_label: &str) {
+    pub(crate) fn acp_prepare_session_replay(
+        &mut self,
+        client_label: &str,
+        logo: Option<String>,
+    ) {
         self.text = TextBuffer::new();
         self.undo_tree = UndoTree::new(&self.text);
         self.scroll_row = 0;
         self.wrap_cache = None;
-        self.acp_state = Some(AcpBufferState::new(client_label.to_owned()));
+        self.acp_state = Some(AcpBufferState::new(client_label.to_owned(), logo));
     }
 
     pub(crate) fn acp_switch_pane(&mut self) -> bool {
@@ -1155,11 +1159,17 @@ impl ShellBuffer {
     }
 
     fn replace_with_lines(&mut self, lines: Vec<String>) {
-        let text = if lines.is_empty() {
+        let preferred_line_ending = self.text.preferred_line_ending();
+        let path = self.text.path().map(Path::to_path_buf);
+        let mut text = if lines.is_empty() {
             TextBuffer::new()
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
+        text.set_preferred_line_ending(preferred_line_ending);
+        if let Some(path) = path {
+            text.set_path(path);
+        }
         self.text = text;
         self.undo_tree = UndoTree::new(&self.text);
         self.syntax_error = None;
@@ -1177,11 +1187,17 @@ impl ShellBuffer {
     fn replace_with_lines_preserve_view(&mut self, lines: Vec<String>) {
         let cursor = self.cursor_point();
         let scroll_row = self.scroll_row;
-        let text = if lines.is_empty() {
+        let preferred_line_ending = self.text.preferred_line_ending();
+        let path = self.text.path().map(Path::to_path_buf);
+        let mut text = if lines.is_empty() {
             TextBuffer::new()
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
+        text.set_preferred_line_ending(preferred_line_ending);
+        if let Some(path) = path {
+            text.set_path(path);
+        }
         self.text = text;
         self.text.mark_clean();
         self.undo_tree = UndoTree::new(&self.text);
@@ -1211,11 +1227,17 @@ impl ShellBuffer {
         let cursor = self.cursor_point();
         let scroll_row = self.scroll_row;
         let follow_output = self.should_follow_output();
-        let text = if lines.is_empty() {
+        let preferred_line_ending = self.text.preferred_line_ending();
+        let path = self.text.path().map(Path::to_path_buf);
+        let mut text = if lines.is_empty() {
             TextBuffer::new()
         } else {
             TextBuffer::from_text(lines.join("\n"))
         };
+        text.set_preferred_line_ending(preferred_line_ending);
+        if let Some(path) = path {
+            text.set_path(path);
+        }
         self.text = text;
         self.text.mark_clean();
         self.undo_tree = UndoTree::new(&self.text);

@@ -911,6 +911,7 @@ fn apply_rewrite_intent(
     let Ok(contents) = fs::read_to_string(absolute_path) else {
         return Ok(false);
     };
+    let ending = editor_buffer::LineEnding::detect(&contents);
     let mut lines: Vec<String> = contents.lines().map(str::to_owned).collect();
     let Some(live) = lines.get(intent.line_index) else {
         return Ok(false);
@@ -920,10 +921,11 @@ fn apply_rewrite_intent(
     }
     lines[intent.line_index] = intent.rewritten_line.clone();
     let mut out = lines.join("\n");
-    if contents.ends_with('\n') {
+    if contents.ends_with('\n') || contents.ends_with("\r\n") {
         out.push('\n');
     }
-    fs::write(absolute_path, out).map_err(|error| error.to_string())?;
+    let encoded = editor_buffer::TextBuffer::encode_text_for_disk(&out, ending);
+    fs::write(absolute_path, encoded).map_err(|error| error.to_string())?;
     Ok(true)
 }
 

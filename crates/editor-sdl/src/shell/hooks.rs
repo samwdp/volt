@@ -1025,6 +1025,7 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 return Ok(());
             }
             if is_terminal {
+                end_active_terminal_normal_mode(runtime)?;
                 shell_ui_mut(runtime)?.enter_insert_mode();
                 return Ok(());
             }
@@ -1089,7 +1090,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 return Ok(());
             }
             shell_ui_mut(runtime)?.enter_normal_mode();
-            active_shell_buffer_mut(runtime)?.set_cursor(cursor_point);
+            if buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind)
+                && terminal_buffer_state(runtime)?.contains(buffer_id)
+            {
+                begin_active_terminal_normal_mode(runtime)?;
+            } else {
+                active_shell_buffer_mut(runtime)?.set_cursor(cursor_point);
+            }
             if targeted_input
                 && has_input
                 && let Some(input) = active_shell_buffer_mut(runtime)?.input_field_mut()

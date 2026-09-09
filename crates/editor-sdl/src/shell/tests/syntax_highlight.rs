@@ -473,7 +473,7 @@ fn render_acp_output_draws_visual_selection_highlight() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_push_system_message("alpha beta");
     buffer.sync_acp_viewport_metrics(640, 360, 8, 16, true);
 

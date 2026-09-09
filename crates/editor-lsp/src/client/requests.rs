@@ -598,7 +598,6 @@ impl LspClientManager {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
-            completion_resolve_supported: AtomicBool::new(false),
         }))
     }
 

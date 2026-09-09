@@ -719,7 +719,7 @@ pub(super) fn install_acp_test_buffer(
         .buffer(buffer_id)
         .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &NullUserLibrary);
-    shell_buffer.init_acp_view("Test ACP");
+    shell_buffer.init_acp_view("Test ACP", None);
     for index in 1..=output_lines {
         shell_buffer.acp_push_system_message(format!("line {index}"));
     }
@@ -892,7 +892,7 @@ pub(super) fn install_user_acp_test_buffer(
     let buffer_id = install_user_plugin_buffer(state, "*acp*", user::acp::ACP_BUFFER_KIND)?;
     {
         let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
-        buffer.init_acp_view("Test ACP");
+        buffer.init_acp_view("Test ACP", None);
         let _ = buffer.focus_acp_input();
         buffer
             .input_field_mut()

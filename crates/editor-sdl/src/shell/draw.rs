@@ -252,6 +252,8 @@ pub(super) struct TextPanelDraw<'a> {
     pub visual_selection: Option<VisualSelection>,
     pub yank_flash: Option<VisualSelection>,
     pub input_mode: InputMode,
+    /// Extra left padding inside the panel body (for leading icons/logos).
+    pub leading_inset: i32,
 }
 
 #[derive(Clone, Copy)]

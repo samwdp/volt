@@ -142,24 +142,23 @@ fn render_terminal_buffer_path_draws_command_line_separator_without_footer_fill(
 }
 
 #[test]
-fn terminal_scroll_for_motion_maps_terminal_viewport_navigation() {
+fn terminal_normal_motion_maps_vim_navigation() {
     assert_eq!(
-        terminal_scroll_for_motion(ShellMotion::Down, None),
-        Some(TerminalViewportScroll::LineDelta(-1))
+        terminal_normal_motion_for(ShellMotion::Down),
+        Some(TerminalNormalMotion::Down)
     );
     assert_eq!(
-        terminal_scroll_for_motion(ShellMotion::Up, Some(3)),
-        Some(TerminalViewportScroll::LineDelta(3))
+        terminal_normal_motion_for(ShellMotion::ParagraphForward),
+        Some(TerminalNormalMotion::ParagraphForward)
     );
     assert_eq!(
-        terminal_scroll_for_motion(ShellMotion::FirstLine, Some(42)),
-        Some(TerminalViewportScroll::Top)
+        terminal_normal_motion_for(ShellMotion::FirstLine),
+        Some(TerminalNormalMotion::FirstLine)
     );
     assert_eq!(
-        terminal_scroll_for_motion(ShellMotion::LastLine, None),
-        Some(TerminalViewportScroll::Bottom)
+        terminal_normal_motion_for(ShellMotion::SentenceForward),
+        None
     );
-    assert_eq!(terminal_scroll_for_motion(ShellMotion::Left, None), None);
 }
 
 #[test]
@@ -454,6 +453,57 @@ fn popup_terminal_dimensions_match_painted_content_rect() -> Result<(), String> 
     assert_eq!(
         cols as usize, painted_cols,
         "popup terminal PTY cols must match painted content cols"
+    );
+    Ok(())
+}
+
+#[test]
+fn pane_terminal_dimensions_shrink_when_acp_dock_open() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    install_terminal_test_buffer(&mut state)?;
+
+    let render_width = 960u32;
+    let render_height = 720u32;
+    let cell_width = 8i32;
+    let line_height = 16i32;
+
+    let (_, _, cols_without_dock) = active_terminal_dimensions(
+        &state.runtime,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?
+    .ok_or_else(|| "terminal dimensions missing before dock".to_owned())?;
+
+    toggle_acp_dock(&mut state.runtime)?;
+    let docks = shell_docks_layout(
+        &*shell_user_library(&state.runtime),
+        shell_ui(&state.runtime)?,
+        render_width,
+        render_height,
+        cell_width,
+    );
+    assert!(docks.acp.visible);
+    assert!(docks.acp.dock_width > 0);
+
+    let (_, _, cols_with_dock) = active_terminal_dimensions(
+        &state.runtime,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?
+    .ok_or_else(|| "terminal dimensions missing with dock".to_owned())?;
+
+    let expected_cols = wrap_columns_for_width(docks.content_width, cell_width).max(1);
+    assert_eq!(
+        cols_with_dock as usize, expected_cols,
+        "pane terminal PTY cols must use dock-shrunk content width"
+    );
+    assert!(
+        cols_with_dock < cols_without_dock,
+        "opening ACP dock must shrink terminal columns ({cols_with_dock} !< {cols_without_dock})"
     );
     Ok(())
 }

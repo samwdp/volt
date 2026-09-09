@@ -146,8 +146,11 @@ fn open_git_editor_buffer(
         .model()
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
-    let contents = fs::read_to_string(path).unwrap_or_default();
-    let lines = contents.lines().map(str::to_owned).collect::<Vec<_>>();
+    let text = TextBuffer::load_from_path(path).unwrap_or_else(|_| {
+        let mut buffer = TextBuffer::new();
+        buffer.set_path(path.to_path_buf());
+        buffer
+    });
     let display_name = format!(
         "*git-editor {}*",
         path.file_name()
@@ -170,7 +173,7 @@ fn open_git_editor_buffer(
         .buffer(buffer_id)
         .ok_or_else(|| format!("git editor buffer `{buffer_id}` is missing"))?;
     let user_library = shell_user_library(runtime);
-    let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, lines, &*user_library);
+    let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
     shell_buffer.set_language_id(Some("gitcommit".to_owned()));
     {
         let ui = shell_ui_mut(runtime)?;
@@ -218,7 +221,7 @@ fn finish_git_editor_buffer(
         .remove(&buffer_id)
         .ok_or_else(|| "git editor session is missing".to_owned())?;
     if exit_code == 0 {
-        let text = shell_buffer(runtime, buffer_id)?.text.text();
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
         if let Some(parent) = session.file_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 format!(
@@ -227,7 +230,7 @@ fn finish_git_editor_buffer(
                 )
             })?;
         }
-        fs::write(&session.file_path, text).map_err(|error| {
+        buffer.save_to_path(&session.file_path).map_err(|error| {
             format!(
                 "failed to write git editor file `{}`: {error}",
                 session.file_path.display()

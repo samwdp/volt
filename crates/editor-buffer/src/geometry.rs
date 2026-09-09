@@ -150,6 +150,32 @@ impl LineEnding {
             Self::Crlf => "\r\n",
         }
     }
+
+    /// Detects the preferred line ending from text that may still contain `\r\n`.
+    pub fn detect(text: &str) -> Self {
+        if text.contains("\r\n") {
+            Self::Crlf
+        } else {
+            Self::Lf
+        }
+    }
+
+    /// Detects the preferred line ending from raw file bytes.
+    pub fn detect_bytes(bytes: &[u8]) -> Self {
+        if bytes.windows(2).any(|window| window == b"\r\n") {
+            Self::Crlf
+        } else {
+            Self::Lf
+        }
+    }
+
+    /// Rewrites normalized `\n` text using this line ending for on-disk serialization.
+    pub fn encode_normalized(self, text: &str) -> String {
+        match self {
+            Self::Lf => text.to_owned(),
+            Self::Crlf => text.replace('\n', "\r\n"),
+        }
+    }
 }
 
 /// Lightweight statistics for the current buffer state.

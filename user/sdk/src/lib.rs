@@ -2977,6 +2977,8 @@ pub struct AcpClient {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: Option<String>,
+    /// Bundled asset path relative to `assets/` (for example `acp/agent.svg`).
+    pub logo: Option<String>,
 }
 
 /// Project search root exported by the user library.

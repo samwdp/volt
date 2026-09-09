@@ -287,3 +287,22 @@ fn draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix() -> Resu
     );
     Ok(())
 }
+
+#[test]
+fn draw_text_replaces_control_characters_instead_of_raster_tofu() -> Result<(), String> {
+    let color = Color::RGB(240, 240, 240);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    draw_text(&mut target, 0, 0, "\t\u{1b}[31mhi", color).map_err(|error| error.to_string())?;
+
+    assert_eq!(
+        scene,
+        vec![DrawCommand::Text {
+            x: 0,
+            y: 0,
+            text: "  [31mhi".to_owned(),
+            color: to_render_color(color),
+        },]
+    );
+    Ok(())
+}

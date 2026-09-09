@@ -61,25 +61,8 @@ pub(super) fn render_shell_state(
 
     clear_window_surface(target, base_background, window_effects);
 
-    render_workspace_dock(
-        target,
-        &docks.workspace,
-        dock_entries.workspace,
-        theme_registry,
-        cell_width,
-        line_height,
-        ascent,
-    )?;
-    render_acp_dock(
-        target,
-        &docks.acp,
-        dock_entries.acp,
-        theme_registry,
-        cell_width,
-        line_height,
-        ascent,
-    )?;
-
+    // Paint panes before docks so dock columns own their reserved space like
+    // sibling windows, instead of terminal/text overflow stacking over them.
     for (pane_index, pane) in panes.iter().enumerate() {
         let rect = pane_rects[pane_index];
         let active = pane_index == state.active_pane_index()
@@ -159,6 +142,25 @@ pub(super) fn render_shell_state(
             )?;
         }
     }
+
+    render_workspace_dock(
+        target,
+        &docks.workspace,
+        dock_entries.workspace,
+        theme_registry,
+        cell_width,
+        line_height,
+        ascent,
+    )?;
+    render_acp_dock(
+        target,
+        &docks.acp,
+        dock_entries.acp,
+        theme_registry,
+        cell_width,
+        line_height,
+        ascent,
+    )?;
 
     if let Some(popup) = runtime_popup {
         render_runtime_popup_overlay(

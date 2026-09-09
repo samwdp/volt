@@ -1,12 +1,17 @@
 use alacritty_terminal::{
+    event::VoidListener,
     index::{Column, Line, Point},
-    term::test::mock_term,
+    term::{
+        Config, Term,
+        test::{TermSize, mock_term},
+    },
+    vte::ansi::{Processor, StdSyncHandler},
 };
 use editor_jobs::{JobManager, JobSpec};
 
 use crate::{
     LiveTerminalConfig, LiveTerminalSession, TerminalCursorShape, TerminalKey, TerminalSession,
-    TerminalStream, terminal_key_bytes, terminal_render_snapshot,
+    TerminalStream, terminal_key_bytes, terminal_render_snapshot, terminal_snapshot_lines,
 };
 
 fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
@@ -89,4 +94,40 @@ fn terminal_render_snapshot_preserves_wide_character_widths() {
     let run = &snapshot.lines()[0].runs()[0];
     assert_eq!(run.text(), "界a");
     assert_eq!(run.width_cells(), 3);
+}
+
+#[test]
+fn terminal_render_snapshot_strips_tab_and_control_tofu_from_git_status_style_output() {
+    let size = TermSize::new(80, 3);
+    let mut term = Term::new(Config::default(), &size, VoidListener);
+    let mut processor: Processor<StdSyncHandler> = Processor::new();
+    // git status color lines are HT + CSI + text (Alacritty leaves `\t` in cell 0).
+    processor.advance(&mut term, b"\t\x1b[31mmodified:  foo.rs\x1b[m\r\n");
+
+    let snapshot = terminal_render_snapshot(&term, 3, 80, None);
+    let rendered: String = snapshot
+        .lines()
+        .iter()
+        .flat_map(|line| line.runs().iter().map(|run| run.text()))
+        .collect();
+    assert!(
+        !rendered.chars().any(char::is_control),
+        "render snapshot must not carry C0 controls that become tofu: {rendered:?}"
+    );
+    assert!(
+        rendered.contains("modified:") && rendered.contains("foo.rs"),
+        "status text should remain: {rendered:?}"
+    );
+
+    let lines = terminal_snapshot_lines(&term);
+    assert!(
+        !lines.iter().any(|line| line.chars().any(char::is_control)),
+        "buffer snapshot lines must not carry C0 controls: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("modified:") && line.contains("foo.rs")),
+        "buffer snapshot should keep status text: {lines:?}"
+    );
 }

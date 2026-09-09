@@ -158,18 +158,147 @@ pub(super) fn close_terminal_buffers_for_workspace(
     Ok(())
 }
 
-pub(super) fn terminal_scroll_for_motion(
+pub(super) fn terminal_normal_motion_for(motion: ShellMotion) -> Option<TerminalNormalMotion> {
+    Some(match motion {
+        ShellMotion::Up => TerminalNormalMotion::Up,
+        ShellMotion::Down => TerminalNormalMotion::Down,
+        ShellMotion::Left => TerminalNormalMotion::Left,
+        ShellMotion::Right => TerminalNormalMotion::Right,
+        ShellMotion::WordForward => TerminalNormalMotion::WordForward,
+        ShellMotion::BigWordForward => TerminalNormalMotion::BigWordForward,
+        ShellMotion::WordBackward => TerminalNormalMotion::WordBackward,
+        ShellMotion::BigWordBackward => TerminalNormalMotion::BigWordBackward,
+        ShellMotion::WordEnd => TerminalNormalMotion::WordEnd,
+        ShellMotion::BigWordEnd => TerminalNormalMotion::BigWordEnd,
+        ShellMotion::WordEndBackward => TerminalNormalMotion::WordEndBackward,
+        ShellMotion::BigWordEndBackward => TerminalNormalMotion::BigWordEndBackward,
+        ShellMotion::ParagraphForward => TerminalNormalMotion::ParagraphForward,
+        ShellMotion::ParagraphBackward => TerminalNormalMotion::ParagraphBackward,
+        ShellMotion::LineStart => TerminalNormalMotion::LineStart,
+        ShellMotion::LineFirstNonBlank => TerminalNormalMotion::LineFirstNonBlank,
+        ShellMotion::LineEnd => TerminalNormalMotion::LineEnd,
+        ShellMotion::ScreenTop => TerminalNormalMotion::ScreenTop,
+        ShellMotion::ScreenMiddle => TerminalNormalMotion::ScreenMiddle,
+        ShellMotion::ScreenBottom => TerminalNormalMotion::ScreenBottom,
+        ShellMotion::FirstLine => TerminalNormalMotion::FirstLine,
+        ShellMotion::LastLine => TerminalNormalMotion::LastLine,
+        ShellMotion::MatchPair => TerminalNormalMotion::MatchPair,
+        _ => return None,
+    })
+}
+
+pub(super) fn navigate_active_terminal_normal_mode(
+    runtime: &mut EditorRuntime,
     motion: ShellMotion,
     count: Option<usize>,
-) -> Option<TerminalViewportScroll> {
-    let count = count.unwrap_or(1).max(1);
-    match motion {
-        ShellMotion::Down => Some(TerminalViewportScroll::LineDelta(-(count as i32))),
-        ShellMotion::Up => Some(TerminalViewportScroll::LineDelta(count as i32)),
-        ShellMotion::FirstLine => Some(TerminalViewportScroll::Top),
-        ShellMotion::LastLine => Some(TerminalViewportScroll::Bottom),
-        _ => None,
+) -> Result<bool, String> {
+    let Some(motion) = terminal_normal_motion_for(motion) else {
+        return Ok(false);
+    };
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(false);
     }
+    ensure_terminal_session(runtime, buffer_id)?;
+    let scrolloff = theme_scrolloff(runtime.services().get::<ThemeRegistry>());
+    let changed = {
+        let state = terminal_buffer_state_mut(runtime)?;
+        let session = state
+            .tracked_session_mut(buffer_id)
+            .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?;
+        session
+            .session
+            .apply_normal_motion(motion, count, scrolloff)
+    };
+    if changed {
+        sync_terminal_buffer_from_session(runtime, buffer_id)?;
+    }
+    Ok(changed)
+}
+
+pub(super) fn scroll_active_terminal_normal_view(
+    runtime: &mut EditorRuntime,
+    lines: i32,
+) -> Result<bool, String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(false);
+    }
+    ensure_terminal_session(runtime, buffer_id)?;
+    let scrolloff = theme_scrolloff(runtime.services().get::<ThemeRegistry>());
+    let changed = {
+        let state = terminal_buffer_state_mut(runtime)?;
+        let session = state
+            .tracked_session_mut(buffer_id)
+            .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?;
+        session.session.scroll_normal_view(lines, scrolloff)
+    };
+    if changed {
+        sync_terminal_buffer_from_session(runtime, buffer_id)?;
+    }
+    Ok(changed)
+}
+
+fn sync_terminal_buffer_from_session(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let (lines, render, cursor) = {
+        let state = terminal_buffer_state_mut(runtime)?;
+        let session = state
+            .tracked_session_mut(buffer_id)
+            .ok_or_else(|| format!("terminal session for buffer `{buffer_id}` is missing"))?;
+        session.buffer_dirty = false;
+        (
+            session.session.snapshot().lines().to_vec(),
+            session.session.render_snapshot(),
+            session.session.normal_cursor_viewport(),
+        )
+    };
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    buffer.set_terminal_render(render);
+    buffer.replace_with_lines_preserve_view(lines);
+    if let Some((row, col)) = cursor {
+        let line = row.min(buffer.line_count().saturating_sub(1));
+        let column = col.min(buffer.line_len_chars(line));
+        buffer.set_cursor(TextPoint::new(line, column));
+    }
+    Ok(())
+}
+
+pub(super) fn begin_active_terminal_normal_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(());
+    }
+    // Tests / placeholders may paint a terminal buffer without a live PTY.
+    if !terminal_buffer_state(runtime)?.contains(buffer_id) {
+        return Ok(());
+    }
+    {
+        let state = terminal_buffer_state_mut(runtime)?;
+        if let Some(session) = state.tracked_session_mut(buffer_id) {
+            session.session.begin_normal_mode();
+        }
+    }
+    sync_terminal_buffer_from_session(runtime, buffer_id)
+}
+
+pub(super) fn end_active_terminal_normal_mode(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_terminal(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(());
+    }
+    if !terminal_buffer_state(runtime)?.contains(buffer_id) {
+        return Ok(());
+    }
+    {
+        let state = terminal_buffer_state_mut(runtime)?;
+        if let Some(session) = state.tracked_session_mut(buffer_id) {
+            session.session.end_normal_mode();
+        }
+    }
+    sync_terminal_buffer_from_session(runtime, buffer_id)
 }
 
 pub(super) fn refresh_pending_terminal(
@@ -223,7 +352,25 @@ pub(super) fn refresh_pending_terminal(
         }
     }
     let changed = !updates.is_empty();
+    let active_normal = matches!(
+        shell_ui(runtime)?.input_mode(),
+        InputMode::Normal | InputMode::Visual
+    );
     for (buffer_id, lines, render) in updates {
+        if active_normal && active_buffer_id == Some(buffer_id) {
+            let cursor = terminal_buffer_state_mut(runtime)?
+                .session_mut(buffer_id)
+                .and_then(|session| session.normal_cursor_viewport());
+            let buffer = shell_buffer_mut(runtime, buffer_id)?;
+            buffer.set_terminal_render(render);
+            buffer.replace_with_lines_preserve_view(lines);
+            if let Some((row, col)) = cursor {
+                let line = row.min(buffer.line_count().saturating_sub(1));
+                let column = col.min(buffer.line_len_chars(line));
+                buffer.set_cursor(TextPoint::new(line, column));
+            }
+            continue;
+        }
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.set_terminal_render(render);
         if active_buffer_id == Some(buffer_id) {
@@ -352,13 +499,17 @@ pub(super) fn active_terminal_dimensions(
             .unwrap_or(0);
         let pane_height = render_height.saturating_sub(popup_height);
         let ui = shell_ui(runtime)?;
+        let user_library = shell_user_library(runtime);
+        // Match render_shell_state: PTY cols must use dock-shrunk pane width,
+        // or terminal cells paint into the ACP/workspace dock column.
+        let docks = shell_docks_layout(&*user_library, ui, render_width, render_height, cell_width);
         let panes = ui
             .panes()
             .ok_or_else(|| "active workspace view is missing".to_owned())?;
         let pane_rects = workspace_pane_rects(
-            &*shell_user_library(runtime),
+            &*user_library,
             ui,
-            render_width,
+            docks.content_width,
             pane_height,
             panes.len(),
         );
@@ -561,6 +712,7 @@ pub(super) fn render_terminal_buffer(
     } = metrics;
     let window_effects = current_window_effect_settings(theme_registry);
     let text_x = rect.x() + 12;
+    let content_right = rect.x().saturating_add(rect.width() as i32);
     for (row_index, line) in terminal_render
         .lines()
         .iter()
@@ -570,7 +722,12 @@ pub(super) fn render_terminal_buffer(
         let y = layout.body_y + row_index as i32 * line_height;
         for run in line.runs() {
             let run_x = text_x + run.col() as i32 * cell_width;
-            let run_width = (run.width_cells() as i32 * cell_width).max(1) as u32;
+            if run_x >= content_right {
+                continue;
+            }
+            let run_width = (run.width_cells() as i32 * cell_width)
+                .max(1)
+                .min(content_right.saturating_sub(run_x)) as u32;
             if let Some(background) = run.background() {
                 fill_rect(
                     target,
@@ -587,38 +744,63 @@ pub(super) fn render_terminal_buffer(
         if let Some((selection_start, selection_end)) = visual_selection
             .and_then(|selection| selection_columns_for_visual(selection, row_index, line_len))
         {
-            fill_selection_highlight(
-                target,
-                text_x + selection_start as i32 * cell_width,
-                y,
-                (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
-                line_height.max(1) as u32,
-                cursor_roundness,
-                selection_color,
-            )?;
+            let selection_x = text_x + selection_start as i32 * cell_width;
+            if selection_x < content_right {
+                let selection_width =
+                    ((selection_end.saturating_sub(selection_start) as i32) * cell_width)
+                        .max(0)
+                        .min(content_right.saturating_sub(selection_x)) as u32;
+                fill_selection_highlight(
+                    target,
+                    selection_x,
+                    y,
+                    selection_width,
+                    line_height.max(1) as u32,
+                    cursor_roundness,
+                    selection_color,
+                )?;
+            }
         }
         if let Some((selection_start, selection_end)) = yank_flash
             .and_then(|selection| selection_columns_for_visual(selection, row_index, line_len))
         {
-            fill_selection_highlight(
-                target,
-                text_x + selection_start as i32 * cell_width,
-                y,
-                (selection_end.saturating_sub(selection_start) as i32 * cell_width) as u32,
-                line_height.max(1) as u32,
-                cursor_roundness,
-                yank_flash_color,
-            )?;
+            let selection_x = text_x + selection_start as i32 * cell_width;
+            if selection_x < content_right {
+                let selection_width =
+                    ((selection_end.saturating_sub(selection_start) as i32) * cell_width)
+                        .max(0)
+                        .min(content_right.saturating_sub(selection_x)) as u32;
+                fill_selection_highlight(
+                    target,
+                    selection_x,
+                    y,
+                    selection_width,
+                    line_height.max(1) as u32,
+                    cursor_roundness,
+                    yank_flash_color,
+                )?;
+            }
         }
         for run in line.runs() {
             let run_x = text_x + run.col() as i32 * cell_width;
-            let run_width = (run.width_cells() as i32 * cell_width).max(1) as u32;
-            if run.text().chars().any(|character| character != ' ') {
+            if run_x >= content_right {
+                continue;
+            }
+            let max_cells =
+                (content_right.saturating_sub(run_x) / cell_width.max(1)).max(0) as usize;
+            if max_cells == 0 {
+                continue;
+            }
+            let run_width = (run.width_cells() as i32 * cell_width)
+                .max(1)
+                .min(content_right.saturating_sub(run_x)) as u32;
+            let clipped_text: String = run.text().chars().take(max_cells).collect();
+            if clipped_text.chars().any(|character| character != ' ') {
                 draw_terminal_text_run(
                     target,
                     run_x,
                     y,
-                    run.text(),
+                    &clipped_text,
                     Color::RGB(run.foreground().r, run.foreground().g, run.foreground().b),
                     cell_width,
                     line_height,
@@ -665,25 +847,31 @@ pub(super) fn render_terminal_buffer(
         None
     };
     if let Some(cursor) = live_terminal_cursor.or(buffer_cursor.as_ref()) {
-        draw_terminal_cursor(
-            target,
-            TerminalCursorDraw {
-                text_x,
-                body_y: layout.body_y,
-                cursor,
-                shape: terminal_cursor_shape_for_input_mode(input_mode, cursor),
-                cursor_color,
-                text_override_color: base_background,
-                cursor_roundness,
-            },
-            CellMetrics {
-                cell_width,
-                line_height,
-            },
-        )?;
+        let cursor_x = text_x + i32::from(cursor.col()) * cell_width;
+        if cursor_x < content_right {
+            draw_terminal_cursor(
+                target,
+                TerminalCursorDraw {
+                    text_x,
+                    body_y: layout.body_y,
+                    cursor,
+                    shape: terminal_cursor_shape_for_input_mode(input_mode, cursor),
+                    cursor_color,
+                    text_override_color: base_background,
+                    cursor_roundness,
+                },
+                CellMetrics {
+                    cell_width,
+                    line_height,
+                },
+            )?;
+        }
     }
 
-    fill_window_surface_rect(
+    // CONTEXT: terminal footer chrome stays fully opaque when window.opacity < 1,
+    // matching cell backgrounds and the editor modeline band.
+    let _ = window_effects;
+    fill_rect(
         target,
         PixelRectToRect::rect(
             rect.x() + 8,
@@ -691,8 +879,7 @@ pub(super) fn render_terminal_buffer(
             rect.width().saturating_sub(16),
             1,
         ),
-        border_color,
-        window_effects,
+        Color::RGBA(border_color.r, border_color.g, border_color.b, 255),
     )?;
     draw_text(
         target,
@@ -706,7 +893,7 @@ pub(super) fn render_terminal_buffer(
         },
     )?;
     let _ = text_color;
-    fill_window_surface_rect(
+    fill_rect(
         target,
         PixelRectToRect::rect(
             rect.x(),
@@ -714,8 +901,7 @@ pub(super) fn render_terminal_buffer(
             rect.width(),
             1,
         ),
-        border_color,
-        window_effects,
+        Color::RGBA(border_color.r, border_color.g, border_color.b, 255),
     )?;
     Ok(())
 }

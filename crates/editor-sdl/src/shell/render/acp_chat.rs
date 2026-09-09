@@ -164,38 +164,6 @@ pub(super) fn acp_spinner_frame() -> &'static str {
     FRAMES[frame]
 }
 
-pub(super) fn acp_slice_chars(text: &str, start: usize, end: usize) -> String {
-    if start >= end {
-        return String::new();
-    }
-    let mut start_byte = text.len();
-    let mut end_byte = text.len();
-    let mut seen = 0usize;
-    for (index, character) in text.char_indices() {
-        if seen == start {
-            start_byte = index;
-        }
-        if seen == end {
-            end_byte = index;
-            break;
-        }
-        seen = seen.saturating_add(1);
-        if seen == text.chars().count() {
-            end_byte = text.len();
-        }
-        let _ = character;
-    }
-    if start == 0 {
-        start_byte = 0;
-    }
-    if end >= text.chars().count() {
-        end_byte = text.len();
-    }
-    text.get(start_byte..end_byte)
-        .unwrap_or_default()
-        .to_owned()
-}
-
 pub(super) fn block_cursor_text_overlay(
     query: CursorOverlayQuery<'_>,
 ) -> Option<CursorTextOverlay> {

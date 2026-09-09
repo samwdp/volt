@@ -1,11 +1,13 @@
 mod client;
 mod input;
 mod launch;
+mod logo;
 mod manager;
 mod runtime;
 mod session;
 
 pub(crate) use input::*;
+pub(crate) use logo::*;
 pub(crate) use manager::*;
 pub(crate) use session::*;
 

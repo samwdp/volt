@@ -338,6 +338,7 @@ impl UserLibrary for UserLibraryImpl {
                 args: c.args,
                 env: c.env,
                 cwd: c.cwd,
+                logo: c.logo,
             })
             .collect()
     }
@@ -350,6 +351,7 @@ impl UserLibrary for UserLibraryImpl {
             args: c.args,
             env: c.env,
             cwd: c.cwd,
+            logo: c.logo,
         })
     }
 

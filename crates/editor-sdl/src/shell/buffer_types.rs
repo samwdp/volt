@@ -119,6 +119,8 @@ struct PluginTextPaneState {
 #[derive(Debug, Clone)]
 struct AcpBufferState {
     session_title: Option<String>,
+    /// Bundled asset path relative to `assets/` for the connected client logo.
+    client_logo: Option<String>,
     active_pane: AcpPane,
     plan_entries: Vec<PlanEntry>,
     output_items: Vec<AcpOutputItem>,
@@ -427,12 +429,13 @@ impl Default for AcpPaneState {
 }
 
 impl AcpBufferState {
-    fn new(client_label: String) -> Self {
+    fn new(client_label: String, client_logo: Option<String>) -> Self {
         let _ = client_label;
         let mut input = InputField::new("> ");
         input.set_placeholder(Some(ACP_INPUT_PLACEHOLDER.to_owned()));
         Self {
             session_title: None,
+            client_logo,
             active_pane: AcpPane::Output,
             plan_entries: Vec::new(),
             output_items: Vec::new(),

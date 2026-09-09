@@ -178,7 +178,7 @@ fn load_workspace_file_into_db_editor(
     path: &Path,
     display_name: &str,
 ) -> Result<BufferId, String> {
-    let contents = fs::read_to_string(path)
+    let loaded = TextBuffer::load_from_path(path)
         .map_err(|error| format!("failed to open `{}`: {error}", path.display()))?;
     let language_id = language_id_for_path(runtime, path).ok();
     let workspace_id = runtime
@@ -195,7 +195,9 @@ fn load_workspace_file_into_db_editor(
         .map_err(|error| error.to_string())?;
     {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.replace_with_lines(contents.lines().map(str::to_owned).collect());
+        let preferred_line_ending = loaded.preferred_line_ending();
+        buffer.replace_with_lines(loaded.text().lines().map(str::to_owned).collect());
+        buffer.text.set_preferred_line_ending(preferred_line_ending);
         buffer.text.set_path(path.to_path_buf());
         buffer.text.mark_clean();
         buffer.plugin_focus_section_named(DB_EDITOR_SECTION);

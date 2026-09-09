@@ -5,9 +5,11 @@ clients:
     args:
       - acp
       - --yolo
+    logo: acp/agent.svg
   - id: codex
     label: Codex (ACP)
     command: codex-acp
+    logo: acp/codex.svg
   - id: copilot
     label: GitHub Copilot (ACP)
     command: copilot
@@ -15,13 +17,16 @@ clients:
       - --acp
       - --stdio
       - --yolo
+    logo: acp/copilot.svg
   - id: opencode
     label: OpenCode (ACP)
     command: opencode
     args:
       - acp
+    logo: acp/opencode.svg
   - id: pi
     label: Pi (ACP)
     command: node
     args:
       - ""
+    logo: acp/pi.svg

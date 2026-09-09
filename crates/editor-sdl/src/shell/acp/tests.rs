@@ -86,7 +86,7 @@ fn install_acp_test_buffer(state: &mut ShellState) -> Result<(WorkspaceId, Buffe
         .buffer(buffer_id)
         .ok_or_else(|| "ACP test buffer is missing".to_owned())?;
     let mut shell_buffer = ShellBuffer::from_runtime_buffer(buffer, Vec::new(), &NullUserLibrary);
-    shell_buffer.init_acp_view("GitHub Copilot");
+    shell_buffer.init_acp_view("GitHub Copilot", None);
     shell_ui_mut(&mut state.runtime)?.insert_buffer(shell_buffer);
     shell_ui_mut(&mut state.runtime)?.focus_buffer(buffer_id);
     Ok((workspace_id, buffer_id))

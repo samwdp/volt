@@ -285,11 +285,19 @@ impl ShellState {
                     (buffer.kind.clone(), buffer.uses_browser_host_surface())
                 };
                 if buffer_is_terminal(&active_kind) {
-                    scroll_active_terminal_view(
-                        &mut self.runtime,
-                        TerminalViewportScroll::LineDelta(scroll_lines),
-                    )
-                    .map_err(ShellError::Runtime)?;
+                    let input_mode = shell_ui(&self.runtime)
+                        .map_err(ShellError::Runtime)?
+                        .input_mode();
+                    if matches!(input_mode, InputMode::Normal | InputMode::Visual) {
+                        scroll_active_terminal_normal_view(&mut self.runtime, scroll_lines)
+                            .map_err(ShellError::Runtime)?;
+                    } else {
+                        scroll_active_terminal_view(
+                            &mut self.runtime,
+                            TerminalViewportScroll::LineDelta(scroll_lines),
+                        )
+                        .map_err(ShellError::Runtime)?;
+                    }
                 } else if !active_uses_browser_host_surface {
                     scroll_buffer_viewport_only(
                         shell_buffer_mut(&mut self.runtime, active_buffer_id)
@@ -640,6 +648,15 @@ impl ShellState {
                             && matches!(input_mode, InputMode::Visual)
                         {
                             let _ = self.active_buffer_mut()?.move_up();
+                        } else if active_buffer.is_terminal
+                            && matches!(input_mode, InputMode::Normal)
+                        {
+                            navigate_active_terminal_normal_mode(
+                                &mut self.runtime,
+                                ShellMotion::Up,
+                                None,
+                            )
+                            .map_err(ShellError::Runtime)?;
                         } else if active_buffer.is_terminal {
                             scroll_active_terminal_view(
                                 &mut self.runtime,
@@ -663,6 +680,15 @@ impl ShellState {
                             && matches!(input_mode, InputMode::Visual)
                         {
                             let _ = self.active_buffer_mut()?.move_down();
+                        } else if active_buffer.is_terminal
+                            && matches!(input_mode, InputMode::Normal)
+                        {
+                            navigate_active_terminal_normal_mode(
+                                &mut self.runtime,
+                                ShellMotion::Down,
+                                None,
+                            )
+                            .map_err(ShellError::Runtime)?;
                         } else if active_buffer.is_terminal {
                             scroll_active_terminal_view(
                                 &mut self.runtime,
@@ -677,6 +703,17 @@ impl ShellState {
                     }
                     Keycode::PageDown
                         if active_buffer.is_terminal
+                            && matches!(input_mode, InputMode::Normal) =>
+                    {
+                        let viewport = self.active_buffer_mut()?.viewport_lines().max(1);
+                        scroll_active_terminal_normal_view(
+                            &mut self.runtime,
+                            -(viewport as i32),
+                        )
+                        .map_err(ShellError::Runtime)?;
+                    }
+                    Keycode::PageDown
+                        if active_buffer.is_terminal
                             && !matches!(input_mode, InputMode::Visual) =>
                     {
                         scroll_active_terminal_view(
@@ -686,6 +723,14 @@ impl ShellState {
                         .map_err(ShellError::Runtime)?;
                     }
                     Keycode::PageDown => self.active_buffer_mut()?.scroll_by(page_rows),
+                    Keycode::PageUp
+                        if active_buffer.is_terminal
+                            && matches!(input_mode, InputMode::Normal) =>
+                    {
+                        let viewport = self.active_buffer_mut()?.viewport_lines().max(1);
+                        scroll_active_terminal_normal_view(&mut self.runtime, viewport as i32)
+                            .map_err(ShellError::Runtime)?;
+                    }
                     Keycode::PageUp
                         if active_buffer.is_terminal
                             && !matches!(input_mode, InputMode::Visual) =>

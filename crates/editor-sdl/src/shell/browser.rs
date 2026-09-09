@@ -931,6 +931,7 @@ pub(super) fn render_browser_buffer_body(
                 visual_selection: None,
                 yank_flash: None,
                 input_mode: InputMode::Normal,
+                leading_inset: 0,
             },
             PanelPalette {
                 theme_registry,

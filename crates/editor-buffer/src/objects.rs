@@ -380,11 +380,7 @@ impl TextBuffer {
 }
 
 pub(crate) fn detect_preferred_line_ending(text: &str) -> LineEnding {
-    if text.contains("\r\n") {
-        LineEnding::Crlf
-    } else {
-        LineEnding::Lf
-    }
+    LineEnding::detect(text)
 }
 
 pub(crate) fn normalize_inline_text(text: &str) -> String {

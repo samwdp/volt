@@ -1183,16 +1183,21 @@ pub(super) fn render_buffer(
                 let (input_row, col_in_visual_row) =
                     cursor_input.cursor_visual_row_col(available_input_cols);
                 let input_row = input_row.saturating_sub(first_visible_row);
+                let cursor_x = input_x + ((prompt_len + col_in_visual_row) as i32 * cell_width);
+                let cursor_y = layout.input_y + input_row as i32 * line_height;
                 fill_rect(
                     target,
                     PixelRectToRect::rect(
-                        input_x + ((prompt_len + col_in_visual_row) as i32 * cell_width),
-                        layout.input_y + input_row as i32 * line_height,
+                        cursor_x,
+                        cursor_y,
                         cell_width.max(1) as u32,
                         line_height.max(1) as u32,
                     ),
                     cursor,
                 )?;
+                if let Some(glyph) = input.display_glyph_at_char(cursor_index) {
+                    draw_text(target, cursor_x, cursor_y, &glyph, base_background)?;
+                }
             }
         }
     }

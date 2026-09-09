@@ -87,8 +87,6 @@ pub struct LspCompletionItem {
     pub(crate) edit_range: Option<TextRange>,
     pub(crate) detail: Option<String>,
     pub(crate) documentation: Option<String>,
-    pub(crate) has_documentation: bool,
-    pub(crate) raw_item: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,15 +146,7 @@ impl LspCompletionItem {
             edit_range,
             detail,
             documentation,
-            has_documentation: false,
-            raw_item: Value::Null,
         }
-    }
-
-    pub(crate) fn with_raw_item(mut self, raw_item: Value, has_documentation: bool) -> Self {
-        self.raw_item = raw_item;
-        self.has_documentation = has_documentation;
-        self
     }
 
     pub fn server_id(&self) -> &str {
@@ -1870,9 +1860,6 @@ pub(crate) fn client_capabilities() -> Result<ClientCapabilities, LspClientError
             "completion": {
                 "completionItem": {
                     "documentationFormat": ["markdown"],
-                    "resolveSupport": {
-                        "properties": ["documentation", "detail"]
-                    },
                     "snippetSupport": true
                 }
             },
@@ -3378,23 +3365,21 @@ pub(crate) fn parse_completion_item(server_id: &str, value: &Value) -> Option<Ls
         .get("detail")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // Prefer real documentation when present; otherwise reuse detail so the
+    // autocomplete docs panel still has something useful to show.
     let documentation = value
         .get("documentation")
         .and_then(completion_documentation)
         .or_else(|| detail.clone());
-    let has_documentation = documentation.is_some();
-    Some(
-        LspCompletionItem::new(
-            server_id,
-            kind,
-            label,
-            insert_text,
-            edit_range,
-            detail,
-            documentation,
-        )
-        .with_raw_item(value.clone(), has_documentation),
-    )
+    Some(LspCompletionItem::new(
+        server_id,
+        kind,
+        label,
+        insert_text,
+        edit_range,
+        detail,
+        documentation,
+    ))
 }
 
 pub(crate) fn completion_documentation(value: &Value) -> Option<String> {

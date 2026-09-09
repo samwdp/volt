@@ -202,6 +202,83 @@ fn acp_output_speaker_roles_and_tool_chip() {
 }
 
 #[test]
+fn render_acp_diff_expands_tab_indentation_to_spaces() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    buffer.init_acp_view("GitHub Copilot", None);
+    buffer.acp_upsert_tool_call(
+        ToolCall::new("tool-diff", "Edit file")
+            .kind(ToolKind::Edit)
+            .status(ToolCallStatus::Completed)
+            .content(vec![ToolCallContent::Diff(
+                Diff::new(
+                    "Tests.cs",
+                    "public sealed class Demo\n{\n\t[Fact]\n\tpublic void Example()\n\t{\n\t\tvar x = 1;\n\t}\n}\n",
+                )
+                .old_text(""),
+            )]),
+    );
+    buffer.sync_acp_viewport_metrics(640, 360, 8, 16, true);
+
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(15, 16, 20),
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: Color::RGB(110, 170, 255),
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let texts: Vec<&str> = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().all(|text| !text.contains('\t')),
+        "ACP draw must expand tabs before rasterizing: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("    [Fact]")),
+        "tab indent should draw as spaces: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("        var x = 1;")),
+        "nested tab indent should draw as spaces: {texts:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn acp_tool_diff_renders_added_and_removed_lines() {
     let items = vec![AcpOutputItem::ToolCall(
         ToolCall::new("tool-diff", "Edit file")
@@ -359,7 +436,7 @@ fn acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane
     let buffer_id = install_user_plugin_buffer(&mut state, "*acp*", user::acp::ACP_BUFFER_KIND)?;
     {
         let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
-        buffer.init_acp_view("GitHub Copilot");
+        buffer.init_acp_view("GitHub Copilot", None);
     }
     split_runtime_pane(&mut state.runtime, PaneSplitDirection::Vertical)?;
     let active_pane_id = shell_ui(&state.runtime)?
@@ -387,7 +464,7 @@ fn acp_plan_entries_populate_static_plan_pane() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_set_plan(Plan::new(vec![
         PlanEntry::new(
             "Render the ACP plan pane",
@@ -427,7 +504,7 @@ fn acp_plan_entries_normalize_completed_prefix_when_later_step_is_active() -> Re
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_set_plan(Plan::new(vec![
         PlanEntry::new(
             "First step",
@@ -463,7 +540,7 @@ fn acp_plan_entries_normalize_completed_prefix_without_active_step() -> Result<(
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_set_plan(Plan::new(vec![
         PlanEntry::new(
             "First step",
@@ -499,7 +576,7 @@ fn acp_tool_call_updates_replace_existing_output_item() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_upsert_tool_call(
         ToolCall::new("tool-1", "Read file")
             .kind(ToolKind::Read)
@@ -537,7 +614,7 @@ fn acp_plan_height_caps_wrapped_content_at_ten_rows() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_set_plan(Plan::new(
         (0..4)
             .map(|index| {
@@ -567,7 +644,7 @@ fn acp_scroll_output_to_end_reaches_last_rendered_line() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_set_plan(Plan::new(vec![PlanEntry::new(
         "Keep the plan compact",
         PlanEntryPriority::Medium,
@@ -594,7 +671,7 @@ fn acp_output_scroll_reaches_wrapped_tail() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_push_system_message("word ".repeat(40));
 
     buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
@@ -629,7 +706,7 @@ fn acp_output_wraps_long_tool_tokens_within_bubble_width() -> Result<(), String>
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     let title = "dotnet build src\\AssetFusion.Shared.EntityFrameworkCore\\AssetFusion.Shared.EntityFrameworkCore.csproj --no-restore 2>&1";
     buffer.acp_upsert_tool_call(
         ToolCall::new("tool-1", title)
@@ -674,7 +751,7 @@ fn render_acp_headers_use_rounded_caps() -> Result<(), String> {
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
 
     let rect = PixelRectToRect::rect(0, 0, 640, 360);
     let layout = buffer_footer_layout(buffer, rect, 16, 8);
@@ -735,7 +812,7 @@ fn render_acp_output_header_shows_live_when_tool_in_progress() -> Result<(), Str
     let buffer = state
         .active_buffer_mut()
         .map_err(|error| error.to_string())?;
-    buffer.init_acp_view("GitHub Copilot");
+    buffer.init_acp_view("GitHub Copilot", None);
     buffer.acp_upsert_tool_call(
         ToolCall::new("tool-1", "Read file")
             .kind(ToolKind::Read)
@@ -864,6 +941,165 @@ fn render_acp_input_cursor_uses_rounded_rect_in_normal_mode() -> Result<(), Stri
                 && *color == cursor_color
     )));
     Ok(())
+}
+
+#[test]
+fn render_acp_block_cursor_inverts_glyph_in_input_and_output() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_acp_test_buffer(&mut state, 0, "testing", None)?;
+    let base_background = Color::RGB(15, 16, 20);
+    let panel_background = buffer_section_panel_background(base_background);
+    let panel_background_render = to_render_color(panel_background);
+    let cursor_color = Color::RGB(17, 97, 197);
+    let cursor_color_render = to_render_color(cursor_color);
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+        buffer.acp_push_system_message("alpha");
+        buffer.sync_acp_viewport_metrics(640, 360, 8, 16, true);
+        let alpha_line = buffer
+            .acp_state
+            .as_ref()
+            .and_then(|state| {
+                state.output_pane.render_lines.iter().position(
+                    |line| matches!(line, AcpRenderedLine::Text(text) if text.text == "alpha"),
+                )
+            })
+            .ok_or_else(|| "alpha output line missing".to_owned())?;
+        buffer.set_cursor(TextPoint::new(alpha_line, 1));
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background,
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: cursor_color,
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene_has_inverted_block_cursor_glyph(
+            &scene,
+            "l",
+            cursor_color_render,
+            panel_background_render
+        ),
+        "output block cursor should redraw glyph in panel background"
+    );
+
+    {
+        let buffer = shell_ui_mut(&mut state.runtime)?
+            .buffer_mut(buffer_id)
+            .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+        let _ = buffer.focus_acp_input();
+        let input = buffer
+            .input_field_mut()
+            .ok_or_else(|| "ACP input field missing".to_owned())?;
+        input.cursor = 4;
+    }
+
+    let buffer = shell_ui(&state.runtime)?
+        .buffer(buffer_id)
+        .ok_or_else(|| "ACP shell buffer missing".to_owned())?;
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    scene.clear();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background,
+            foreground: Color::RGB(215, 221, 232),
+            muted: Color::RGB(140, 144, 152),
+            border_color: Color::RGB(40, 44, 52),
+            selection: Color::RGBA(55, 71, 99, 255),
+            yank_flash_color: Color::RGBA(112, 196, 255, 120),
+            cursor: cursor_color,
+            cursor_roundness: 2,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene_has_inverted_block_cursor_glyph(
+            &scene,
+            "i",
+            cursor_color_render,
+            panel_background_render
+        ),
+        "input block cursor should redraw glyph in panel background"
+    );
+    Ok(())
+}
+
+fn scene_has_inverted_block_cursor_glyph(
+    scene: &[DrawCommand],
+    glyph: &str,
+    cursor_color: RenderColor,
+    background: RenderColor,
+) -> bool {
+    scene.windows(2).any(|pair| {
+        matches!(
+            (&pair[0], &pair[1]),
+            (
+                DrawCommand::FillRoundedRect { rect, color, .. },
+                DrawCommand::Text {
+                    x,
+                    y,
+                    text,
+                    color: text_color,
+                }
+            ) if rect.width == 8
+                && rect.height == 16
+                && *color == cursor_color
+                && *x == rect.x
+                && *y == rect.y
+                && text == glyph
+                && *text_color == background
+        )
+    })
 }
 
 #[test]
@@ -1141,8 +1377,8 @@ fn acp_dock_focus_j_k_cycle_buffers() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let first = install_user_plugin_buffer(&mut state, "*acp Claude*", user::acp::ACP_BUFFER_KIND)?;
     let second = install_user_plugin_buffer(&mut state, "*acp Codex*", user::acp::ACP_BUFFER_KIND)?;
-    shell_buffer_mut(&mut state.runtime, first)?.init_acp_view("Claude");
-    shell_buffer_mut(&mut state.runtime, second)?.init_acp_view("Codex");
+    shell_buffer_mut(&mut state.runtime, first)?.init_acp_view("Claude", None);
+    shell_buffer_mut(&mut state.runtime, second)?.init_acp_view("Codex", None);
     acp::focus_acp_buffer(&mut state.runtime, first)?;
     toggle_acp_dock(&mut state.runtime)?;
     {
@@ -1181,8 +1417,8 @@ fn acp_dock_entries_list_active_workspace_buffers() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let first = install_user_plugin_buffer(&mut state, "*acp Claude*", user::acp::ACP_BUFFER_KIND)?;
     let second = install_user_plugin_buffer(&mut state, "*acp Codex*", user::acp::ACP_BUFFER_KIND)?;
-    shell_buffer_mut(&mut state.runtime, first)?.init_acp_view("Claude");
-    shell_buffer_mut(&mut state.runtime, second)?.init_acp_view("Codex");
+    shell_buffer_mut(&mut state.runtime, first)?.init_acp_view("Claude", None);
+    shell_buffer_mut(&mut state.runtime, second)?.init_acp_view("Codex", None);
     shell_buffer_mut(&mut state.runtime, first)?
         .acp_set_session_title(Some("Refactor dock".to_owned()));
 
@@ -1215,5 +1451,200 @@ fn acp_dock_layout_shrinks_content_on_the_right() -> Result<(), String> {
     assert!(docks.acp.dock_width > 0);
     assert_eq!(docks.content_width + docks.acp.dock_width, 640);
     assert_eq!(docks.content_x, 0);
+    Ok(())
+}
+
+#[test]
+fn acp_logo_assets_resolve_and_rasterize() -> Result<(), String> {
+    for relative in [
+        "acp/agent.svg",
+        "acp/codex.svg",
+        "acp/copilot.svg",
+        "acp/opencode.svg",
+        "acp/pi.svg",
+    ] {
+        let path = acp::resolve_bundled_asset_path(relative)
+            .ok_or_else(|| format!("missing bundled asset `{relative}`"))?;
+        assert!(
+            path.is_file(),
+            "`{relative}` must exist at {}",
+            path.display()
+        );
+        let logo = acp::load_acp_logo(relative)
+            .ok_or_else(|| format!("failed to rasterize `{relative}`"))?;
+        assert!(logo.width > 0 && logo.height > 0);
+        assert_eq!(logo.pixels.len(), (logo.width * logo.height * 4) as usize);
+    }
+    Ok(())
+}
+
+#[test]
+fn acp_logo_dest_rect_normalizes_native_svg_size() -> Result<(), String> {
+    let small = acp::load_acp_logo("acp/agent.svg")
+        .ok_or_else(|| "failed to rasterize agent logo".to_owned())?;
+    let large = acp::load_acp_logo("acp/opencode.svg")
+        .ok_or_else(|| "failed to rasterize opencode logo".to_owned())?;
+    assert!(
+        small.width < large.width,
+        "fixture expects agent SVG smaller than opencode ({} vs {})",
+        small.width,
+        large.width
+    );
+    let slot = 16u32;
+    let small_dest = acp::acp_logo_dest_rect(0, 0, 120, slot, &small, 0)
+        .ok_or_else(|| "small logo dest".to_owned())?;
+    let large_dest = acp::acp_logo_dest_rect(0, 0, 120, slot, &large, 0)
+        .ok_or_else(|| "large logo dest".to_owned())?;
+    assert_eq!(small_dest.width(), slot);
+    assert_eq!(small_dest.height(), slot);
+    assert_eq!(large_dest.width(), slot);
+    assert_eq!(large_dest.height(), slot);
+    Ok(())
+}
+
+#[test]
+fn render_acp_footer_draws_client_logo_before_text() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id =
+        install_user_plugin_buffer(&mut state, "*acp Logo*", user::acp::ACP_BUFFER_KIND)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.init_acp_view("Cursor Agent(ACP)", Some("acp/agent.svg".to_owned()));
+        if let Some(footer) = buffer.acp_footer_pane_mut() {
+            footer.replace_lines(vec!["ask · auto".to_owned()], true);
+        }
+    }
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let rect = PixelRectToRect::rect(0, 0, 640, 360);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_acp_buffer_body(
+        &mut target,
+        AcpBufferDraw {
+            buffer,
+            rect,
+            layout,
+            active: true,
+            visual_selection: None,
+            yank_flash: None,
+            input_mode: InputMode::Normal,
+        },
+        BufferBodyPalette {
+            theme_registry: None,
+            base_background: Color::RGB(20, 20, 20),
+            foreground: Color::RGB(220, 220, 220),
+            muted: Color::RGB(140, 140, 140),
+            border_color: Color::RGB(60, 60, 60),
+            selection: Color::RGB(40, 60, 90),
+            yank_flash_color: Color::RGB(80, 80, 40),
+            cursor: Color::RGB(200, 200, 200),
+            cursor_roundness: 0,
+        },
+        CellMetrics {
+            cell_width: 8,
+            line_height: 16,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let image_rect = scene.iter().find_map(|command| match command {
+        DrawCommand::Image { rect, .. } => Some(*rect),
+        _ => None,
+    });
+    let image_rect = image_rect.ok_or_else(|| "ACP footer must draw the client logo image".to_owned())?;
+    let text_y = scene.iter().find_map(|command| match command {
+        DrawCommand::Text { y, text, .. } if text.contains("ask") => Some(*y),
+        _ => None,
+    });
+    let text_y =
+        text_y.ok_or_else(|| "ACP footer text must still render after logo".to_owned())?;
+    let line_height = 16i32;
+    let logo_center = image_rect.y + (image_rect.height as i32) / 2;
+    let text_center = text_y + line_height / 2;
+    assert!(
+        (logo_center - text_center).abs() <= 1,
+        "logo must be vertically centred on the footer text line (logo_center={logo_center}, text_center={text_center})"
+    );
+    Ok(())
+}
+
+#[test]
+fn render_shell_state_keeps_pane_fills_out_of_acp_dock() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    toggle_acp_dock(&mut state.runtime)?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            emoji_font_request: None,
+            font_size: 16,
+            emoji_font_size: 16,
+            display_scale: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &*shell_user_library(&state.runtime),
+    )
+    .map_err(|error| error.to_string())?;
+    let ui = shell_ui(&state.runtime)?;
+    let docks = shell_docks_layout(&*shell_user_library(&state.runtime), ui, 640, 360, 8);
+    assert!(docks.acp.visible);
+    let dock_x = docks.acp.dock_rect.x;
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_shell_state(
+        &mut target,
+        &fonts,
+        ui,
+        None,
+        ShellDockEntries {
+            workspace: &[],
+            acp: &[],
+        },
+        ShellChrome {
+            user_library: &*shell_user_library(&state.runtime),
+            theme_registry: None,
+            workspace_name: "default",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+        },
+        ShellFrameView {
+            size: WindowSize {
+                width: 640,
+                height: 360,
+            },
+            fps_overlay: None,
+            metrics: TextMetrics {
+                cell_width: 8,
+                line_height: 16,
+                ascent: 12,
+            },
+            pulse: FramePulse {
+                now: Instant::now(),
+                typing_active: false,
+            },
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let pane_fills_into_dock = scene.iter().any(|command| match command {
+        DrawCommand::FillRect { rect, .. }
+            if rect.y == 0 && rect.height == 360 && rect.x < dock_x =>
+        {
+            rect.x.saturating_add(rect.width as i32) > dock_x
+        }
+        _ => false,
+    });
+    assert!(
+        !pane_fills_into_dock,
+        "pane background must stop before ACP dock column at x={dock_x}"
+    );
+    assert!(scene.iter().any(|command| matches!(
+        command,
+        DrawCommand::FillRect { rect, .. }
+            if rect.x == docks.acp.dock_rect.x && rect.width == docks.acp.dock_rect.width
+    )));
     Ok(())
 }

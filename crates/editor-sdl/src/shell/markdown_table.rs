@@ -314,11 +314,12 @@ fn markdown_table_point_for_target(
     let cell_index = target.cell_index.min(table.column_count.saturating_sub(1));
     let row = &table.rows[row_index];
     let mut column = row.prefix.chars().count();
-    for current_cell in 0..table.column_count {
+    for (current_cell, width) in render.widths.iter().copied().enumerate().take(table.column_count)
+    {
         column = column.saturating_add(1);
         let editable_start = column.saturating_add(1);
         let editable_len = if row.is_delimiter {
-            render.widths[current_cell].max(3)
+            width.max(3)
         } else {
             row.cells
                 .get(current_cell)
@@ -331,11 +332,7 @@ fn markdown_table_point_for_target(
                 editable_start + target.content_offset.min(editable_len),
             );
         }
-        let display_width = if row.is_delimiter {
-            render.widths[current_cell].max(3)
-        } else {
-            render.widths[current_cell]
-        };
+        let display_width = if row.is_delimiter { width.max(3) } else { width };
         column = editable_start + display_width + 1;
     }
     TextPoint::new(table.start_line + row_index, row.prefix.chars().count())

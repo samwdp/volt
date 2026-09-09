@@ -1198,6 +1198,45 @@ fn git_editor_confirm_writes_file_and_signals_stub() -> Result<(), String> {
 }
 
 #[test]
+fn git_editor_confirm_preserves_crlf_line_endings() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut env = Vec::new();
+    inject_git_editor_env(&mut state.runtime, &mut env)?;
+    let dir = env
+        .iter()
+        .find(|(key, _)| key == VOLT_GIT_EDITOR_DIR_ENV)
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or_else(|| "VOLT_GIT_EDITOR_DIR missing".to_owned())?;
+    let edit_path = dir.join("todo-crlf.txt");
+    std::fs::write(&edit_path, b"pick abc hello\r\n").map_err(|error| error.to_string())?;
+    let request_id = "test-confirm-crlf";
+    std::fs::write(
+        dir.join(format!("request-{request_id}")),
+        format!("{}\n", edit_path.display()),
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(refresh_pending_git_editor(&mut state.runtime)?);
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .preferred_line_ending(),
+        editor_buffer::LineEnding::Crlf
+    );
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 14));
+        buffer.text.insert_text(" edited");
+    }
+    confirm_git_editor_buffer(&mut state.runtime, buffer_id)?;
+
+    let bytes = std::fs::read(&edit_path).map_err(|error| error.to_string())?;
+    assert_eq!(bytes, b"pick abc hello edited\r\n");
+    Ok(())
+}
+
+#[test]
 fn git_line_is_untracked_uses_section_metadata() {
     let meta = SectionLineMeta {
         section_id: GIT_SECTION_UNTRACKED.to_owned(),

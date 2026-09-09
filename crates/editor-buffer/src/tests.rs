@@ -172,6 +172,46 @@ fn write_to_uses_the_selected_line_ending() {
 }
 
 #[test]
+fn save_preserves_crlf_bytes_after_edit() {
+    let file = must(TempFile::create("crlf-save", "alpha\r\nbeta\r\n"));
+    let mut buffer = must(TextBuffer::load_from_path(file.path()));
+    assert_eq!(buffer.preferred_line_ending(), LineEnding::Crlf);
+    buffer.set_cursor(TextPoint::new(0, 0));
+    buffer.insert_text("// edited\n");
+    must(buffer.save());
+    let bytes = must(fs::read(file.path()));
+    assert_eq!(bytes, b"// edited\r\nalpha\r\nbeta\r\n");
+}
+
+#[test]
+fn whole_buffer_replace_keeps_preferred_line_ending_on_save() {
+    let file = must(TempFile::create(
+        "crlf-format-replace",
+        "fn main() {\r\n}\r\n",
+    ));
+    let mut buffer = must(TextBuffer::load_from_path(file.path()));
+    assert_eq!(buffer.preferred_line_ending(), LineEnding::Crlf);
+    let end = buffer.point_from_char_index(buffer.char_count());
+    buffer.replace(TextRange::new(TextPoint::default(), end), "fn main() {}\n");
+    must(buffer.save());
+    assert_eq!(must(fs::read(file.path())), b"fn main() {}\r\n");
+}
+
+#[test]
+fn encode_text_for_disk_applies_preferred_ending() {
+    assert_eq!(
+        TextBuffer::encode_text_for_disk("a\nb\n", LineEnding::Crlf),
+        "a\r\nb\r\n"
+    );
+    assert_eq!(
+        TextBuffer::encode_text_for_disk("a\r\nb\r\n", LineEnding::Lf),
+        "a\nb\n"
+    );
+    assert_eq!(LineEnding::detect_bytes(b"a\r\nb"), LineEnding::Crlf);
+    assert_eq!(LineEnding::detect_bytes(b"a\nb"), LineEnding::Lf);
+}
+
+#[test]
 fn reload_from_path_updates_content_preserves_cursor_and_marks_clean() {
     let file = must(TempFile::create("reload", "alpha\nbeta\n"));
     let mut buffer = must(TextBuffer::load_from_path(file.path()));

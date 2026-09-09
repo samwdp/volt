@@ -832,10 +832,10 @@ impl AcpManager {
                     },
                 );
 
-                let label = shell_user_library(runtime)
+                let (label, logo) = shell_user_library(runtime)
                     .acp_client_by_id(&client_id)
-                    .map(|client| client.label)
-                    .unwrap_or_else(|| "ACP".to_owned());
+                    .map(|client| (client.label, client.logo))
+                    .unwrap_or_else(|| ("ACP".to_owned(), None));
 
                 if let Some(load_session) = pending.load_session {
                     let target_session_id = load_session.session_id;
@@ -852,7 +852,7 @@ impl AcpManager {
                         acp_session_buffer_name(&display_title),
                     );
                     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
-                        buffer.acp_prepare_session_replay(label.as_str());
+                        buffer.acp_prepare_session_replay(label.as_str(), logo.clone());
                         buffer.acp_set_session_title(load_session.title.clone());
                     }
                     if let Some(session) = self.sessions.get(&target_session_id) {

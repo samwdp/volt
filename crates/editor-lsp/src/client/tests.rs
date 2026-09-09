@@ -62,6 +62,20 @@ fn completion_parser_handles_lists_and_docs() {
 }
 
 #[test]
+fn completion_parser_falls_back_to_detail_for_documentation_panel() {
+    let item = parse_completion_item(
+        "rust-analyzer",
+        &json!({
+            "label": "foo",
+            "detail": "fn foo()",
+        }),
+    )
+    .expect("parse completion item");
+    assert_eq!(item.documentation(), Some("fn foo()"));
+    assert_eq!(item.detail(), Some("fn foo()"));
+}
+
+#[test]
 fn completion_parser_prefers_text_edit_over_insert_text_and_keeps_range() {
     // csharp-ls / Roslyn style: typed "foo." then item replaces the "." with ".bar()".
     let response = json!([
@@ -1408,7 +1422,6 @@ fn test_session_handle_in_workspace(
         #[cfg(test)]
         fail_next_send: AtomicBool::new(false),
         needs_full_document: Mutex::new(BTreeSet::new()),
-        completion_resolve_supported: AtomicBool::new(false),
     })
 }
 

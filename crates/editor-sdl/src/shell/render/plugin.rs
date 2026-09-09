@@ -188,6 +188,7 @@ pub(super) fn render_plugin_section_buffer_body(
                 visual_selection: pane_visual_selection,
                 yank_flash: pane_yank_flash,
                 input_mode: pane_mode,
+                leading_inset: 0,
             },
             PanelPalette {
                 theme_registry,
@@ -228,6 +229,7 @@ pub(super) fn render_text_panel(
         visual_selection,
         yank_flash,
         input_mode,
+        leading_inset,
     } = draw;
     let PanelPalette {
         theme_registry,
@@ -281,7 +283,7 @@ pub(super) fn render_text_panel(
         )?;
         draw_text(target, rect.x() + 10, rect.y() + 6, title, foreground)?;
     }
-    let body_x = rect.x() + 10;
+    let body_x = rect.x() + 10 + leading_inset.max(0);
     let body_y = if header_height > 0 {
         rect.y() + header_height + 6
     } else {
@@ -290,6 +292,7 @@ pub(super) fn render_text_panel(
     let mut visual_row = 0usize;
     let line_count = text.line_count();
     let mut cursor_screen: Option<(usize, usize)> = None;
+    let mut cursor_text_overlay: Option<(i32, CursorTextOverlay)> = None;
     for line_index in scroll_row.min(line_count.saturating_sub(1))..line_count {
         let line = text.line(line_index).unwrap_or_default();
         let line_len = text.line_len_chars(line_index).unwrap_or(0);
@@ -351,6 +354,20 @@ pub(super) fn render_text_panel(
                     visual_row,
                     char_map.display_cols_between(segment.start_col, cursor_col),
                 ));
+                if matches!(input_mode, InputMode::Normal | InputMode::Visual)
+                    && let Some(overlay) = block_cursor_text_overlay(CursorOverlayQuery {
+                        x: body_x,
+                        line: &line,
+                        char_map: &char_map,
+                        segment: *segment,
+                        line_index,
+                        cursor: cursor_point,
+                        color: Some(panel_background),
+                        cell_width,
+                    })
+                {
+                    cursor_text_overlay = Some((y, overlay));
+                }
             }
             draw_buffer_text(
                 target,
@@ -393,6 +410,9 @@ pub(super) fn render_text_panel(
             cursor_roundness,
             cursor,
         )?;
+        if let Some((y, overlay)) = cursor_text_overlay {
+            draw_text(target, overlay.draw_x, y, &overlay.text, overlay.color)?;
+        }
     } else if line_count == 0 {
         draw_text(target, body_x, body_y, "", muted)?;
     }
@@ -511,17 +531,22 @@ pub(super) fn render_input_panel(
             let (input_row, col_in_visual_row) =
                 input.visual_row_col_for_cursor(cursor_index, available_input_cols);
             let input_row = input_row.saturating_sub(first_visible_row);
+            let cursor_x = input_x + ((prompt_len + col_in_visual_row) as i32 * cell_width);
+            let cursor_y = input_y + input_row as i32 * line_height;
             fill_rounded_rect(
                 target,
                 PixelRectToRect::rect(
-                    input_x + ((prompt_len + col_in_visual_row) as i32 * cell_width),
-                    input_y + input_row as i32 * line_height,
+                    cursor_x,
+                    cursor_y,
                     cell_width.max(1) as u32,
                     line_height.max(2) as u32,
                 ),
                 cursor_roundness,
                 cursor,
             )?;
+            if let Some(glyph) = input.display_glyph_at_char(cursor_index) {
+                draw_text(target, cursor_x, cursor_y, &glyph, panel_background)?;
+            }
         }
     }
     Ok(())
@@ -788,6 +813,23 @@ pub(super) fn render_acp_buffer_body(
             line_height,
         },
     )?;
+    let footer_logo = state
+        .client_logo
+        .as_deref()
+        .and_then(super::acp::load_acp_logo);
+    let footer_leading_inset = footer_logo
+        .as_ref()
+        .map(|logo| {
+            let dest = super::acp::acp_logo_leading_rect(
+                acp_layout.footer.rect.x(),
+                acp_layout.footer.rect.y(),
+                line_height,
+                logo,
+                8,
+            );
+            dest.width() as i32 + 10
+        })
+        .unwrap_or(0);
     render_text_panel(
         target,
         TextPanelDraw {
@@ -810,6 +852,7 @@ pub(super) fn render_acp_buffer_body(
                 None
             },
             input_mode: InputMode::Normal,
+            leading_inset: footer_leading_inset,
         },
         PanelPalette {
             theme_registry,
@@ -829,6 +872,16 @@ pub(super) fn render_acp_buffer_body(
             line_height,
         },
     )?;
+    if let Some(logo) = footer_logo.as_ref() {
+        let dest = super::acp::acp_logo_leading_rect(
+            acp_layout.footer.rect.x(),
+            acp_layout.footer.rect.y(),
+            line_height,
+            logo,
+            8,
+        );
+        super::acp::draw_acp_logo(target, logo, dest)?;
+    }
     Ok(())
 }
 
@@ -1037,32 +1090,6 @@ pub(super) fn render_acp_pane(
                             )?;
                         }
                     }
-                    if show_text_cursor
-                        && cursor_point.line == line_index
-                        && cursor_segment == segment_index
-                    {
-                        let cursor_x = origin_x
-                            + (prefix_cols as i32 * cell_width)
-                            + (cursor_point.column.saturating_sub(segment.start_col) as i32
-                                * cell_width);
-                        let cursor_width = match input_mode {
-                            InputMode::Normal | InputMode::Visual => cell_width.max(2) as u32,
-                            InputMode::Insert | InputMode::Replace => {
-                                (cell_width / 4).max(2) as u32
-                            }
-                        };
-                        fill_rounded_rect(
-                            target,
-                            PixelRectToRect::rect(
-                                cursor_x,
-                                y,
-                                cursor_width,
-                                line_height.max(2) as u32,
-                            ),
-                            cursor_roundness,
-                            cursor,
-                        )?;
-                    }
                     if segment_index == 0 {
                         acp_draw_prefix_segments(
                             target,
@@ -1079,31 +1106,62 @@ pub(super) fn render_acp_pane(
                             },
                         )?;
                     }
-                    let segment_text =
-                        acp_slice_chars(&line.text, segment.start_col, segment.end_col);
                     let default_color =
                         acp_color(line.text_role, theme_registry, foreground, muted, cursor);
-                    if line.syntax_spans.is_empty() {
-                        draw_text(target, segment_x, y, &segment_text, default_color)?;
-                    } else {
-                        let char_map = LineCharMap::new(&line.text);
-                        draw_buffer_text(
-                            target,
-                            BufferTextRun {
-                                x: segment_x,
-                                y,
-                                line: &line.text,
-                                segment: LineWrapSegment {
-                                    start_col: segment.start_col,
-                                    end_col: segment.end_col,
-                                },
-                                char_map: &char_map,
-                                line_syntax_spans: Some(line.syntax_spans.as_slice()),
-                                default_color,
-                                cell_width,
+                    // Expand tabs/controls via LineCharMap (raw `\t` rasterizes as tofu).
+                    let char_map = LineCharMap::new(&line.text);
+                    draw_buffer_text(
+                        target,
+                        BufferTextRun {
+                            x: segment_x,
+                            y,
+                            line: &line.text,
+                            segment: LineWrapSegment {
+                                start_col: segment.start_col,
+                                end_col: segment.end_col,
                             },
-                            theme_registry,
+                            char_map: &char_map,
+                            line_syntax_spans: (!line.syntax_spans.is_empty())
+                                .then_some(line.syntax_spans.as_slice()),
+                            default_color,
+                            cell_width,
+                        },
+                        theme_registry,
+                    )?;
+                    if show_text_cursor
+                        && cursor_point.line == line_index
+                        && cursor_segment == segment_index
+                    {
+                        let cursor_col = char_map.cursor_anchor_col(cursor_point.column);
+                        let cursor_x = segment_x
+                            + (char_map.display_cols_between(segment.start_col, cursor_col) as i32
+                                * cell_width);
+                        fill_rounded_rect(
+                            target,
+                            PixelRectToRect::rect(
+                                cursor_x,
+                                y,
+                                cell_width.max(2) as u32,
+                                line_height.max(2) as u32,
+                            ),
+                            cursor_roundness,
+                            cursor,
                         )?;
+                        if let Some(overlay) = block_cursor_text_overlay(CursorOverlayQuery {
+                            x: segment_x,
+                            line: &line.text,
+                            char_map: &char_map,
+                            segment: LineWrapSegment {
+                                start_col: segment.start_col,
+                                end_col: segment.end_col,
+                            },
+                            line_index,
+                            cursor: cursor_point,
+                            color: Some(panel_background),
+                            cell_width,
+                        }) {
+                            draw_text(target, overlay.draw_x, y, &overlay.text, overlay.color)?;
+                        }
                     }
                     drawn_rows = drawn_rows.saturating_add(1);
                     global_visual_row = global_visual_row.saturating_add(1);

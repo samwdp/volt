@@ -601,6 +601,47 @@ impl LiveTerminalSession {
         previous_offset != term.grid().display_offset()
     }
 
+    /// Enter vim-like normal-mode navigation over scrollback.
+    pub fn begin_normal_mode(&mut self) {
+        let mut term = self.term.lock();
+        crate::begin_terminal_normal_mode(&mut *term);
+    }
+
+    /// Leave normal-mode navigation and follow the live prompt.
+    pub fn end_normal_mode(&mut self) {
+        let mut term = self.term.lock();
+        crate::end_terminal_normal_mode(&mut *term);
+    }
+
+    /// Apply a normal-mode motion with editor-style scrolloff.
+    pub fn apply_normal_motion(
+        &mut self,
+        motion: crate::TerminalNormalMotion,
+        count: Option<usize>,
+        scrolloff: usize,
+    ) -> bool {
+        let mut term = self.term.lock();
+        crate::apply_terminal_normal_motion(&mut *term, motion, count, scrolloff)
+    }
+
+    /// Scroll the viewport while keeping the normal-mode cursor on-screen.
+    pub fn scroll_normal_view(&mut self, lines: i32, scrolloff: usize) -> bool {
+        let mut term = self.term.lock();
+        crate::scroll_terminal_normal_view(&mut *term, lines, scrolloff)
+    }
+
+    /// Viewport-relative cursor for the active normal-mode navigator.
+    pub fn normal_cursor_viewport(&self) -> Option<(usize, usize)> {
+        let term = self.term.lock();
+        crate::terminal_normal_cursor_viewport(&*term)
+    }
+
+    /// Whether normal-mode (vi) navigation is active.
+    pub fn normal_mode_active(&self) -> bool {
+        use alacritty_terminal::term::TermMode;
+        self.term.lock().mode().contains(TermMode::VI)
+    }
+
     /// Terminates the child process if it is still running.
     pub fn kill(&mut self) -> Result<(), LiveTerminalError> {
         if self.exit_code.is_some() {
@@ -731,11 +772,17 @@ pub(crate) fn terminal_snapshot_lines<T: EventListener>(term: &Term<T>) -> Vec<S
         let character = if cell.flags.contains(Flags::HIDDEN) {
             ' '
         } else {
-            cell.c
+            sanitize_terminal_display_char(cell.c)
         };
         current_text.push(character);
         if let Some(zerowidth) = cell.zerowidth() {
-            current_text.extend(zerowidth.iter().copied());
+            current_text.extend(
+                zerowidth
+                    .iter()
+                    .copied()
+                    .map(sanitize_terminal_display_char)
+                    .filter(|character| *character != ' '),
+            );
         }
     }
 
@@ -846,12 +893,28 @@ pub(crate) fn terminal_cell_text(cell: &TerminalCell) -> String {
     text.push(if cell.flags.contains(Flags::HIDDEN) {
         ' '
     } else {
-        cell.c
+        sanitize_terminal_display_char(cell.c)
     });
     if let Some(zerowidth) = cell.zerowidth() {
-        text.extend(zerowidth.iter().copied());
+        text.extend(
+            zerowidth
+                .iter()
+                .copied()
+                .map(sanitize_terminal_display_char)
+                .filter(|character| *character != ' '),
+        );
     }
     text
+}
+
+/// Alacritty stores HT in the cell that started a tab advance. SDL_ttf has no
+/// glyph for C0 controls, so map them to space before editor paint/yank text.
+pub(crate) fn sanitize_terminal_display_char(character: char) -> char {
+    if character.is_control() {
+        ' '
+    } else {
+        character
+    }
 }
 
 pub(crate) fn terminal_underline_color(

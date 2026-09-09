@@ -393,16 +393,17 @@ fn collect_acp_dock_entries(runtime: &EditorRuntime) -> Result<Vec<AcpDockEntry>
             .and_then(|client_id| {
                 shell_user_library(runtime)
                     .acp_client_by_id(&client_id)
-                    .map(|client| client.label)
-                    .or(Some(client_id))
-            })
-            .unwrap_or_else(|| "ACP".to_owned());
+                    .map(|client| (client.label, client.logo))
+                    .or(Some((client_id, None)))
+            });
+        let (client_label, logo) = client.unwrap_or_else(|| ("ACP".to_owned(), None));
         let name = acp_dock_buffer_label(buffer.name());
         entries.push(AcpDockEntry {
             buffer_id: buffer.id(),
             name,
             session,
-            client,
+            client: client_label,
+            logo,
             active: active_buffer == Some(buffer.id()),
         });
     }

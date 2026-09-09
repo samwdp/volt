@@ -1682,6 +1682,7 @@ pub struct AbiAcpClient {
     pub args: RVec<RString>,
     pub env: RVec<AbiStringPair>,
     pub cwd: ROption<RString>,
+    pub logo: ROption<RString>,
 }
 
 impl From<AcpClient> for AbiAcpClient {
@@ -1703,6 +1704,7 @@ impl From<AcpClient> for AbiAcpClient {
                 .collect::<Vec<_>>()
                 .into(),
             cwd: value.cwd.map(Into::into).into(),
+            logo: value.logo.map(Into::into).into(),
         }
     }
 }
@@ -1720,6 +1722,7 @@ impl From<AbiAcpClient> for AcpClient {
                 .map(|pair| (pair.key.into_string(), pair.value.into_string()))
                 .collect(),
             cwd: value.cwd.into_option().map(RString::into_string),
+            logo: value.logo.into_option().map(RString::into_string),
         }
     }
 }

@@ -173,8 +173,8 @@ use editor_syntax::{
     SyntaxSnapshot, apply_rainbow_delimiter_spans_for_buffer,
 };
 use editor_terminal::{
-    LiveTerminalConfig, LiveTerminalSession, TerminalKey, TerminalRenderSnapshot,
-    TerminalViewportScroll,
+    LiveTerminalConfig, LiveTerminalSession, TerminalKey, TerminalNormalMotion,
+    TerminalRenderSnapshot, TerminalViewportScroll,
 };
 use editor_theme::{Color as ThemeColor, ThemeRegistry, ThemeStyle};
 use editor_ui::{

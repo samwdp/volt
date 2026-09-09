@@ -282,6 +282,9 @@ pub struct AcpClientConfig {
     pub env: Vec<StringPair>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Bundled asset path relative to `assets/` (for example `acp/agent.svg`).
+    #[serde(default)]
+    pub logo: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -313,6 +316,7 @@ fn default_acp_clients() -> Vec<AcpClientConfig> {
             args: vec!["acp".to_owned(), "--yolo".to_owned()],
             env: Vec::new(),
             cwd: None,
+            logo: Some("acp/agent.svg".to_owned()),
         },
         AcpClientConfig {
             id: "codex".to_owned(),
@@ -321,6 +325,7 @@ fn default_acp_clients() -> Vec<AcpClientConfig> {
             args: Vec::new(),
             env: Vec::new(),
             cwd: None,
+            logo: Some("acp/codex.svg".to_owned()),
         },
         AcpClientConfig {
             id: "copilot".to_owned(),
@@ -333,6 +338,7 @@ fn default_acp_clients() -> Vec<AcpClientConfig> {
             ],
             env: Vec::new(),
             cwd: None,
+            logo: Some("acp/copilot.svg".to_owned()),
         },
         AcpClientConfig {
             id: "opencode".to_owned(),
@@ -341,6 +347,7 @@ fn default_acp_clients() -> Vec<AcpClientConfig> {
             args: vec!["acp".to_owned()],
             env: Vec::new(),
             cwd: None,
+            logo: Some("acp/opencode.svg".to_owned()),
         },
         AcpClientConfig {
             id: "pi".to_owned(),
@@ -349,6 +356,7 @@ fn default_acp_clients() -> Vec<AcpClientConfig> {
             args: vec![crate::acp::PI_ACP_LOCATION.to_owned()],
             env: Vec::new(),
             cwd: None,
+            logo: Some("acp/pi.svg".to_owned()),
         },
     ]
 }

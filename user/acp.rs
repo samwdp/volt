@@ -22,6 +22,8 @@ pub struct AcpClientConfig {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub cwd: Option<String>,
+    /// Bundled asset path relative to `assets/` (for example `acp/agent.svg`).
+    pub logo: Option<String>,
 }
 
 impl AcpClientConfig {
@@ -38,7 +40,13 @@ impl AcpClientConfig {
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             env: Vec::new(),
             cwd: None,
+            logo: None,
         }
+    }
+
+    pub fn with_logo(mut self, logo: impl Into<String>) -> Self {
+        self.logo = Some(logo.into());
+        self
     }
 }
 
@@ -59,6 +67,7 @@ pub fn clients() -> Vec<AcpClientConfig> {
                 .map(|pair| (pair.key, pair.value))
                 .collect(),
             cwd: client.cwd,
+            logo: client.logo,
         })
         .collect()
 }
@@ -306,5 +315,18 @@ mod tests {
                 "missing binding for {chord} -> {command}"
             );
         }
+    }
+
+    #[test]
+    fn clients_include_logo_paths() {
+        let logos: Vec<_> = clients()
+            .into_iter()
+            .filter_map(|client| client.logo)
+            .collect();
+        assert!(logos.iter().any(|logo| logo == "acp/agent.svg"));
+        assert!(logos.iter().any(|logo| logo == "acp/codex.svg"));
+        assert!(logos.iter().any(|logo| logo == "acp/copilot.svg"));
+        assert!(logos.iter().any(|logo| logo == "acp/opencode.svg"));
+        assert!(logos.iter().any(|logo| logo == "acp/pi.svg"));
     }
 }

@@ -18,6 +18,7 @@ pub(super) struct AcpDockEntry {
     pub(super) name: String,
     pub(super) session: String,
     pub(super) client: String,
+    pub(super) logo: Option<String>,
     pub(super) active: bool,
 }
 
@@ -241,8 +242,9 @@ pub(super) fn render_acp_dock(
     let card_inset = 6i32;
     let card_height = acp_dock_card_height(line_height) as i32;
     let text_x = layout.dock_rect.x + cell_width.max(1) + card_inset;
+    let logo_reserve = line_height.max(1) + cell_width.max(1) * 2 + card_inset;
     let max_chars = ((layout.dock_rect.width as i32)
-        .saturating_sub(cell_width.max(1) * 2 + card_inset * 2)
+        .saturating_sub(cell_width.max(1) * 2 + card_inset * 2 + logo_reserve)
         / cell_width.max(1))
     .max(4) as usize;
     for (index, entry) in entries.iter().enumerate() {
@@ -276,6 +278,25 @@ pub(super) fn render_acp_dock(
         draw_text(target, text_x, baseline, &name, foreground)?;
         draw_text(target, text_x, baseline + line_height, &session, muted)?;
         draw_text(target, text_x, baseline + line_height * 2, &client, muted)?;
+        // Cap the logo slot to one text line so native SVG size (24 vs 512) cannot
+        // inflate one client relative to another inside the multi-line card.
+        let logo_side = line_height.max(1) as u32;
+        let logo_area_y =
+            card_rect.y() + ((card_rect.height() as i32 - logo_side as i32) / 2).max(0);
+        if let Some(logo_path) = entry.logo.as_deref()
+            && let Some(logo) = super::acp::load_acp_logo(logo_path)
+            // Match card_inset so logo↔highlight gap equals highlight↔dock edge gap.
+            && let Some(dest) = super::acp::acp_logo_dest_rect(
+                card_rect.x(),
+                logo_area_y,
+                card_rect.width().saturating_sub(card_inset as u32),
+                logo_side,
+                &logo,
+                0,
+            )
+        {
+            super::acp::draw_acp_logo(target, &logo, dest)?;
+        }
         let separator_y = card_y + card_height - 1;
         if separator_y < layout.dock_rect.y + layout.dock_rect.height as i32 {
             fill_overlay_surface_rect(

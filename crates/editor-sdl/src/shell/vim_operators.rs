@@ -550,10 +550,7 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
 
     let count = shell_ui_mut(runtime)?.vim_mut().take_count();
     let visual_mode = shell_ui(runtime)?.input_mode() == InputMode::Visual;
-    if !visual_mode
-        && let Some(scroll) = terminal_scroll_for_motion(motion, count)
-        && scroll_active_terminal_view(runtime, scroll)?
-    {
+    if !visual_mode && navigate_active_terminal_normal_mode(runtime, motion, count)? {
         return Ok(());
     }
     let input_mode = shell_ui(runtime)?.input_mode();
@@ -582,17 +579,29 @@ fn apply_motion_command(runtime: &mut EditorRuntime, motion: ShellMotion) -> Res
 fn apply_scroll_command(runtime: &mut EditorRuntime, command: ScrollCommand) -> Result<(), String> {
     let count = shell_ui_mut(runtime)?.vim_mut().take_count_or_one();
     let visual_mode = shell_ui(runtime)?.input_mode() == InputMode::Visual;
-    let terminal_scroll = match command {
-        ScrollCommand::HalfPageDown => Some(TerminalViewportScroll::HalfPageDown),
-        ScrollCommand::HalfPageUp => Some(TerminalViewportScroll::HalfPageUp),
-        ScrollCommand::PageDown => Some(TerminalViewportScroll::PageDown),
-        ScrollCommand::PageUp => Some(TerminalViewportScroll::PageUp),
-        ScrollCommand::LineDown => Some(TerminalViewportScroll::LineDelta(-(count as i32))),
-        ScrollCommand::LineUp => Some(TerminalViewportScroll::LineDelta(count as i32)),
+    let terminal_lines = match command {
+        ScrollCommand::HalfPageDown => {
+            let viewport = active_shell_buffer_mut(runtime)?.viewport_lines().max(1);
+            Some(-(((viewport / 2).max(1) * count) as i32))
+        }
+        ScrollCommand::HalfPageUp => {
+            let viewport = active_shell_buffer_mut(runtime)?.viewport_lines().max(1);
+            Some(((viewport / 2).max(1) * count) as i32)
+        }
+        ScrollCommand::PageDown => {
+            let viewport = active_shell_buffer_mut(runtime)?.viewport_lines().max(1);
+            Some(-((viewport * count) as i32))
+        }
+        ScrollCommand::PageUp => {
+            let viewport = active_shell_buffer_mut(runtime)?.viewport_lines().max(1);
+            Some((viewport * count) as i32)
+        }
+        ScrollCommand::LineDown => Some(-(count as i32)),
+        ScrollCommand::LineUp => Some(count as i32),
     };
     if !visual_mode
-        && let Some(scroll) = terminal_scroll
-        && scroll_active_terminal_view(runtime, scroll)?
+        && let Some(lines) = terminal_lines
+        && scroll_active_terminal_normal_view(runtime, lines)?
     {
         return Ok(());
     }

@@ -268,9 +268,9 @@ fn wrap_hover_overlay_lines(
     let start = scroll_offset.min(provider.lines.len());
     let end = (start + source_line_limit).min(provider.lines.len());
     let mut wrapped = Vec::new();
-    for source_line_index in start..end {
-        let line = provider.lines[source_line_index].clone();
-        let char_map = LineCharMap::new(&line);
+    for (source_line_index, line) in provider.lines[start..end].iter().enumerate() {
+        let source_line_index = start + source_line_index;
+        let char_map = LineCharMap::new(line);
         for segment in wrap_line_segments(&char_map, max_columns, max_columns) {
             if wrapped.len() >= max_rows {
                 return wrapped;

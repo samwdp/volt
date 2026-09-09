@@ -442,6 +442,70 @@ fn buffer_save_command_writes_edited_file_buffer_to_disk() -> Result<(), String>
 }
 
 #[test]
+fn buffer_save_preserves_crlf_line_endings() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("buffer-save-crlf");
+    let path = root.join("sample.txt");
+    std::fs::write(&path, b"alpha\r\nbeta\r\n").map_err(|error| error.to_string())?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .text
+            .preferred_line_ending(),
+        editor_buffer::LineEnding::Crlf
+    );
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.text.set_cursor(TextPoint::new(0, 0));
+        buffer.text.insert_text("// local\n");
+        assert!(buffer.is_dirty());
+    }
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    assert_eq!(bytes, b"// local\r\nalpha\r\nbeta\r\n");
+    assert!(!shell_buffer(&state.runtime, buffer_id)?.is_dirty());
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn format_style_whole_buffer_replace_preserves_crlf_on_save() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("format-style-crlf");
+    let path = root.join("mod.rs");
+    std::fs::write(&path, b"fn main() {\r\n}\r\n").map_err(|error| error.to_string())?;
+
+    let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        assert_eq!(
+            buffer.text.preferred_line_ending(),
+            editor_buffer::LineEnding::Crlf
+        );
+        let end = buffer.text.point_from_char_index(buffer.text.char_count());
+        buffer.replace_range(TextRange::new(TextPoint::default(), end), "fn main() {}\n");
+    }
+
+    state
+        .runtime
+        .execute_command("buffer.save")
+        .map_err(|error| error.to_string())?;
+
+    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+    assert_eq!(bytes, b"fn main() {}\r\n");
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn workspace_cycle_skips_non_default_workspace_without_project_root() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let first_root = unique_temp_dir("workspace-cycle-first");
