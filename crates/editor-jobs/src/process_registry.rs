@@ -1,13 +1,13 @@
 //! Process Registry and Process Launch for Owned Process trees.
 //!
 //! Every Launch registers a tree root (platform kill-tree) under hybrid
-//! supervision (kill-tree plus `volt --process-supervisor` when available).
+//! supervision (kill-tree plus `volt --process-supervisor` when applicable).
 
 use std::{
     collections::{HashMap, HashSet},
     fmt,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{ChildStderr, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -83,6 +83,16 @@ impl fmt::Display for ShareKey {
     }
 }
 
+/// Stdio configuration for Process Launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessLaunchStdio {
+    /// Discard stdin/stdout/stderr (default for fire-and-forget trees).
+    #[default]
+    Null,
+    /// Pipe stdout and stderr for callers that need to stream or capture output.
+    Piped,
+}
+
 /// How Process Launch should start an Owned Process tree.
 #[derive(Debug, Clone)]
 pub struct ProcessLaunchSpec {
@@ -102,6 +112,8 @@ pub struct ProcessLaunchSpec {
     pub env: Vec<(String, String)>,
     /// Optional process supervisor executable override (tests / embedding).
     pub process_supervisor_exe: Option<PathBuf>,
+    /// Stdio mode for the launched tree root.
+    pub stdio: ProcessLaunchStdio,
 }
 
 impl ProcessLaunchSpec {
@@ -119,6 +131,7 @@ impl ProcessLaunchSpec {
             current_dir: None,
             env: Vec::new(),
             process_supervisor_exe: None,
+            stdio: ProcessLaunchStdio::Null,
         }
     }
 
@@ -151,6 +164,23 @@ impl ProcessLaunchSpec {
         self.process_supervisor_exe = Some(exe.into());
         self
     }
+
+    /// Configures stdio for the launched tree root.
+    pub fn with_stdio(mut self, stdio: ProcessLaunchStdio) -> Self {
+        self.stdio = stdio;
+        self
+    }
+}
+
+/// Result of Process Launch: registry id plus optional output pipes.
+#[derive(Debug)]
+pub struct LaunchedProcess {
+    /// Registry id for the Owned Process tree.
+    pub id: OwnedProcessId,
+    /// Piped stdout when launched with [`ProcessLaunchStdio::Piped`].
+    pub stdout: Option<ChildStdout>,
+    /// Piped stderr when launched with [`ProcessLaunchStdio::Piped`].
+    pub stderr: Option<ChildStderr>,
 }
 
 /// Errors from Process Registry operations.
@@ -213,7 +243,7 @@ impl ProcessRegistry {
     pub fn launch(
         &mut self,
         spec: ProcessLaunchSpec,
-    ) -> Result<OwnedProcessId, ProcessRegistryError> {
+    ) -> Result<LaunchedProcess, ProcessRegistryError> {
         if let Some(share_key) = &spec.share_key
             && let Some(&existing_id) = self.share_keys.get(share_key)
         {
@@ -222,10 +252,14 @@ impl ProcessRegistry {
                 .get_mut(&existing_id)
                 .ok_or(ProcessRegistryError::UnknownProcess(existing_id))?;
             entry.workspace_ids.extend(spec.workspace_ids);
-            return Ok(existing_id);
+            return Ok(LaunchedProcess {
+                id: existing_id,
+                stdout: None,
+                stderr: None,
+            });
         }
 
-        let tree = OwnedProcessTree::launch(&spec)?;
+        let (tree, stdout, stderr) = OwnedProcessTree::launch(&spec)?;
         let id = self.allocate_id();
         let share_key = spec.share_key.clone();
         if let Some(share_key) = share_key.clone() {
@@ -237,6 +271,48 @@ impl ProcessRegistry {
             OwnedProcessEntry {
                 workspace_ids: spec.workspace_ids.into_iter().collect(),
                 share_key,
+                tree,
+            },
+        );
+        Ok(LaunchedProcess {
+            id,
+            stdout,
+            stderr,
+        })
+    }
+
+    /// Process Launch for an interactive shell tree the caller starts inside
+    /// `spawn` (ConPTY/PTY). The OS spawn happens under Launch; the returned
+    /// root PID is registered with Workspace tags. Supervisor wrapping is not
+    /// applicable for interactive shells.
+    pub fn launch_interactive_session<T, E>(
+        &mut self,
+        workspace_ids: impl IntoIterator<Item = WorkspaceId>,
+        spawn: impl FnOnce() -> Result<(T, u32), E>,
+    ) -> Result<(OwnedProcessId, T), ProcessRegistryError>
+    where
+        E: std::fmt::Display,
+    {
+        let (payload, root_pid) = spawn()
+            .map_err(|error| ProcessRegistryError::Launch(error.to_string()))?;
+        let id = self.launch_interactive_root(root_pid, workspace_ids)?;
+        Ok((id, payload))
+    }
+
+    /// Registers an already-started interactive root PID. Prefer
+    /// [`Self::launch_interactive_session`] so the OS spawn stays inside Process Launch.
+    pub fn launch_interactive_root(
+        &mut self,
+        root_pid: u32,
+        workspace_ids: impl IntoIterator<Item = WorkspaceId>,
+    ) -> Result<OwnedProcessId, ProcessRegistryError> {
+        let tree = OwnedProcessTree::adopt_interactive_root(root_pid)?;
+        let id = self.allocate_id();
+        self.entries.insert(
+            id,
+            OwnedProcessEntry {
+                workspace_ids: workspace_ids.into_iter().collect(),
+                share_key: None,
                 tree,
             },
         );
@@ -254,6 +330,29 @@ impl ProcessRegistry {
     /// Returns the OS process id of the Owned Process tree root, if registered.
     pub fn root_pid(&self, id: OwnedProcessId) -> Option<u32> {
         self.entries.get(&id).map(|entry| entry.tree.root_pid())
+    }
+
+    /// Returns how many Owned Processes are currently registered and alive.
+    pub fn alive_count(&mut self) -> usize {
+        let ids = self.entries.keys().copied().collect::<Vec<_>>();
+        ids.into_iter().filter(|id| self.is_alive(*id)).count()
+    }
+
+    /// Returns the exit code when the Owned Process has exited.
+    pub fn exit_code(&mut self, id: OwnedProcessId) -> Option<i32> {
+        self.entries.get_mut(&id)?.tree.exit_code()
+    }
+
+    /// Removes a naturally-exited Owned Process from the registry without force-kill.
+    pub fn reclaim(&mut self, id: OwnedProcessId) -> Result<(), ProcessRegistryError> {
+        let Some(mut entry) = self.entries.remove(&id) else {
+            return Ok(());
+        };
+        if let Some(share_key) = entry.share_key.take() {
+            self.share_keys.remove(&share_key);
+        }
+        entry.tree.reclaim();
+        Ok(())
     }
 
     /// Workspace Close: remove the Workspace tag from matching entries; tear down
@@ -299,6 +398,15 @@ impl ProcessRegistry {
         entry.tree.crash_close()
     }
 
+    /// Graceful-then-force teardown for one Owned Process by id.
+    pub fn teardown_process(
+        &mut self,
+        id: OwnedProcessId,
+        grace: Duration,
+    ) -> Result<(), ProcessRegistryError> {
+        self.teardown(id, grace)
+    }
+
     fn teardown(
         &mut self,
         id: OwnedProcessId,
@@ -319,19 +427,30 @@ impl ProcessRegistry {
     }
 }
 
-struct OwnedProcessTree {
-    child: GroupChild,
+enum OwnedProcessTree {
+    Group(GroupChild),
+    External(ExternalOwnedTree),
+}
+
+struct ExternalOwnedTree {
+    root_pid: u32,
 }
 
 impl OwnedProcessTree {
-    fn launch(spec: &ProcessLaunchSpec) -> Result<Self, ProcessRegistryError> {
+    fn launch(
+        spec: &ProcessLaunchSpec,
+    ) -> Result<(Self, Option<ChildStdout>, Option<ChildStderr>), ProcessRegistryError> {
         let (program, args) = supervised_command_for_launch(spec);
         let mut command = Command::new(&program);
-        command
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        command.args(&args).stdin(Stdio::null());
+        match spec.stdio {
+            ProcessLaunchStdio::Null => {
+                command.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+            ProcessLaunchStdio::Piped => {
+                command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            }
+        }
         if let Some(current_dir) = &spec.current_dir {
             command.current_dir(current_dir);
         }
@@ -352,21 +471,61 @@ impl OwnedProcessTree {
             let _ = spec.mode;
         }
 
-        let child = builder
+        let mut child = builder
             .spawn()
             .map_err(|error| ProcessRegistryError::Launch(format!("failed to spawn: {error}")))?;
-        Ok(Self { child })
+        let stdout = child.inner().stdout.take();
+        let stderr = child.inner().stderr.take();
+        Ok((Self::Group(child), stdout, stderr))
+    }
+
+    fn adopt_interactive_root(root_pid: u32) -> Result<Self, ProcessRegistryError> {
+        if root_pid == 0 {
+            return Err(ProcessRegistryError::Launch(
+                "interactive root pid must be non-zero".to_owned(),
+            ));
+        }
+        // Interactive ConPTY roots are adopted by PID. Teardown uses platform
+        // kill-tree signaling (`taskkill /T` / process-group kill). Job Object
+        // adoption would need `unsafe` Windows APIs forbidden in this crate;
+        // spawned Launch trees still get Job Objects via `command_group`.
+        Ok(Self::External(ExternalOwnedTree { root_pid }))
     }
 
     fn root_pid(&self) -> u32 {
-        self.child.id()
+        match self {
+            Self::Group(child) => child.id(),
+            Self::External(tree) => tree.root_pid,
+        }
     }
 
     fn is_alive(&mut self) -> bool {
-        match self.child.try_wait() {
-            Ok(None) => true,
-            Ok(Some(_)) => false,
-            Err(_) => owned_process_pid_alive(self.child.id()),
+        match self {
+            Self::Group(child) => match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => false,
+                Err(_) => owned_process_pid_alive(child.id()),
+            },
+            Self::External(tree) => owned_process_pid_alive(tree.root_pid),
+        }
+    }
+
+    fn exit_code(&mut self) -> Option<i32> {
+        match self {
+            Self::Group(child) => match child.try_wait() {
+                Ok(Some(status)) => status.code(),
+                Ok(None) | Err(_) => None,
+            },
+            Self::External(_) => None,
+        }
+    }
+
+    fn reclaim(&mut self) {
+        match self {
+            Self::Group(child) => {
+                let _ = child.try_wait();
+            }
+            Self::External(_) => {}
         }
     }
 
@@ -375,7 +534,8 @@ impl OwnedProcessTree {
             return Ok(());
         }
 
-        signal_graceful(self.child.id()).map_err(ProcessRegistryError::Teardown)?;
+        let root_pid = self.root_pid();
+        signal_graceful(root_pid).map_err(ProcessRegistryError::Teardown)?;
 
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
@@ -389,23 +549,41 @@ impl OwnedProcessTree {
             return Ok(());
         }
 
-        self.child
-            .kill()
-            .map_err(|error| ProcessRegistryError::Teardown(format!("force kill failed: {error}")))?;
+        match self {
+            Self::Group(child) => {
+                child.kill().map_err(|error| {
+                    ProcessRegistryError::Teardown(format!("force kill failed: {error}"))
+                })?;
+            }
+            Self::External(tree) => {
+                force_kill_tree(tree.root_pid).map_err(ProcessRegistryError::Teardown)?;
+            }
+        }
 
-        wait_until_dead(self.child.id(), Duration::from_secs(2)).map_err(|_| {
+        wait_until_dead(root_pid, Duration::from_secs(2)).map_err(|_| {
             ProcessRegistryError::Teardown("owned process survived force kill".to_owned())
         })?;
-        let _ = self.child.try_wait();
+        if let Self::Group(child) = self {
+            let _ = child.try_wait();
+        }
         Ok(())
     }
 
     #[cfg(windows)]
     fn crash_close(self) -> Result<(), ProcessRegistryError> {
-        let pid = self.child.id();
-        // Dropping GroupChild closes the Job Object; with kill-on-job-close the
-        // OS reaps the tree — the same path as UI-process crash handle cleanup.
-        drop(self.child);
+        let pid = self.root_pid();
+        match self {
+            Self::Group(child) => {
+                // Dropping GroupChild closes the Job Object; with kill-on-job-close the
+                // OS reaps the tree — the same path as UI-process crash handle cleanup.
+                drop(child);
+            }
+            Self::External(_) => {
+                // Adopted interactive roots lack a Job Object handle in this crate
+                // (no `unsafe`); simulate crash reclaim via force kill-tree.
+                force_kill_tree(pid).map_err(ProcessRegistryError::Teardown)?;
+            }
+        }
         wait_until_dead(pid, Duration::from_secs(2)).map_err(|_| {
             ProcessRegistryError::Teardown(
                 "owned process tree survived owner-crash kill-tree close".to_owned(),
@@ -415,13 +593,18 @@ impl OwnedProcessTree {
 
     #[cfg(unix)]
     fn crash_close(mut self) -> Result<(), ProcessRegistryError> {
-        let pid = self.child.id();
-        // Unix crash safety is supervisor-mediated; reclaim the process-group
-        // unit here so the seam still proves no orphans after owner death.
-        self.child.kill().map_err(|error| {
-            ProcessRegistryError::Teardown(format!("crash reclaim failed: {error}"))
-        })?;
-        drop(self.child);
+        let pid = self.root_pid();
+        match &mut self {
+            Self::Group(child) => {
+                child.kill().map_err(|error| {
+                    ProcessRegistryError::Teardown(format!("crash reclaim failed: {error}"))
+                })?;
+            }
+            Self::External(_) => {
+                force_kill_tree(pid).map_err(ProcessRegistryError::Teardown)?;
+            }
+        }
+        drop(self);
         wait_until_dead(pid, Duration::from_secs(2)).map_err(|_| {
             ProcessRegistryError::Teardown(
                 "owned process tree survived owner-crash kill-tree close".to_owned(),
@@ -431,6 +614,10 @@ impl OwnedProcessTree {
 }
 
 fn supervised_command_for_launch(spec: &ProcessLaunchSpec) -> (String, Vec<String>) {
+    // Interactive / ConPTY shells cannot be wrapped by the supervisor binary.
+    if matches!(spec.mode, ProcessSupervisionMode::Interactive) {
+        return (spec.program.clone(), spec.args.clone());
+    }
     supervised_command_with_exe(
         spec.process_supervisor_exe.as_deref(),
         &spec.program,
@@ -460,6 +647,32 @@ fn signal_graceful(root_pid: u32) -> Result<(), String> {
             return Err(format!("invalid process group pid {root_pid}"));
         };
         let _ = kill_process_group(pid, Signal::TERM);
+        Ok(())
+    }
+}
+
+fn force_kill_tree(root_pid: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &root_pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|error| format!("taskkill force failed: {error}"))?;
+        Ok(())
+    }
+    #[cfg(unix)]
+    {
+        use rustix::process::{Pid, Signal, kill_process, kill_process_group};
+        let Some(pid) = Pid::from_raw(root_pid as i32) else {
+            return Err(format!("invalid process group pid {root_pid}"));
+        };
+        let _ = kill_process_group(pid, Signal::KILL);
+        let _ = kill_process(pid, Signal::KILL);
         Ok(())
     }
 }

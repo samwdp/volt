@@ -691,6 +691,9 @@ fn format_text_with_formatter(
     if let Some(cwd) = cwd {
         spec = spec.with_cwd(cwd.to_path_buf());
     }
+    if let Ok(workspace_id) = runtime.model().active_workspace_id() {
+        spec = spec.with_workspace(editor_jobs::WorkspaceId::from_raw(workspace_id.get()));
+    }
 
     let manager = runtime
         .services()

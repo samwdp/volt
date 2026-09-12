@@ -7,12 +7,11 @@ use super::{
     *,
 };
 use editor_jobs::{
-    ProcessSupervisionMode, enrich_env_with_node_manager, supervised_command_if_resolved,
+    JobManager, JobSpec, ProcessSupervisionMode, enrich_env_with_node_manager,
 };
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
-    process::Stdio,
     sync::atomic::{AtomicBool, Ordering},
     thread,
 };
@@ -150,6 +149,8 @@ struct StreamedCommandRequest {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: PathBuf,
+    workspace_id: editor_jobs::WorkspaceId,
+    process_registry: Arc<Mutex<editor_jobs::ProcessRegistry>>,
     on_exit: StreamedCommandExitAction,
     notify_on_success: bool,
     notify_on_failure: bool,
@@ -336,28 +337,35 @@ fn run_silent_external_command(
     args: &[String],
     command_label: &str,
 ) -> Result<ExternalCommandResult, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     let env = enrich_env_with_node_manager(Some(&spec.cwd), spec.env.clone());
-    let (program, args) = supervised_command_if_resolved(
-        program,
-        args,
-        &env,
-        None,
-        ProcessSupervisionMode::Background,
-    );
-    let mut command = Command::new(&program);
-    command
-        .args(&args)
-        .envs(env)
-        .current_dir(&spec.cwd)
-        .stdin(Stdio::null());
-    configure_background_command(&mut command);
-    let output = command
-        .output()
+    let mut job_spec = JobSpec::command(command_label, program, args.to_vec())
+        .with_cwd(spec.cwd.clone())
+        .with_workspace(editor_jobs::WorkspaceId::from_raw(workspace_id.get()));
+    for (key, value) in env {
+        job_spec = job_spec.with_env(key, value);
+    }
+    let manager = runtime
+        .services()
+        .get::<Mutex<JobManager>>()
+        .ok_or_else(|| "job manager service missing".to_owned())?;
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "job manager lock poisoned".to_owned())?;
+    let handle = manager
+        .spawn(job_spec)
         .map_err(|error| format!("failed to start `{command_label}`: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    let success = output.status.success();
-    let exit_code = output.status.code();
+    drop(manager);
+    let result = handle
+        .wait()
+        .map_err(|error| format!("failed to wait for `{command_label}`: {error}"))?;
+    let stdout = result.stdout().to_owned();
+    let stderr = result.stderr().to_owned();
+    let success = result.succeeded();
+    let exit_code = result.exit_code();
     if (success && spec.notify_on_success) || (!success && spec.notify_on_failure) {
         let error = (!success).then(|| {
             let transcript = if stderr.is_empty() {
@@ -425,6 +433,11 @@ pub(super) fn continue_streamed_command_popup(
     spec: StreamedCommandSpec,
 ) -> Result<(), String> {
     append_streamed_command_header(runtime, buffer_id, &spec.command_label)?;
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let process_registry = process_registry_service(runtime)?;
     let request = StreamedCommandRequest {
         buffer_id,
         popup_title: spec.popup_title,
@@ -433,6 +446,8 @@ pub(super) fn continue_streamed_command_popup(
         args: spec.args,
         env: spec.env,
         cwd: spec.cwd,
+        workspace_id: editor_jobs::WorkspaceId::from_raw(workspace_id.get()),
+        process_registry,
         on_exit: spec.on_exit,
         notify_on_success: spec.notify_on_success,
         notify_on_failure: spec.notify_on_failure,
@@ -774,31 +789,44 @@ fn run_streamed_command(
         args,
         env,
         cwd,
+        workspace_id,
+        process_registry,
         on_exit,
         notify_on_success,
         notify_on_failure,
     } = request;
     let env = enrich_env_with_node_manager(Some(&cwd), env);
-    let (program, args) = supervised_command_if_resolved(
-        &program,
-        &args,
-        &env,
-        None,
-        ProcessSupervisionMode::Background,
-    );
-    let mut command = Command::new(&program);
-    command
-        .args(&args)
-        .envs(env)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_background_command(&mut command);
+    let resolved_program = editor_jobs::resolve_command_path(&program, &env, None)
+        .unwrap_or(program);
+    let mut launch_spec = editor_jobs::ProcessLaunchSpec::new(resolved_program, args)
+        .with_workspace(workspace_id)
+        .with_mode(ProcessSupervisionMode::Background)
+        .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
+        .with_current_dir(cwd);
+    launch_spec.env = env;
 
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
+    let mut launched = match process_registry.lock() {
+        Ok(mut registry) => match registry.launch(launch_spec) {
+            Ok(launched) => launched,
+            Err(error) => {
+                push_streamed_command_update(
+                    &updates,
+                    StreamedCommandUpdate::Finished {
+                        buffer_id,
+                        popup_title,
+                        command_label,
+                        success: false,
+                        exit_code: None,
+                        error: Some(format!("Failed to start process: {error}")),
+                        on_exit,
+                        notify_on_success,
+                        notify_on_failure,
+                    },
+                );
+                return;
+            }
+        },
+        Err(_) => {
             push_streamed_command_update(
                 &updates,
                 StreamedCommandUpdate::Finished {
@@ -807,7 +835,7 @@ fn run_streamed_command(
                     command_label,
                     success: false,
                     exit_code: None,
-                    error: Some(format!("Failed to start process: {error}")),
+                    error: Some("process registry mutex poisoned".to_owned()),
                     on_exit,
                     notify_on_success,
                     notify_on_failure,
@@ -817,19 +845,21 @@ fn run_streamed_command(
         }
     };
 
-    let stdout_reader = child.stdout.take().map(|stdout| {
+    let owned_id = launched.id;
+    let stdout_reader = launched.stdout.take().map(|stdout| {
         let updates = Arc::clone(&updates);
         thread::spawn(move || stream_command_output(buffer_id, stdout, updates))
     });
-    let stderr_reader = child.stderr.take().map(|stderr| {
+    let stderr_reader = launched.stderr.take().map(|stderr| {
         let updates = Arc::clone(&updates);
         thread::spawn(move || stream_command_output(buffer_id, stderr, updates))
     });
 
-    let status = loop {
+    let exit_code = loop {
         if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
+            if let Ok(mut registry) = process_registry.lock() {
+                let _ = registry.teardown_process(owned_id, OWNED_PROCESS_TEARDOWN_GRACE);
+            }
             if let Some(reader) = stdout_reader {
                 let _ = reader.join();
             }
@@ -838,11 +868,21 @@ fn run_streamed_command(
             }
             return;
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(error) => break Err(error),
+        let alive = process_registry
+            .lock()
+            .map(|mut registry| registry.is_alive(owned_id))
+            .unwrap_or(false);
+        if !alive {
+            let code = process_registry
+                .lock()
+                .ok()
+                .and_then(|mut registry| registry.exit_code(owned_id));
+            if let Ok(mut registry) = process_registry.lock() {
+                let _ = registry.reclaim(owned_id);
+            }
+            break code;
         }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     };
     if let Some(reader) = stdout_reader {
         let _ = reader.join();
@@ -851,38 +891,20 @@ fn run_streamed_command(
         let _ = reader.join();
     }
 
-    match status {
-        Ok(status) => push_streamed_command_update(
-            &updates,
-            StreamedCommandUpdate::Finished {
-                buffer_id,
-                popup_title,
-                command_label,
-                success: status.success(),
-                exit_code: status.code(),
-                error: None,
-                on_exit,
-                notify_on_success,
-                notify_on_failure,
-            },
-        ),
-        Err(error) => push_streamed_command_update(
-            &updates,
-            StreamedCommandUpdate::Finished {
-                buffer_id,
-                popup_title,
-                command_label,
-                success: false,
-                exit_code: None,
-                error: Some(format!(
-                    "Failed while waiting for process completion: {error}"
-                )),
-                on_exit,
-                notify_on_success,
-                notify_on_failure,
-            },
-        ),
-    }
+    push_streamed_command_update(
+        &updates,
+        StreamedCommandUpdate::Finished {
+            buffer_id,
+            popup_title,
+            command_label,
+            success: exit_code == Some(0),
+            exit_code,
+            error: None,
+            on_exit,
+            notify_on_success,
+            notify_on_failure,
+        },
+    );
 }
 
 fn stream_command_output<R: Read>(

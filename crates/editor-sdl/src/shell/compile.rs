@@ -219,7 +219,13 @@ fn run_shell_command_in_buffer(
         buffer.append_output_lines(&[format!("$ {command}"), String::new()]);
         buffer.clear_input();
     }
-    let spec = JobSpec::command("command", shell_program, args).with_cwd(cwd);
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let spec = JobSpec::command("command", shell_program, args)
+        .with_cwd(cwd)
+        .with_workspace(editor_jobs::WorkspaceId::from_raw(workspace_id.get()));
     let manager = runtime
         .services()
         .get::<Mutex<JobManager>>()

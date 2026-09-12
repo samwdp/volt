@@ -684,6 +684,11 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
 
         match frame_result {
             Ok(FrameOutcome::Quit) => {
+                if let Ok(registry) = process_registry_service(&state.runtime) {
+                    if let Ok(mut registry) = registry.lock() {
+                        let _ = registry.application_quit(OWNED_PROCESS_TEARDOWN_GRACE);
+                    }
+                }
                 return Ok(build_shell_summary(
                     &mut state,
                     frames_rendered,

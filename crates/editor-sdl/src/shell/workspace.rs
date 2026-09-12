@@ -973,6 +973,17 @@ pub(crate) fn delete_runtime_workspace(
     close_lsp_buffers_for_workspace(runtime, workspace_id)?;
     close_terminal_buffers_for_workspace(runtime, workspace_id)?;
     acp::close_acp_workspace_buffers(runtime, workspace_id)?;
+    if let Ok(registry) = process_registry_service(runtime) {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| "process registry mutex poisoned".to_owned())?;
+        registry
+            .workspace_close(
+                editor_jobs::WorkspaceId::from_raw(workspace_id.get()),
+                OWNED_PROCESS_TEARDOWN_GRACE,
+            )
+            .map_err(|error| error.to_string())?;
+    }
     let removed = runtime
         .model_mut()
         .close_workspace(workspace_id)

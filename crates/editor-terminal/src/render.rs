@@ -263,8 +263,8 @@ pub(crate) fn terminal_tty_options(config: &LiveTerminalConfig) -> TtyOptions {
 }
 
 #[cfg(windows)]
-pub(crate) fn tty_process_id(_pty: &tty::Pty) -> Option<u32> {
-    None
+pub(crate) fn tty_process_id(pty: &tty::Pty) -> Option<u32> {
+    pty.child_watcher().pid().map(|pid| pid.get())
 }
 
 #[cfg(not(windows))]
