@@ -35,6 +35,7 @@ struct LspSyncWorkerRequest {
     revision: u64,
     text: TextSnapshot,
     root: Option<PathBuf>,
+    workspace_id: Option<u64>,
     lsp_client: Arc<LspClientManager>,
     preferred_server_id: Option<String>,
     edits: Option<Vec<TextEdit>>,
@@ -199,20 +200,24 @@ impl LspSyncWorkerState {
                 }
                 for request in latest_by_path.into_values() {
                     let sync_result = match request.preferred_server_id.as_deref() {
-                        Some(server_id) => request.lsp_client.start_buffer_server_with_edits(
+                        Some(server_id) => request
+                            .lsp_client
+                            .start_buffer_server_with_edits_for_workspace(
+                                &request.path,
+                                request.text.text(),
+                                request.revision,
+                                request.root.as_deref(),
+                                server_id,
+                                request.edits.as_deref(),
+                                request.workspace_id,
+                            ),
+                        None => request.lsp_client.sync_buffer_with_edits_for_workspace(
                             &request.path,
                             request.text.text(),
                             request.revision,
                             request.root.as_deref(),
-                            server_id,
                             request.edits.as_deref(),
-                        ),
-                        None => request.lsp_client.sync_buffer_with_edits(
-                            &request.path,
-                            request.text.text(),
-                            request.revision,
-                            request.root.as_deref(),
-                            request.edits.as_deref(),
+                            request.workspace_id,
                         ),
                     };
                     let error = sync_result.err().map(|error| error.to_string());

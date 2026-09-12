@@ -9,9 +9,11 @@ use std::{
 
 use super::{
     JobManager, JobSpec, OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry,
-    ProcessSupervisionMode, ShareKey, WorkspaceId, owned_process_pid_alive,
+    ProcessSupervisionMode, ShareKey, WorkspaceId, language_server_share_key,
+    owned_process_pid_alive,
     process_registry::{discover_volt_supervisor_exe, synthetic_sleep_command},
 };
+use std::path::Path;
 
 fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
     match result {
@@ -170,7 +172,10 @@ fn process_launch_registers_alive_owned_process_tree() {
     let workspace = WorkspaceId::from_raw(1);
     let id = launch_id(&mut registry, sleep_spec(workspace));
 
-    assert!(registry.is_alive(id), "launched owned process should be alive");
+    assert!(
+        registry.is_alive(id),
+        "launched owned process should be alive"
+    );
     let pid = registry
         .root_pid(id)
         .expect("registered owned process should expose a root pid");
@@ -193,12 +198,9 @@ fn process_launch_wraps_with_supervisor_when_volt_is_available() {
     let mut registry = ProcessRegistry::new();
     let id = launch_id(
         &mut registry,
-        ProcessLaunchSpec::new(
-            synthetic_sleep_command(60).0,
-            synthetic_sleep_command(60).1,
-        )
-        .with_workspace(WorkspaceId::from_raw(2))
-        .with_process_supervisor_exe(supervisor),
+        ProcessLaunchSpec::new(synthetic_sleep_command(60).0, synthetic_sleep_command(60).1)
+            .with_workspace(WorkspaceId::from_raw(2))
+            .with_process_supervisor_exe(supervisor),
     );
     let pid = registry.root_pid(id).expect("root pid");
     #[cfg(windows)]
@@ -291,7 +293,9 @@ fn launch_interactive_root_registers_workspace_and_close_kills_tree() {
     must(registry.workspace_close(workspace, Duration::from_millis(200)));
     assert!(!registry.is_alive(id));
     assert!(
-        wait_until(Duration::from_secs(3), || !owned_process_pid_alive(root_pid)),
+        wait_until(Duration::from_secs(3), || !owned_process_pid_alive(
+            root_pid
+        )),
         "interactive root {root_pid} must die on Workspace Close"
     );
 }
@@ -307,7 +311,9 @@ fn launch_interactive_session_runs_spawn_inside_process_launch() {
     assert_eq!(registry.root_pid(id), Some(reported_pid));
     must(registry.application_quit(Duration::from_millis(200)));
     assert!(
-        wait_until(Duration::from_secs(3), || !owned_process_pid_alive(reported_pid)),
+        wait_until(Duration::from_secs(3), || !owned_process_pid_alive(
+            reported_pid
+        )),
         "interactive session root must die on Application Quit"
     );
 }
@@ -318,9 +324,8 @@ fn job_manager_launch_is_registry_owned_and_dies_on_workspace_close() {
     let mut jobs = JobManager::with_registry(Arc::clone(&registry));
     let workspace = WorkspaceId::from_raw(65);
     let (program, args) = synthetic_sleep_command(60);
-    let handle = must(jobs.spawn(
-        JobSpec::command("owned-job", program, args).with_workspace(workspace),
-    ));
+    let handle =
+        must(jobs.spawn(JobSpec::command("owned-job", program, args).with_workspace(workspace)));
     assert!(
         wait_until(Duration::from_secs(2), || {
             registry
@@ -396,9 +401,14 @@ fn workspace_close_kills_processes_tagged_for_that_workspace_only() {
         registry.is_alive(keep_id),
         "other workspace process must survive"
     );
-    assert!(!registry.is_alive(close_id), "closed workspace process must die");
     assert!(
-        wait_until(Duration::from_secs(2), || !owned_process_pid_alive(close_pid)),
+        !registry.is_alive(close_id),
+        "closed workspace process must die"
+    );
+    assert!(
+        wait_until(Duration::from_secs(2), || !owned_process_pid_alive(
+            close_pid
+        )),
         "closed workspace root must not remain as an orphan"
     );
 
@@ -426,7 +436,10 @@ fn share_key_keeps_process_until_last_workspace_tag_drops() {
 
     let first_id = launch_id(&mut registry, first_spec);
     let second_id = launch_id(&mut registry, second_spec);
-    assert_eq!(first_id, second_id, "share key should reuse the owned process");
+    assert_eq!(
+        first_id, second_id,
+        "share key should reuse the owned process"
+    );
 
     let pid = registry.root_pid(first_id).expect("shared pid");
     must(registry.workspace_close(first, Duration::from_millis(200)));
@@ -498,4 +511,89 @@ fn owner_crash_leaves_no_orphans_for_launch_created_tree() {
         "owner-crash kill-tree close must leave no orphan root {root_pid} or descendant {child_pid}"
     );
     let _ = fs::remove_file(child_pid_file);
+}
+
+#[test]
+fn protocol_stdio_launch_exposes_stdin_and_stdout() {
+    let mut registry = ProcessRegistry::new();
+    let (program, args) = synthetic_sleep_command(60);
+    let launched = must(
+        registry.launch(with_supervisor(
+            ProcessLaunchSpec::new(program, args)
+                .with_workspace(WorkspaceId::from_raw(61))
+                .with_stdio(ProcessLaunchStdio::Protocol),
+        )),
+    );
+    assert!(
+        launched.stdin.is_some(),
+        "protocol launch must expose stdin"
+    );
+    assert!(
+        launched.stdout.is_some(),
+        "protocol launch must expose stdout"
+    );
+    assert!(launched.stderr.is_none(), "protocol launch discards stderr");
+    assert!(registry.is_alive(launched.id));
+    must(registry.application_quit(Duration::from_millis(200)));
+}
+
+#[test]
+fn language_tooling_shared_share_key_keeps_then_kills_on_last_close() {
+    let mut registry = ProcessRegistry::new();
+    let first = WorkspaceId::from_raw(71);
+    let second = WorkspaceId::from_raw(72);
+    let share = language_server_share_key("rust-analyzer", Some(Path::new("/demo/root")));
+    let (program, args) = synthetic_sleep_command(60);
+
+    let first_id = launch_id(
+        &mut registry,
+        with_supervisor(
+            ProcessLaunchSpec::new(program.clone(), args.clone())
+                .with_workspace(first)
+                .with_share_key(share.clone())
+                .with_stdio(ProcessLaunchStdio::Protocol),
+        ),
+    );
+    let second_id = launch_id(
+        &mut registry,
+        with_supervisor(
+            ProcessLaunchSpec::new(program, args)
+                .with_workspace(second)
+                .with_share_key(share)
+                .with_stdio(ProcessLaunchStdio::Protocol),
+        ),
+    );
+    assert_eq!(first_id, second_id);
+    let pid = registry.root_pid(first_id).expect("shared pid");
+
+    must(registry.workspace_close(first, Duration::from_millis(200)));
+    assert!(registry.is_alive(first_id));
+    assert!(owned_process_pid_alive(pid));
+
+    must(registry.workspace_close(second, Duration::from_millis(200)));
+    assert!(!registry.is_alive(first_id));
+    assert!(wait_until(Duration::from_secs(2), || {
+        !owned_process_pid_alive(pid)
+    }));
+}
+
+#[test]
+fn language_tooling_single_tagged_helper_dies_on_quit() {
+    let mut registry = ProcessRegistry::new();
+    let workspace = WorkspaceId::from_raw(81);
+    let (program, args) = synthetic_sleep_command(60);
+    let id = launch_id(
+        &mut registry,
+        with_supervisor(
+            ProcessLaunchSpec::new(program, args)
+                .with_workspace(workspace)
+                .with_stdio(ProcessLaunchStdio::Protocol),
+        ),
+    );
+    let pid = registry.root_pid(id).expect("helper pid");
+    must(registry.application_quit(Duration::from_millis(200)));
+    assert!(!registry.is_alive(id));
+    assert!(wait_until(Duration::from_secs(2), || {
+        !owned_process_pid_alive(pid)
+    }));
 }

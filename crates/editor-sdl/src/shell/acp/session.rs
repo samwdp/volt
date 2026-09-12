@@ -12,7 +12,8 @@ use super::manager::*;
 use super::runtime::*;
 
 pub(crate) fn init_acp_manager(runtime: &mut EditorRuntime) -> Result<(), ShellError> {
-    let manager = AcpManager::new().map_err(ShellError::Runtime)?;
+    let process_registry = process_registry_service(runtime).map_err(ShellError::Runtime)?;
+    let manager = AcpManager::new(process_registry).map_err(ShellError::Runtime)?;
     runtime.services_mut().insert(Arc::new(Mutex::new(manager)));
     Ok(())
 }

@@ -971,6 +971,9 @@ pub(crate) fn delete_runtime_workspace(
 
     let window_id = active_window_id(runtime)?;
     close_lsp_buffers_for_workspace(runtime, workspace_id)?;
+    if let Some(dap_client) = runtime.services().get::<Arc<DapClientManager>>().cloned() {
+        let _ = dap_client.stop_session(workspace_id.get());
+    }
     close_terminal_buffers_for_workspace(runtime, workspace_id)?;
     acp::close_acp_workspace_buffers(runtime, workspace_id)?;
     if let Ok(registry) = process_registry_service(runtime) {
@@ -982,6 +985,11 @@ pub(crate) fn delete_runtime_workspace(
                 editor_jobs::WorkspaceId::from_raw(workspace_id.get()),
                 OWNED_PROCESS_TEARDOWN_GRACE,
             )
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() {
+        lsp_client
+            .reap_dead_sessions()
             .map_err(|error| error.to_string())?;
     }
     let removed = runtime

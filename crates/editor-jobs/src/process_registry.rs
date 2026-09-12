@@ -6,8 +6,8 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    path::PathBuf,
-    process::{ChildStderr, ChildStdout, Command, Stdio},
+    path::{Path, PathBuf},
+    process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -91,6 +91,8 @@ pub enum ProcessLaunchStdio {
     Null,
     /// Pipe stdout and stderr for callers that need to stream or capture output.
     Piped,
+    /// Pipe stdin and stdout for protocol children (LSP/DAP/ACP); discard stderr.
+    Protocol,
 }
 
 /// How Process Launch should start an Owned Process tree.
@@ -172,15 +174,26 @@ impl ProcessLaunchSpec {
     }
 }
 
-/// Result of Process Launch: registry id plus optional output pipes.
+/// Result of Process Launch: registry id plus optional pipes.
 #[derive(Debug)]
 pub struct LaunchedProcess {
     /// Registry id for the Owned Process tree.
     pub id: OwnedProcessId,
-    /// Piped stdout when launched with [`ProcessLaunchStdio::Piped`].
+    /// Piped stdin when launched with [`ProcessLaunchStdio::Protocol`].
+    pub stdin: Option<ChildStdin>,
+    /// Piped stdout when launched with [`ProcessLaunchStdio::Piped`] or
+    /// [`ProcessLaunchStdio::Protocol`].
     pub stdout: Option<ChildStdout>,
     /// Piped stderr when launched with [`ProcessLaunchStdio::Piped`].
     pub stderr: Option<ChildStderr>,
+}
+
+/// Builds a Share Key for a language server serving one on-disk root.
+pub fn language_server_share_key(server_id: &str, root: Option<&Path>) -> ShareKey {
+    match root {
+        Some(root) => ShareKey::new(format!("lsp:{server_id}:{}", root.display())),
+        None => ShareKey::new(format!("lsp:{server_id}:global")),
+    }
 }
 
 /// Errors from Process Registry operations.
@@ -254,12 +267,13 @@ impl ProcessRegistry {
             entry.workspace_ids.extend(spec.workspace_ids);
             return Ok(LaunchedProcess {
                 id: existing_id,
+                stdin: None,
                 stdout: None,
                 stderr: None,
             });
         }
 
-        let (tree, stdout, stderr) = OwnedProcessTree::launch(&spec)?;
+        let (tree, stdin, stdout, stderr) = OwnedProcessTree::launch(&spec)?;
         let id = self.allocate_id();
         let share_key = spec.share_key.clone();
         if let Some(share_key) = share_key.clone() {
@@ -276,6 +290,7 @@ impl ProcessRegistry {
         );
         Ok(LaunchedProcess {
             id,
+            stdin,
             stdout,
             stderr,
         })
@@ -293,8 +308,8 @@ impl ProcessRegistry {
     where
         E: std::fmt::Display,
     {
-        let (payload, root_pid) = spawn()
-            .map_err(|error| ProcessRegistryError::Launch(error.to_string()))?;
+        let (payload, root_pid) =
+            spawn().map_err(|error| ProcessRegistryError::Launch(error.to_string()))?;
         let id = self.launch_interactive_root(root_pid, workspace_ids)?;
         Ok((id, payload))
     }
@@ -383,12 +398,35 @@ impl ProcessRegistry {
         Ok(())
     }
 
-    /// Drops the platform kill-tree as if the owning UI process crashed, so
-    /// kill-on-job-close / equivalent should reap the tree without an orderly quit.
-    pub fn simulate_owner_crash(
+    /// Returns whether removing `workspace_id` would leave this Owned Process with
+    /// no Workspace tags (so Workspace Close would tear it down).
+    pub fn will_teardown_on_workspace_close(
+        &self,
+        id: OwnedProcessId,
+        workspace_id: WorkspaceId,
+    ) -> bool {
+        self.entries.get(&id).is_some_and(|entry| {
+            entry.workspace_ids.contains(&workspace_id) && entry.workspace_ids.len() == 1
+        })
+    }
+
+    /// Adds a Workspace tag to an existing Owned Process.
+    pub fn tag_workspace(
         &mut self,
         id: OwnedProcessId,
+        workspace_id: WorkspaceId,
     ) -> Result<(), ProcessRegistryError> {
+        let entry = self
+            .entries
+            .get_mut(&id)
+            .ok_or(ProcessRegistryError::UnknownProcess(id))?;
+        entry.workspace_ids.insert(workspace_id);
+        Ok(())
+    }
+
+    /// Drops the platform kill-tree as if the owning UI process crashed, so
+    /// kill-on-job-close / equivalent should reap the tree without an orderly quit.
+    pub fn simulate_owner_crash(&mut self, id: OwnedProcessId) -> Result<(), ProcessRegistryError> {
         let Some(mut entry) = self.entries.remove(&id) else {
             return Err(ProcessRegistryError::UnknownProcess(id));
         };
@@ -436,21 +474,41 @@ struct ExternalOwnedTree {
     root_pid: u32,
 }
 
+type LaunchedTreeParts = (
+    OwnedProcessTree,
+    Option<ChildStdin>,
+    Option<ChildStdout>,
+    Option<ChildStderr>,
+);
+
 impl OwnedProcessTree {
-    fn launch(
-        spec: &ProcessLaunchSpec,
-    ) -> Result<(Self, Option<ChildStdout>, Option<ChildStderr>), ProcessRegistryError> {
+    fn launch(spec: &ProcessLaunchSpec) -> Result<LaunchedTreeParts, ProcessRegistryError> {
         let (program, args) = supervised_command_for_launch(spec);
         let mut command = Command::new(&program);
-        command.args(&args).stdin(Stdio::null());
-        match spec.stdio {
+        command.args(&args);
+        let (stdin, stdout, stderr) = match spec.stdio {
             ProcessLaunchStdio::Null => {
-                command.stdout(Stdio::null()).stderr(Stdio::null());
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                (false, false, false)
             }
             ProcessLaunchStdio::Piped => {
-                command.stdout(Stdio::piped()).stderr(Stdio::piped());
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                (false, true, true)
             }
-        }
+            ProcessLaunchStdio::Protocol => {
+                command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null());
+                (true, true, false)
+            }
+        };
         if let Some(current_dir) = &spec.current_dir {
             command.current_dir(current_dir);
         }
@@ -474,9 +532,22 @@ impl OwnedProcessTree {
         let mut child = builder
             .spawn()
             .map_err(|error| ProcessRegistryError::Launch(format!("failed to spawn: {error}")))?;
-        let stdout = child.inner().stdout.take();
-        let stderr = child.inner().stderr.take();
-        Ok((Self::Group(child), stdout, stderr))
+        let stdin = if stdin {
+            child.inner().stdin.take()
+        } else {
+            None
+        };
+        let stdout = if stdout {
+            child.inner().stdout.take()
+        } else {
+            None
+        };
+        let stderr = if stderr {
+            child.inner().stderr.take()
+        } else {
+            None
+        };
+        Ok((Self::Group(child), stdin, stdout, stderr))
     }
 
     fn adopt_interactive_root(root_pid: u32) -> Result<Self, ProcessRegistryError> {

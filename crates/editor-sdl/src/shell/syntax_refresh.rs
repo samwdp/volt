@@ -66,16 +66,17 @@ fn install_optional_runtime_services(
     lsp_registry
         .register_all(user_library.language_servers())
         .map_err(|error| ShellError::Runtime(error.to_string()))?;
-    runtime
-        .services_mut()
-        .insert(Arc::new(LspClientManager::new(lsp_registry)));
+    let process_registry = shared_process_registry(runtime).map_err(ShellError::Runtime)?;
+    runtime.services_mut().insert(Arc::new(
+        LspClientManager::with_process_registry(lsp_registry, Arc::clone(&process_registry)),
+    ));
     let mut dap_registry = DebugAdapterRegistry::new();
     dap_registry
         .register_all(user_library.debug_adapters())
         .map_err(|error| ShellError::Runtime(error.to_string()))?;
-    runtime
-        .services_mut()
-        .insert(Arc::new(DapClientManager::new(dap_registry)));
+    runtime.services_mut().insert(Arc::new(
+        DapClientManager::with_process_registry(dap_registry, process_registry),
+    ));
     let mut syntax_registry = SyntaxRegistry::new();
     syntax_registry
         .register_all(user_library.syntax_languages())

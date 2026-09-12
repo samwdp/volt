@@ -7,6 +7,8 @@ use std::{
     },
 };
 
+use editor_jobs::{ProcessRegistry, WorkspaceId};
+
 use crate::{LanguageServerRegistry, LspError};
 
 use super::session::*;
@@ -14,8 +16,17 @@ use super::types::*;
 
 impl LspClientManager {
     pub fn new(registry: LanguageServerRegistry) -> Self {
+        Self::with_process_registry(registry, Arc::new(Mutex::new(ProcessRegistry::new())))
+    }
+
+    /// Creates a manager that registers language-server trees in a shared Process Registry.
+    pub fn with_process_registry(
+        registry: LanguageServerRegistry,
+        process_registry: Arc<Mutex<ProcessRegistry>>,
+    ) -> Self {
         Self {
             registry,
+            process_registry,
             state: Arc::new(Mutex::new(LspClientState::default())),
             transport_log: Arc::new(Mutex::new(LspTransportLog::new(TRANSPORT_LOG_MAX_ENTRIES))),
             notifications: Arc::new(Mutex::new(LspNotificationLog::new(
@@ -31,6 +42,11 @@ impl LspClientManager {
     /// Returns the language-server registry.
     pub fn registry(&self) -> &LanguageServerRegistry {
         &self.registry
+    }
+
+    /// Returns the Process Registry used for language-server Owned Processes.
+    pub fn process_registry(&self) -> Arc<Mutex<ProcessRegistry>> {
+        Arc::clone(&self.process_registry)
     }
 
     pub(crate) fn live_session_for_server(
@@ -172,7 +188,19 @@ impl LspClientManager {
         server_id: &str,
         root: Option<&Path>,
     ) -> Result<(), LspClientError> {
-        let _ = self.ensure_session_handle(server_id, root)?;
+        let _ = self.ensure_session_handle(server_id, root, None)?;
+        Ok(())
+    }
+
+    /// Ensures a live Session and tags it for the editor Workspace.
+    pub fn ensure_session_for_workspace(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        workspace_id: u64,
+    ) -> Result<(), LspClientError> {
+        let _ =
+            self.ensure_session_handle(server_id, root, Some(WorkspaceId::from_raw(workspace_id)))?;
         Ok(())
     }
 
@@ -180,6 +208,7 @@ impl LspClientManager {
         &self,
         server_id: &str,
         root: Option<&Path>,
+        workspace_id: Option<WorkspaceId>,
     ) -> Result<Arc<LspSessionHandle>, LspClientError> {
         let key = SessionKey::new(server_id, root);
         {
@@ -191,6 +220,9 @@ impl LspClientManager {
                 if existing.is_disconnected() {
                     state.sessions.remove(&key);
                 } else {
+                    if let Some(workspace_id) = workspace_id {
+                        existing.attach_workspace_tag(workspace_id)?;
+                    }
                     return Ok(existing);
                 }
             }
@@ -215,6 +247,8 @@ impl LspClientManager {
             runtime_override,
             initialization_options_override,
             self.session_shared_state(),
+            Arc::clone(&self.process_registry),
+            workspace_id,
         )?;
         let mut state = self
             .state
@@ -225,6 +259,79 @@ impl LspClientManager {
         Ok(handle)
     }
 
+    /// Protocol-shutdown Language Server Sessions that would die on this Workspace Close.
+    /// Shutdown runs on background threads so Workspace Close tree signaling can overlap.
+    pub fn prepare_workspace_close(&self, workspace_id: u64) -> Result<(), LspClientError> {
+        let workspace_id = WorkspaceId::from_raw(workspace_id);
+        let sessions = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            state.sessions.values().cloned().collect::<Vec<_>>()
+        };
+        let to_shutdown = {
+            let registry = self.process_registry.lock().map_err(|_| {
+                LspClientError::Protocol("process registry mutex poisoned".to_owned())
+            })?;
+            sessions
+                .into_iter()
+                .filter(|session| {
+                    session.owned_process_id().is_some_and(|owned_id| {
+                        registry.will_teardown_on_workspace_close(owned_id, workspace_id)
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        for session in to_shutdown {
+            std::thread::spawn(move || {
+                session.protocol_shutdown();
+            });
+        }
+        Ok(())
+    }
+
+    /// Removes Language Server Sessions whose Owned Processes are no longer registered.
+    pub fn reap_dead_sessions(&self) -> Result<(), LspClientError> {
+        let stale_keys = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            let registry = self.process_registry.lock().map_err(|_| {
+                LspClientError::Protocol("process registry mutex poisoned".to_owned())
+            })?;
+            state
+                .sessions
+                .iter()
+                .filter_map(|(key, session)| {
+                    let owned_id = session.owned_process_id()?;
+                    if registry.root_pid(owned_id).is_none() {
+                        Some(key.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        self.shutdown_sessions(&stale_keys)
+    }
+
+    /// Protocol-shutdown every live Language Server Session (Application Quit grace).
+    pub fn prepare_application_quit(&self) -> Result<(), LspClientError> {
+        let sessions = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            state.sessions.values().cloned().collect::<Vec<_>>()
+        };
+        for session in sessions {
+            session.protocol_shutdown();
+        }
+        Ok(())
+    }
+
     pub(crate) fn shutdown_sessions(
         &self,
         session_keys: &BTreeSet<SessionKey>,
@@ -233,16 +340,18 @@ impl LspClientManager {
             return Ok(());
         }
         let mut dirty_paths = Vec::new();
+        let mut removed = Vec::new();
         {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
             for key in session_keys {
-                if let Some(session) = state.sessions.remove(key)
-                    && let Ok(diagnostics) = session.diagnostics.lock()
-                {
-                    dirty_paths.extend(diagnostics.keys().cloned());
+                if let Some(session) = state.sessions.remove(key) {
+                    if let Ok(diagnostics) = session.diagnostics.lock() {
+                        dirty_paths.extend(diagnostics.keys().cloned());
+                    }
+                    removed.push(session);
                 }
                 state.start_failures.remove(key);
             }
@@ -251,6 +360,9 @@ impl LspClientManager {
                     tracked.sessions.remove(key);
                 }
             }
+        }
+        for session in removed {
+            session.protocol_shutdown();
         }
         if let Ok(mut dirty) = self.dirty_diagnostic_paths.lock() {
             dirty.extend(dirty_paths);
@@ -266,6 +378,7 @@ impl LspClientManager {
         root: Option<&Path>,
         preferred_server_id: Option<&str>,
         force_retry: bool,
+        workspace_id: Option<WorkspaceId>,
     ) -> Result<Vec<Arc<LspSessionHandle>>, LspClientError> {
         let mut handles = if preferred_server_id.is_none() {
             self.tracked_sessions_for_path(path)?
@@ -292,6 +405,13 @@ impl LspClientManager {
         for session in session_plans {
             let key = SessionKey::new(session.server_id(), session.root().map(PathBuf::as_path));
             if handled_keys.contains(&key) {
+                if let Some(workspace_id) = workspace_id {
+                    for handle in &handles {
+                        if handle.key == key {
+                            handle.attach_workspace_tag(workspace_id)?;
+                        }
+                    }
+                }
                 continue;
             }
             let (existing, runtime_override, initialization_options_override, start_failed) = {
@@ -318,6 +438,9 @@ impl LspClientManager {
                 )
             };
             if let Some(existing) = existing {
+                if let Some(workspace_id) = workspace_id {
+                    existing.attach_workspace_tag(workspace_id)?;
+                }
                 handled_keys.insert(key);
                 handles.push(existing);
                 continue;
@@ -330,6 +453,8 @@ impl LspClientManager {
                 runtime_override,
                 initialization_options_override,
                 self.session_shared_state(),
+                Arc::clone(&self.process_registry),
+                workspace_id,
             ) {
                 Ok(handle) => {
                     self.state

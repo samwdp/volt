@@ -9,6 +9,7 @@ use agent_client_protocol::{
     SessionModeId, SessionModeState, SessionModelState,
 };
 use base64::Engine as _;
+use editor_jobs::ProcessRegistry;
 use editor_picker::PickerResultOrder;
 use editor_plugin_api::AcpClient as AcpClientConfig;
 
@@ -352,9 +353,9 @@ pub(crate) struct AcpManager {
 }
 
 impl AcpManager {
-    pub(crate) fn new() -> Result<Self, String> {
+    pub(crate) fn new(process_registry: Arc<Mutex<ProcessRegistry>>) -> Result<Self, String> {
         let (event_tx, event_rx) = mpsc::channel();
-        let runtime = AcpRuntime::new(event_tx)?;
+        let runtime = AcpRuntime::new(event_tx, process_registry)?;
         Ok(Self {
             runtime,
             events: event_rx,
@@ -528,6 +529,7 @@ impl AcpManager {
         if let Err(error) = self.runtime.send(AcpCommand::Connect {
             config: client,
             workspace_root,
+            workspace_id,
             buffer_id,
         }) {
             self.pending_clients.remove(&buffer_id);

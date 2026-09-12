@@ -80,9 +80,9 @@ impl TerminalBufferState {
         &mut self,
         buffer_id: BufferId,
     ) -> Option<(LiveTerminalSession, Option<editor_jobs::OwnedProcessId>)> {
-        self.sessions.remove(&buffer_id).map(|tracked| {
-            (tracked.session, tracked.owned_process_id)
-        })
+        self.sessions
+            .remove(&buffer_id)
+            .map(|tracked| (tracked.session, tracked.owned_process_id))
     }
 
     pub(super) fn buffer_ids(&self) -> Vec<BufferId> {
@@ -675,7 +675,8 @@ pub(super) fn close_terminal_buffer(
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
         buffer.clear_terminal_render();
     }
-    let Some((mut session, owned_process_id)) = terminal_buffer_state_mut(runtime)?.remove(buffer_id)
+    let Some((mut session, owned_process_id)) =
+        terminal_buffer_state_mut(runtime)?.remove(buffer_id)
     else {
         return Ok(());
     };
@@ -703,6 +704,12 @@ pub(super) fn process_registry_service(
         .get::<Arc<Mutex<editor_jobs::ProcessRegistry>>>()
         .cloned()
         .ok_or_else(|| "process registry service missing".to_owned())
+}
+
+pub(super) fn shared_process_registry(
+    runtime: &EditorRuntime,
+) -> Result<Arc<Mutex<editor_jobs::ProcessRegistry>>, String> {
+    process_registry_service(runtime)
 }
 
 pub(super) const OWNED_PROCESS_TEARDOWN_GRACE: Duration = Duration::from_millis(200);

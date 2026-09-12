@@ -1,5 +1,7 @@
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
+use editor_jobs::WorkspaceId;
+
 use super::session::*;
 use super::types::*;
 
@@ -22,7 +24,21 @@ impl LspClientManager {
         root: Option<&Path>,
         edits: Option<&[editor_buffer::TextEdit]>,
     ) -> Result<Vec<String>, LspClientError> {
-        let sessions = self.ensure_sessions_for_path(path, root, None, false)?;
+        self.sync_buffer_with_edits_for_workspace(path, text, revision, root, edits, None)
+    }
+
+    /// Syncs a buffer and tags live Sessions for the editor Workspace.
+    pub fn sync_buffer_with_edits_for_workspace(
+        &self,
+        path: &Path,
+        text: impl Into<String>,
+        revision: u64,
+        root: Option<&Path>,
+        edits: Option<&[editor_buffer::TextEdit]>,
+        workspace_id: Option<u64>,
+    ) -> Result<Vec<String>, LspClientError> {
+        let workspace_id = workspace_id.map(WorkspaceId::from_raw);
+        let sessions = self.ensure_sessions_for_path(path, root, None, false, workspace_id)?;
         self.sync_buffer_to_sessions(path, text.into(), revision, sessions, edits)
     }
 
@@ -55,7 +71,7 @@ impl LspClientManager {
         session_root: Option<&Path>,
         edits: Option<&[editor_buffer::TextEdit]>,
     ) -> Result<Vec<String>, LspClientError> {
-        let handle = self.ensure_session_handle(server_id, session_root)?;
+        let handle = self.ensure_session_handle(server_id, session_root, None)?;
         self.sync_buffer_to_sessions(path, text.into(), revision, vec![handle], edits)
     }
 

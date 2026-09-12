@@ -6,9 +6,7 @@ use super::{
     },
     *,
 };
-use editor_jobs::{
-    JobManager, JobSpec, ProcessSupervisionMode, enrich_env_with_node_manager,
-};
+use editor_jobs::{JobManager, JobSpec, ProcessSupervisionMode, enrich_env_with_node_manager};
 use std::{
     collections::BTreeMap,
     io::{BufReader, Read},
@@ -796,8 +794,8 @@ fn run_streamed_command(
         notify_on_failure,
     } = request;
     let env = enrich_env_with_node_manager(Some(&cwd), env);
-    let resolved_program = editor_jobs::resolve_command_path(&program, &env, None)
-        .unwrap_or(program);
+    let resolved_program =
+        editor_jobs::resolve_command_path(&program, &env, None).unwrap_or(program);
     let mut launch_spec = editor_jobs::ProcessLaunchSpec::new(resolved_program, args)
         .with_workspace(workspace_id)
         .with_mode(ProcessSupervisionMode::Background)

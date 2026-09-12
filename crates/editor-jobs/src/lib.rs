@@ -19,12 +19,12 @@ mod process_registry;
 
 pub use process_registry::{
     LaunchedProcess, OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry,
-    ProcessRegistryError, ShareKey, WorkspaceId, owned_process_pid_alive,
+    ProcessRegistryError, ShareKey, WorkspaceId, language_server_share_key,
+    owned_process_pid_alive,
 };
 
 /// Human-readable summary of this crate's responsibility.
-pub const ROLE: &str =
-    "Asynchronous job scheduling, process supervision, Process Registry / Process Launch, and compilation task coordination.";
+pub const ROLE: &str = "Asynchronous job scheduling, process supervision, Process Registry / Process Launch, and compilation task coordination.";
 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
@@ -744,8 +744,8 @@ fn build_job_launch_spec(
         }
     };
     #[cfg(windows)]
-    let resolved_program =
-        resolve_command_path(program, &env_pairs, runtime_env).unwrap_or_else(|| program.to_owned());
+    let resolved_program = resolve_command_path(program, &env_pairs, runtime_env)
+        .unwrap_or_else(|| program.to_owned());
     #[cfg(not(windows))]
     let resolved_program =
         resolve_command_path(program, &env_pairs, None).unwrap_or_else(|| program.to_owned());

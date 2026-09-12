@@ -3,13 +3,15 @@ use std::{
     fmt,
     io::Write,
     path::PathBuf,
-    process::Child,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::JoinHandle,
+    time::Duration,
 };
+
+use editor_jobs::{OwnedProcessId, ProcessRegistry};
 
 use dap_types::{
     AttachRequestArguments, ContinueArguments, DisconnectArguments, InitializeRequestArguments,
@@ -43,7 +45,8 @@ pub(crate) struct DapSessionHandle {
     pub(crate) last_disconnect: Arc<Mutex<Option<DisconnectArguments>>>,
     pub(crate) stop_state: Arc<Mutex<SessionStopState>>,
     pub(crate) _reader: JoinHandle<()>,
-    pub(crate) child: Option<Mutex<Child>>,
+    pub(crate) owned_process_id: Option<OwnedProcessId>,
+    pub(crate) process_registry: Option<Arc<Mutex<ProcessRegistry>>>,
     pub(crate) transport_log: TransportLog,
 }
 
@@ -60,11 +63,11 @@ impl fmt::Debug for DapSessionHandle {
 impl Drop for DapSessionHandle {
     fn drop(&mut self) {
         self.disconnected.store(true, Ordering::Release);
-        if let Some(child) = self.child.as_ref()
-            && let Ok(mut child) = child.lock()
+        if let (Some(id), Some(registry)) =
+            (self.owned_process_id.take(), self.process_registry.take())
+            && let Ok(mut registry) = registry.lock()
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = registry.teardown_process(id, Duration::from_millis(200));
         }
     }
 }
@@ -73,6 +76,7 @@ impl Drop for DapSessionHandle {
 #[derive(Debug)]
 pub struct DapClientManager {
     pub(crate) registry: DebugAdapterRegistry,
+    pub(crate) process_registry: Arc<Mutex<ProcessRegistry>>,
     pub(crate) sessions: Mutex<BTreeMap<u64, Arc<DapSessionHandle>>>,
     pub(crate) breakpoints: Mutex<BreakpointStore>,
     pub(crate) watches: Mutex<BTreeMap<u64, Vec<String>>>,
@@ -85,8 +89,17 @@ pub struct DapClientManager {
 impl DapClientManager {
     /// Creates a manager around a populated adapter registry.
     pub fn new(registry: DebugAdapterRegistry) -> Self {
+        Self::with_process_registry(registry, Arc::new(Mutex::new(ProcessRegistry::new())))
+    }
+
+    /// Creates a manager that registers debug-adapter trees in a shared Process Registry.
+    pub fn with_process_registry(
+        registry: DebugAdapterRegistry,
+        process_registry: Arc<Mutex<ProcessRegistry>>,
+    ) -> Self {
         Self {
             registry,
+            process_registry,
             sessions: Mutex::new(BTreeMap::new()),
             breakpoints: Mutex::new(BreakpointStore::new()),
             watches: Mutex::new(BTreeMap::new()),
@@ -100,6 +113,11 @@ impl DapClientManager {
     /// Returns the adapter registry.
     pub fn registry(&self) -> &DebugAdapterRegistry {
         &self.registry
+    }
+
+    /// Returns the Process Registry used for debug-adapter Owned Processes.
+    pub fn process_registry(&self) -> Arc<Mutex<ProcessRegistry>> {
+        Arc::clone(&self.process_registry)
     }
 
     /// Records a successful Debug Session start for last/recent replay.
@@ -805,11 +823,11 @@ impl DapClientManager {
             );
         }
 
-        if let Some(child) = handle.child.as_ref()
-            && let Ok(mut child) = child.lock()
+        if let (Some(id), Some(registry)) =
+            (handle.owned_process_id, handle.process_registry.as_ref())
+            && let Ok(mut registry) = registry.lock()
         {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _ = registry.teardown_process(id, Duration::from_millis(200));
         }
 
         if let Ok(mut store) = self.breakpoints.lock() {
@@ -817,6 +835,21 @@ impl DapClientManager {
         }
 
         Ok(handle.info.clone())
+    }
+
+    /// Stops every live Debug Session (Application Quit grace).
+    pub fn stop_all_sessions(&self) -> Result<(), DapClientError> {
+        let workspace_ids = {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| DapClientError::LockPoisoned)?;
+            sessions.keys().copied().collect::<Vec<_>>()
+        };
+        for workspace_id in workspace_ids {
+            let _ = self.stop_session(workspace_id);
+        }
+        Ok(())
     }
 
     pub(crate) fn sync_all_breakpoints(
@@ -928,7 +961,12 @@ impl DapClientManager {
         adapter: &DebugAdapterSpec,
         plan: DebugSessionPlan,
     ) -> Result<DapSessionHandle, DapClientError> {
-        let (writer, reader, child) = connect_transport(adapter, plan.transport())?;
+        let (writer, reader, owned) = connect_transport(
+            adapter,
+            plan.transport(),
+            &self.process_registry,
+            workspace_id,
+        )?;
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
         let pending: Arc<Mutex<BTreeMap<u64, PendingResponse>>> =
             Arc::new(Mutex::new(BTreeMap::new()));
@@ -952,6 +990,10 @@ impl DapClientManager {
         );
 
         let next_request_id = AtomicU64::new(1);
+        let (owned_process_id, process_registry) = match owned {
+            Some((id, registry)) => (Some(id), Some(registry)),
+            None => (None, None),
+        };
         let mut handle = DapSessionHandle {
             info: DapSessionInfo {
                 workspace_id,
@@ -969,7 +1011,8 @@ impl DapClientManager {
             last_disconnect: Arc::clone(&last_disconnect),
             stop_state: Arc::clone(&stop_state),
             _reader: reader_handle,
-            child: child.map(Mutex::new),
+            owned_process_id,
+            process_registry,
             transport_log: Arc::clone(&self.transport_log),
         };
 

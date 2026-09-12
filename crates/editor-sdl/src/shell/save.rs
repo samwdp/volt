@@ -184,10 +184,9 @@ fn close_lsp_buffers_for_workspace(
     let Some(lsp_client) = lsp_client else {
         return Ok(());
     };
-    let (paths, workspace_root) = {
+    let paths = {
         let ui = shell_ui(runtime)?;
-        let paths = ui
-            .workspace_views
+        ui.workspace_views
             .get(&workspace_id)
             .map(|view| {
                 view.buffer_ids
@@ -198,13 +197,7 @@ fn close_lsp_buffers_for_workspace(
                     })
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_default();
-        let workspace_root = runtime
-            .model()
-            .workspace(workspace_id)
-            .ok()
-            .and_then(|workspace| workspace.root().map(Path::to_path_buf));
-        (paths, workspace_root)
+            .unwrap_or_default()
     };
     for path in paths {
         cancel_lsp_sync_for_path(runtime, &path)?;
@@ -213,7 +206,7 @@ fn close_lsp_buffers_for_workspace(
             .map_err(|error| error.to_string())?;
     }
     lsp_client
-        .stop_sessions_for_root(workspace_root.as_deref())
+        .prepare_workspace_close(workspace_id.get())
         .map_err(|error| error.to_string())?;
     Ok(())
 }

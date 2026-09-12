@@ -8,6 +8,7 @@ use std::{
 };
 
 use editor_buffer::{TextPoint, TextRange};
+use editor_jobs::WorkspaceId;
 use lsp_types::TextDocumentSyncKind;
 use serde_json::Value;
 
@@ -304,7 +305,26 @@ impl LspClientManager {
         server_id: &str,
         edits: Option<&[editor_buffer::TextEdit]>,
     ) -> Result<Vec<String>, LspClientError> {
-        let sessions = self.ensure_sessions_for_path(path, root, Some(server_id), true)?;
+        self.start_buffer_server_with_edits_for_workspace(
+            path, text, revision, root, server_id, edits, None,
+        )
+    }
+
+    /// Starts/syncs onto an exact server and tags the Session for the editor Workspace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_buffer_server_with_edits_for_workspace(
+        &self,
+        path: &Path,
+        text: impl Into<String>,
+        revision: u64,
+        root: Option<&Path>,
+        server_id: &str,
+        edits: Option<&[editor_buffer::TextEdit]>,
+        workspace_id: Option<u64>,
+    ) -> Result<Vec<String>, LspClientError> {
+        let workspace_id = workspace_id.map(WorkspaceId::from_raw);
+        let sessions =
+            self.ensure_sessions_for_path(path, root, Some(server_id), true, workspace_id)?;
         self.sync_buffer_to_sessions(path, text.into(), revision, sessions, edits)
     }
 
@@ -583,7 +603,9 @@ impl LspClientManager {
         Ok(Arc::new(LspSessionHandle {
             key: SessionKey::new(server_id, session.root().map(PathBuf::as_path)),
             session,
-            child: Mutex::new(child),
+            child: Some(Mutex::new(child)),
+            owned_process_id: None,
+            process_registry: None,
             writer: Arc::new(Mutex::new(writer)),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),
