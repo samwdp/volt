@@ -54,6 +54,7 @@ pub(crate) struct LspSessionHandle {
     #[cfg(test)]
     pub(crate) fail_next_send: AtomicBool,
     pub(crate) needs_full_document: Mutex<BTreeSet<PathBuf>>,
+    pub(crate) completion_resolve_supported: AtomicBool,
 }
 
 impl std::fmt::Debug for LspSessionHandle {
@@ -156,6 +157,7 @@ impl LspSessionHandle {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            completion_resolve_supported: AtomicBool::new(false),
         });
         record_transport_event(
             &transport_log,
@@ -259,6 +261,15 @@ impl LspSessionHandle {
                 ))
             })?;
         self.set_text_document_sync_kind(&initialize_result)?;
+        self.completion_resolve_supported.store(
+            initialize_result
+                .capabilities
+                .completion_provider
+                .as_ref()
+                .and_then(|provider| provider.resolve_provider)
+                .unwrap_or(false),
+            Ordering::Release,
+        );
         self.notify_typed::<Initialized>(InitializedParams {})?;
         if let Some(settings) = self.workspace_configuration_notification_payload(false)? {
             self.notify(
@@ -523,10 +534,47 @@ impl LspSessionHandle {
             partial_result_params: PartialResultParams::default(),
             context: None,
         })?;
-        // Parse the completion list as-is. Do not bulk-call
-        // `completionItem/resolve` here: one timed-out resolve used to fail the
-        // whole list, and the autocomplete worker then fell through to buffer-only.
-        Ok(parse_completion_response(self.server_id(), &response))
+        // Parse the completion list as-is. Resolve only the selected item later
+        // via `resolve_completion_item` so a slow resolve cannot drop the list.
+        Ok(parse_completion_response(self.server_id(), &response)
+            .into_iter()
+            .map(|item| item.with_root(self.key.root.clone()))
+            .collect())
+    }
+
+    pub(crate) fn resolve_completion_item(
+        &self,
+        item: LspCompletionItem,
+    ) -> Result<LspCompletionItem, LspClientError> {
+        if item.has_documentation || !self.completion_resolve_supported.load(Ordering::Acquire) {
+            return Ok(item);
+        }
+        if !item.raw_item.is_object() {
+            return Ok(item);
+        }
+        let response = match self.request_with_timeout(
+            "completionItem/resolve",
+            item.raw_item.clone(),
+            COMPLETION_RESOLVE_REQUEST_TIMEOUT,
+        ) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(item),
+            // Keep the unresolved item so autocomplete stays usable.
+            Err(_) => return Ok(item),
+        };
+        let Value::Object(mut resolved) = response else {
+            return Ok(item);
+        };
+        if let Value::Object(initial) = item.raw_item.clone() {
+            for (key, value) in initial {
+                resolved.entry(key).or_insert(value);
+            }
+        }
+        Ok(
+            parse_completion_item(self.server_id(), &Value::Object(resolved))
+                .map(|resolved| resolved.with_root(item.root.clone()))
+                .unwrap_or(item),
+        )
     }
 
     pub(crate) fn inline_completion(

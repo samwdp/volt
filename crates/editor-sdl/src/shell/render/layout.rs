@@ -324,6 +324,58 @@ pub(super) fn autocomplete_preview_lines(
     lines
 }
 
+pub(super) fn autocomplete_docs_lines(
+    entry: Option<&AutocompleteEntry>,
+    token: &str,
+    max_columns: usize,
+    token_icon: &str,
+) -> Vec<String> {
+    autocomplete_preview_lines(entry, token, max_columns, 10_000, token_icon)
+}
+
+pub(super) fn user_autocomplete_docs_visible_rows(runtime: &EditorRuntime) -> usize {
+    shell_user_library(runtime)
+        .autocomplete_result_limit()
+        .max(1)
+        .saturating_add(2)
+        .max(6)
+}
+
+pub(super) fn autocomplete_docs_line_count(
+    autocomplete: &AutocompleteOverlay,
+    visible_rows: usize,
+    token_icon: &str,
+) -> usize {
+    autocomplete_docs_lines(
+        autocomplete.selected(),
+        &autocomplete.query.token,
+        72,
+        token_icon,
+    )
+    .len()
+    .max(visible_rows)
+}
+
+pub(super) fn autocomplete_docs_panel_width(
+    entry: Option<&AutocompleteEntry>,
+    token: &str,
+    list_width: u32,
+    pane_width: u32,
+    cell_width: i32,
+    token_icon: &str,
+) -> u32 {
+    let available = pane_width.saturating_sub(16);
+    let docs_available = available.saturating_sub(list_width).saturating_sub(1);
+    let min_width = ((cell_width.max(1) as u32) * 24).min(docs_available.max(1));
+    let mut content_width = min_width;
+    let probe_lines = autocomplete_docs_lines(entry, token, 10_000, token_icon);
+    for line in probe_lines {
+        content_width =
+            content_width.max(monospace_text_width(&line, cell_width).saturating_add(28));
+    }
+    content_width.clamp(min_width, docs_available.max(min_width))
+}
+
 pub(super) fn wrap_overlay_lines(
     lines: &[String],
     max_columns: usize,

@@ -598,6 +598,7 @@ impl LspClientManager {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            completion_resolve_supported: AtomicBool::new(false),
         }))
     }
 
@@ -685,6 +686,32 @@ impl LspClientManager {
             items.extend(session.completions(path, position)?);
         }
         Ok(items)
+    }
+
+    pub fn resolve_completion_item(
+        &self,
+        item: &LspCompletionItem,
+    ) -> Result<LspCompletionItem, LspClientError> {
+        let Some(session) = self.live_session_for_server(item.server_id(), item.root.as_deref())?
+        else {
+            return Ok(item.clone());
+        };
+        session.resolve_completion_item(item.clone())
+    }
+
+    /// Resolve documentation for a selected completion item without failing the list.
+    pub fn resolve_completion_documentation(
+        &self,
+        payload: &LspCompletionResolvePayload,
+    ) -> Result<Option<String>, LspClientError> {
+        let item =
+            LspCompletionItem::new(payload.server_id.clone(), None, "", "", None, None, None)
+                .with_raw_item(payload.raw_item.clone(), false)
+                .with_root(payload.root.clone());
+        Ok(self
+            .resolve_completion_item(&item)?
+            .documentation()
+            .map(str::to_owned))
     }
 
     pub fn execute_server_command(

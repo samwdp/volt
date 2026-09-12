@@ -628,7 +628,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
                 format!("{name} is an ACP session buffer."),
                 "Use acp.pick-client to start an ACP agent.".to_owned(),
                 "Type into the prompt and press Ctrl+Enter to send.".to_owned(),
-                "Use / for slash commands, @ to link git files, Ctrl+Shift+V to paste images, Ctrl+Space/Tab for completion, Shift+Tab to cycle modes, Ctrl+Tab to switch ACP panes, acp.pick-mode to choose a mode, acp.pick-model to choose a model, and Ctrl+j for a newline."
+                "Use / for slash commands (/clear starts a new session), @ to link git files, Ctrl+Shift+V to paste images, Ctrl+Space/Tab for completion, Shift+Tab to cycle modes, Ctrl+Tab to switch ACP panes, acp.pick-mode to choose a mode, acp.pick-model to choose a model, and Ctrl+j for a newline."
                     .to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => Vec::new(),

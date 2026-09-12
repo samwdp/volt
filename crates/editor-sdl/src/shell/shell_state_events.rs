@@ -525,6 +525,9 @@ impl ShellState {
                 if self.handle_focused_hover_keydown(keycode, keymod)? {
                     return Ok(false);
                 }
+                if self.handle_focused_autocomplete_docs_keydown(keycode, keymod)? {
+                    return Ok(false);
+                }
                 if self.handle_autocomplete_keydown(keycode, keymod)? {
                     return Ok(false);
                 }

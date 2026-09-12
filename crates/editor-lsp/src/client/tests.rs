@@ -59,6 +59,8 @@ fn completion_parser_handles_lists_and_docs() {
     assert_eq!(items[0].kind(), Some(LspCompletionKind::Function));
     assert_eq!(items[0].documentation(), Some("Prints to stdout."));
     assert_eq!(items[0].edit_range(), None);
+    assert!(items[0].has_documentation());
+    assert!(!items[0].needs_resolve());
 }
 
 #[test]
@@ -73,6 +75,8 @@ fn completion_parser_falls_back_to_detail_for_documentation_panel() {
     .expect("parse completion item");
     assert_eq!(item.documentation(), Some("fn foo()"));
     assert_eq!(item.detail(), Some("fn foo()"));
+    assert!(!item.has_documentation());
+    assert!(item.needs_resolve());
 }
 
 #[test]
@@ -1284,6 +1288,10 @@ fn initialize_request_timeout_is_extended() {
         request_timeout_for_method(HoverRequest::METHOD),
         REQUEST_TIMEOUT
     );
+    assert_eq!(
+        request_timeout_for_method("completionItem/resolve"),
+        COMPLETION_RESOLVE_REQUEST_TIMEOUT
+    );
 }
 
 #[test]
@@ -1422,6 +1430,7 @@ fn test_session_handle_in_workspace(
         #[cfg(test)]
         fail_next_send: AtomicBool::new(false),
         needs_full_document: Mutex::new(BTreeSet::new()),
+        completion_resolve_supported: AtomicBool::new(false),
     })
 }
 

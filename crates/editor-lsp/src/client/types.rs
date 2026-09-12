@@ -40,6 +40,8 @@ pub(crate) const CODE_ACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) const INLINE_COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_millis(1200);
 
+pub(crate) const COMPLETION_RESOLVE_REQUEST_TIMEOUT: Duration = Duration::from_millis(800);
+
 pub(crate) const TRANSPORT_LOG_MAX_ENTRIES: usize = 400;
 
 pub(crate) const NOTIFICATION_LOG_MAX_ENTRIES: usize = 128;
@@ -81,12 +83,17 @@ pub(crate) struct LspSessionSharedState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspCompletionItem {
     pub(crate) server_id: String,
+    pub(crate) root: Option<PathBuf>,
     pub(crate) kind: Option<LspCompletionKind>,
     pub(crate) label: String,
     pub(crate) insert_text: String,
     pub(crate) edit_range: Option<TextRange>,
     pub(crate) detail: Option<String>,
     pub(crate) documentation: Option<String>,
+    /// True when the completion response included a real `documentation` field.
+    pub(crate) has_documentation: bool,
+    /// Raw CompletionItem JSON for `completionItem/resolve`.
+    pub(crate) raw_item: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,17 +147,35 @@ impl LspCompletionItem {
     ) -> Self {
         Self {
             server_id: server_id.into(),
+            root: None,
             kind,
             label: label.into(),
             insert_text: insert_text.into(),
             edit_range,
             detail,
             documentation,
+            has_documentation: false,
+            raw_item: Value::Null,
         }
+    }
+
+    pub(crate) fn with_raw_item(mut self, raw_item: Value, has_documentation: bool) -> Self {
+        self.raw_item = raw_item;
+        self.has_documentation = has_documentation;
+        self
+    }
+
+    pub(crate) fn with_root(mut self, root: Option<PathBuf>) -> Self {
+        self.root = root;
+        self
     }
 
     pub fn server_id(&self) -> &str {
         &self.server_id
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     pub const fn kind(&self) -> Option<LspCompletionKind> {
@@ -175,6 +200,47 @@ impl LspCompletionItem {
 
     pub fn documentation(&self) -> Option<&str> {
         self.documentation.as_deref()
+    }
+
+    pub const fn has_documentation(&self) -> bool {
+        self.has_documentation
+    }
+
+    pub fn raw_item(&self) -> &Value {
+        &self.raw_item
+    }
+
+    pub fn needs_resolve(&self) -> bool {
+        !self.has_documentation && self.raw_item.is_object()
+    }
+
+    pub fn resolve_payload(&self) -> Option<LspCompletionResolvePayload> {
+        if !self.needs_resolve() {
+            return None;
+        }
+        Some(LspCompletionResolvePayload {
+            server_id: self.server_id.clone(),
+            root: self.root.clone(),
+            raw_item: self.raw_item.clone(),
+        })
+    }
+}
+
+/// Enough data to call `completionItem/resolve` for a selected completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspCompletionResolvePayload {
+    pub(crate) server_id: String,
+    pub(crate) root: Option<PathBuf>,
+    pub(crate) raw_item: Value,
+}
+
+impl LspCompletionResolvePayload {
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 }
 
@@ -1860,7 +1926,10 @@ pub(crate) fn client_capabilities() -> Result<ClientCapabilities, LspClientError
             "completion": {
                 "completionItem": {
                     "documentationFormat": ["markdown"],
-                    "snippetSupport": true
+                    "snippetSupport": true,
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"]
+                    }
                 }
             },
             "inlineCompletion": {
@@ -1921,6 +1990,8 @@ pub(crate) fn request_timeout_for_method(method: &str) -> Duration {
         CODE_ACTION_REQUEST_TIMEOUT
     } else if method == INLINE_COMPLETION_METHOD {
         INLINE_COMPLETION_REQUEST_TIMEOUT
+    } else if method == "completionItem/resolve" {
+        COMPLETION_RESOLVE_REQUEST_TIMEOUT
     } else {
         REQUEST_TIMEOUT
     }
@@ -3365,21 +3436,25 @@ pub(crate) fn parse_completion_item(server_id: &str, value: &Value) -> Option<Ls
         .get("detail")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    // Prefer real documentation when present; otherwise reuse detail so the
-    // autocomplete docs panel still has something useful to show.
-    let documentation = value
+    let resolved_documentation = value
         .get("documentation")
-        .and_then(completion_documentation)
-        .or_else(|| detail.clone());
-    Some(LspCompletionItem::new(
-        server_id,
-        kind,
-        label,
-        insert_text,
-        edit_range,
-        detail,
-        documentation,
-    ))
+        .and_then(completion_documentation);
+    let has_documentation = resolved_documentation.is_some();
+    // Prefer real documentation when present; otherwise reuse detail so the
+    // autocomplete docs panel still has something useful to show until resolve.
+    let documentation = resolved_documentation.or_else(|| detail.clone());
+    Some(
+        LspCompletionItem::new(
+            server_id,
+            kind,
+            label,
+            insert_text,
+            edit_range,
+            detail,
+            documentation,
+        )
+        .with_raw_item(value.clone(), has_documentation),
+    )
 }
 
 pub(crate) fn completion_documentation(value: &Value) -> Option<String> {

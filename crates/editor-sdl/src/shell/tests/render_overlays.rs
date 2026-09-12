@@ -861,9 +861,12 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
             replace_range: None,
             detail: Some("detail".to_owned()),
             documentation: Some("documentation".to_owned()),
+            resolve: None,
         }],
         selected_index: 0,
         loading: false,
+        docs_focused: false,
+        docs_scroll_offset: 0,
     };
     let base_background = theme_color(Some(&registry), "ui.background", Color::RGB(15, 16, 20));
     let is_dark = is_dark_color(base_background);
@@ -1063,6 +1066,93 @@ fn hover_overlay_width_tracks_content_and_clamps_to_pane() -> Result<(), String>
         hover_overlay_width(&hover, &long_provider, 400, cell_width),
         384
     );
+    Ok(())
+}
+
+#[test]
+fn autocomplete_docs_panel_width_tracks_content_and_clamps_to_pane() {
+    let cell_width = 8;
+    let list_width = 22 * cell_width as u32;
+    let short = AutocompleteEntry {
+        provider_id: "lsp".to_owned(),
+        provider_label: "LSP".to_owned(),
+        provider_icon: "L".to_owned(),
+        item_icon: "ƒ".to_owned(),
+        label: "foo".to_owned(),
+        replacement: "foo".to_owned(),
+        replace_range: None,
+        detail: Some("fn foo()".to_owned()),
+        documentation: Some("short".to_owned()),
+        resolve: None,
+    };
+    let short_width =
+        autocomplete_docs_panel_width(Some(&short), "fo", list_width, 4000, cell_width, "T");
+    assert_eq!(short_width, 24 * cell_width as u32);
+
+    let long = AutocompleteEntry {
+        documentation: Some("x".repeat(100)),
+        ..short.clone()
+    };
+    let long_width =
+        autocomplete_docs_panel_width(Some(&long), "fo", list_width, 4000, cell_width, "T");
+    assert!(long_width > short_width);
+    assert_eq!(
+        autocomplete_docs_panel_width(Some(&long), "fo", list_width, 400, cell_width, "T"),
+        400u32
+            .saturating_sub(16)
+            .saturating_sub(list_width)
+            .saturating_sub(1)
+    );
+}
+
+#[test]
+fn autocomplete_docs_focus_and_scroll_update_overlay_state() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    install_text_test_buffer(&mut state, "*ac-docs*", vec!["alpha".to_owned()])?;
+    let buffer_id = active_shell_buffer_id(&state.runtime).map_err(|error| error.to_string())?;
+    let overlay = AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: String::new(),
+            token: "alpha".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 5)),
+        },
+        entries: vec![AutocompleteEntry {
+            provider_id: "manual".to_owned(),
+            provider_label: "Manual".to_owned(),
+            provider_icon: "M".to_owned(),
+            item_icon: "•".to_owned(),
+            label: "alpha".to_owned(),
+            replacement: "alpha".to_owned(),
+            replace_range: None,
+            detail: Some("detail".to_owned()),
+            documentation: Some(
+                (0..40)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            resolve: None,
+        }],
+        selected_index: 0,
+        loading: false,
+        docs_focused: false,
+        docs_scroll_offset: 0,
+    };
+    shell_ui_mut(&mut state.runtime)?.set_autocomplete(overlay);
+    {
+        let autocomplete = shell_ui_mut(&mut state.runtime)?
+            .autocomplete_mut()
+            .ok_or_else(|| "autocomplete missing".to_owned())?;
+        autocomplete.focus_docs();
+        assert!(autocomplete.docs_focused);
+        autocomplete.scroll_docs_by(3, 6, 40);
+        assert_eq!(autocomplete.docs_scroll_offset, 3);
+        autocomplete.blur_docs();
+        assert!(!autocomplete.docs_focused);
+        assert_eq!(autocomplete.docs_scroll_offset, 0);
+    }
     Ok(())
 }
 

@@ -916,6 +916,7 @@ pub(crate) struct ShellUiState {
     git_summary: GitSummaryState,
     git_head_blobs: GitHeadBlobCache,
     autocomplete_worker: AutocompleteWorkerState,
+    completion_resolve_worker: CompletionResolveWorkerState,
     inline_completion_worker: InlineCompletionWorkerState,
     vim_search_worker: VimSearchWorkerState,
     workspace_search_worker: WorkspaceSearchWorkerState,
@@ -998,6 +999,7 @@ impl ShellUiState {
             git_summary: GitSummaryState::new(),
             git_head_blobs: GitHeadBlobCache::new(),
             autocomplete_worker: AutocompleteWorkerState::new(),
+            completion_resolve_worker: CompletionResolveWorkerState::new(),
             inline_completion_worker: InlineCompletionWorkerState::new(),
             vim_search_worker: VimSearchWorkerState::new(),
             workspace_search_worker: WorkspaceSearchWorkerState::new(),
@@ -1899,11 +1901,13 @@ impl ShellUiState {
         self.close_command_line();
         self.close_hover();
         self.autocomplete_worker.clear_pending();
+        self.completion_resolve_worker.clear_pending();
         self.autocomplete = Some(autocomplete);
     }
 
     fn close_autocomplete(&mut self) {
         self.autocomplete_worker.clear_pending();
+        self.completion_resolve_worker.clear_pending();
         self.autocomplete = None;
     }
 

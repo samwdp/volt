@@ -550,6 +550,28 @@ fn active_command_input_hint_uses_unstructured_command_metadata() {
 }
 
 #[test]
+fn merge_acp_slash_commands_puts_universal_clear_first_and_dedupes_agent_clear() {
+    let merged = merge_acp_slash_commands([
+        AvailableCommand::new("clear", "Agent clear"),
+        AvailableCommand::new("status", "Show status"),
+    ]);
+
+    assert_eq!(merged.len(), 2);
+    assert_eq!(merged[0].name, "clear");
+    assert_eq!(merged[0].description, "Start a new ACP session");
+    assert_eq!(merged[1].name, "status");
+}
+
+#[test]
+fn acp_leading_slash_command_name_reads_first_token() {
+    assert_eq!(acp_leading_slash_command_name("/clear"), Some("clear"));
+    assert_eq!(acp_leading_slash_command_name("/clear "), Some("clear"));
+    assert_eq!(acp_leading_slash_command_name("/clear now"), Some("clear"));
+    assert_eq!(acp_leading_slash_command_name("clear"), None);
+    assert_eq!(acp_leading_slash_command_name("/"), None);
+}
+
+#[test]
 fn permission_prompt_lines_show_locations_and_choices() {
     let request = RequestPermissionRequest::new(
         "session-1",

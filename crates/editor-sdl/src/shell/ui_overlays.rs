@@ -67,6 +67,7 @@ pub(super) struct AutocompleteEntry {
     pub(super) replace_range: Option<TextRange>,
     pub(super) detail: Option<String>,
     pub(super) documentation: Option<String>,
+    pub(super) resolve: Option<LspCompletionResolvePayload>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +78,8 @@ pub(super) struct AutocompleteOverlay {
     pub(super) entries: Vec<AutocompleteEntry>,
     pub(super) selected_index: usize,
     pub(super) loading: bool,
+    pub(super) docs_focused: bool,
+    pub(super) docs_scroll_offset: usize,
 }
 
 impl AutocompleteOverlay {
@@ -88,6 +91,8 @@ impl AutocompleteOverlay {
             entries: Vec::new(),
             selected_index: 0,
             loading: true,
+            docs_focused: false,
+            docs_scroll_offset: 0,
         }
     }
 
@@ -107,6 +112,8 @@ impl AutocompleteOverlay {
         self.buffer_revision = buffer_revision;
         self.query = query;
         self.loading = true;
+        self.docs_focused = false;
+        self.docs_scroll_offset = 0;
     }
 
     pub(super) fn set_entries(&mut self, entries: Vec<AutocompleteEntry>) {
@@ -127,6 +134,7 @@ impl AutocompleteOverlay {
         } else {
             self.selected_index = self.selected_index.min(self.entries.len() - 1);
         }
+        self.docs_scroll_offset = 0;
     }
 
     pub(super) fn select_next(&mut self) {
@@ -135,6 +143,7 @@ impl AutocompleteOverlay {
             return;
         }
         self.selected_index = (self.selected_index + 1) % self.entries.len();
+        self.docs_scroll_offset = 0;
     }
 
     pub(super) fn select_previous(&mut self) {
@@ -146,6 +155,54 @@ impl AutocompleteOverlay {
             .selected_index
             .checked_sub(1)
             .unwrap_or(self.entries.len() - 1);
+        self.docs_scroll_offset = 0;
+    }
+
+    pub(super) fn focus_docs(&mut self) {
+        self.docs_focused = true;
+        self.docs_scroll_offset = 0;
+    }
+
+    pub(super) fn blur_docs(&mut self) {
+        self.docs_focused = false;
+        self.docs_scroll_offset = 0;
+    }
+
+    pub(super) fn toggle_docs_focus(&mut self) {
+        if self.docs_focused {
+            self.blur_docs();
+        } else {
+            self.focus_docs();
+        }
+    }
+
+    pub(super) fn scroll_docs_by(&mut self, delta: i32, visible_rows: usize, total_lines: usize) {
+        let max_offset = total_lines.saturating_sub(visible_rows.max(1));
+        if delta.is_negative() {
+            self.docs_scroll_offset = self
+                .docs_scroll_offset
+                .saturating_sub(delta.unsigned_abs() as usize);
+        } else {
+            self.docs_scroll_offset = (self.docs_scroll_offset + delta as usize).min(max_offset);
+        }
+    }
+
+    pub(super) fn apply_resolved_documentation(
+        &mut self,
+        provider_id: &str,
+        replacement: &str,
+        documentation: Option<String>,
+    ) -> bool {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.provider_id == provider_id && entry.replacement == replacement)
+        else {
+            return false;
+        };
+        entry.documentation = documentation;
+        entry.resolve = None;
+        true
     }
 }
 

@@ -342,23 +342,40 @@ pub(super) fn render_autocomplete_overlay(
         blend_color(base_foreground, panel_background, 0.46),
     );
     let row_height = line_height.max(1);
-    let width = overlay_width(pane_rect.width(), cell_width, 48, 72);
-    let list_width = ((width.saturating_mul(36)) / 100)
+    let list_width = ((cell_width.max(1) as u32) * 22)
         .max((cell_width.max(1) as u32) * 18)
         .min((cell_width.max(1) as u32) * 28)
-        .min(width.saturating_sub((cell_width.max(1) as u32) * 18));
-    let docs_width = width.saturating_sub(list_width).saturating_sub(1);
+        .min(pane_rect.width().saturating_sub(48).max(1));
+    let docs_width = autocomplete_docs_panel_width(
+        autocomplete.selected(),
+        &autocomplete.query.token,
+        list_width,
+        pane_rect.width(),
+        cell_width,
+        user_library.autocomplete_token_icon(),
+    );
+    let width = list_width
+        .saturating_add(1)
+        .saturating_add(docs_width)
+        .min(pane_rect.width().saturating_sub(16).max(1));
     let docs_columns = overlay_text_columns(docs_width, 20, cell_width);
     let visible_result_limit = user_library.autocomplete_result_limit().max(1);
     let max_body_rows = ((pane_rect.height().saturating_sub(28)) / row_height as u32)
         .clamp(4, visible_result_limit.max(6) as u32 + 2) as usize;
-    let preview_lines = autocomplete_preview_lines(
+    let docs_lines = autocomplete_docs_lines(
         autocomplete.selected(),
         &autocomplete.query.token,
         docs_columns,
-        max_body_rows,
         user_library.autocomplete_token_icon(),
     );
+    let docs_scroll = autocomplete
+        .docs_scroll_offset
+        .min(docs_lines.len().saturating_sub(1));
+    let preview_lines = docs_lines
+        .into_iter()
+        .skip(docs_scroll)
+        .take(max_body_rows)
+        .collect::<Vec<_>>();
     let body_rows = autocomplete
         .entries()
         .len()
@@ -378,12 +395,17 @@ pub(super) fn render_autocomplete_overlay(
     };
     let outer_rect = PixelRectToRect::rect(x, y, width, height);
     let radius = overlay_radius(theme_registry);
+    let focus_border = if autocomplete.docs_focused {
+        theme_color(theme_registry, "ui.autocomplete.focused.border", accent)
+    } else {
+        border
+    };
     paint_overlay_card(
         target,
         outer_rect,
         OverlayCardStyle {
             radius,
-            border,
+            border: focus_border,
             background: panel_background,
             window_effects,
             accent: None,

@@ -284,6 +284,7 @@ impl ShellState {
             if self.refresh_pending_autocomplete()? {
                 return Ok(());
             }
+            let _ = self.refresh_pending_completion_resolve()?;
             std::thread::sleep(Duration::from_millis(5));
         }
         Ok(())

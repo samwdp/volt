@@ -130,10 +130,10 @@ use editor_git::{
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
-    LanguageServerRegistry, LspClientError, LspClientManager, LspCodeAction, LspFormattingOptions,
-    LspInlineCompletionItem, LspLiveSession, LspLocation, LspLogEntry, LspLogSnapshot,
-    LspNotificationAction, LspNotificationLevel, LspNotificationSnapshot, LspTextEdit,
-    LspWorkspaceDiagnostic,
+    LanguageServerRegistry, LspClientError, LspClientManager, LspCodeAction,
+    LspCompletionResolvePayload, LspFormattingOptions, LspInlineCompletionItem, LspLiveSession,
+    LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationAction, LspNotificationLevel,
+    LspNotificationSnapshot, LspTextEdit, LspWorkspaceDiagnostic,
 };
 use editor_picker::{
     PickerExportableRow, PickerExtraDispatch, PickerExtraKeybind, PickerItem, PickerOneShotContext,

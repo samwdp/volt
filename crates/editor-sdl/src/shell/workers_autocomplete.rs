@@ -567,6 +567,7 @@ fn buffer_autocomplete_entries(
                     replace_range: None,
                     detail: None,
                     documentation: None,
+                    resolve: None,
                 },
                 score,
             ))
@@ -659,6 +660,7 @@ fn lsp_autocomplete_entries(
                     replace_range: item.edit_range(),
                     detail: item.detail().map(str::to_owned),
                     documentation: item.documentation().map(str::to_owned),
+                    resolve: item.resolve_payload(),
                 },
                 autocomplete_score(&candidate, 2, query) + 40,
             ))
@@ -701,6 +703,7 @@ fn manual_autocomplete_entries(
                     replace_range: None,
                     detail: item.detail.clone(),
                     documentation: item.documentation.clone(),
+                    resolve: None,
                 },
                 autocomplete_score(&item.replacement, 1, query) + 80,
             ))
@@ -743,6 +746,7 @@ fn db_autocomplete_entries(
                     replace_range: None,
                     detail: candidate.detail.clone(),
                     documentation: candidate.documentation.clone(),
+                    resolve: None,
                 },
                 autocomplete_score(&candidate.replacement, 1, query) + 100,
             ))
@@ -1022,4 +1026,91 @@ fn runtime_db_candidates_for_buffer(
         .get::<DbService>()
         .map(|db| db.autocomplete_candidates_for_buffer(buffer_id.get()))
         .unwrap_or_default()
+}
+
+#[derive(Debug, Clone)]
+struct CompletionResolveWorkerRequest {
+    request_id: u64,
+    buffer_id: BufferId,
+    provider_id: String,
+    replacement: String,
+    payload: LspCompletionResolvePayload,
+    lsp_client: Arc<LspClientManager>,
+}
+
+struct CompletionResolveWorkerResult {
+    buffer_id: BufferId,
+    provider_id: String,
+    replacement: String,
+    documentation: Option<String>,
+}
+
+struct CompletionResolveWorkerState {
+    pending_key: Option<(BufferId, String, String)>,
+    next_request_id: u64,
+    request_tx: Sender<CompletionResolveWorkerRequest>,
+    results: Arc<Mutex<Vec<CompletionResolveWorkerResult>>>,
+}
+
+impl CompletionResolveWorkerState {
+    fn new() -> Self {
+        let (request_tx, request_rx) = mpsc::channel::<CompletionResolveWorkerRequest>();
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let worker_results = Arc::clone(&results);
+        std::thread::spawn(move || {
+            while let Ok(mut request) = request_rx.recv() {
+                while let Ok(newer_request) = request_rx.try_recv() {
+                    request = newer_request;
+                }
+                let documentation = request
+                    .lsp_client
+                    .resolve_completion_documentation(&request.payload)
+                    .ok()
+                    .flatten();
+                if let Ok(mut results) = worker_results.lock() {
+                    results.push(CompletionResolveWorkerResult {
+                        buffer_id: request.buffer_id,
+                        provider_id: request.provider_id,
+                        replacement: request.replacement,
+                        documentation,
+                    });
+                    ping_shell_wakeup();
+                } else {
+                    return;
+                }
+            }
+        });
+
+        Self {
+            pending_key: None,
+            next_request_id: 0,
+            request_tx,
+            results,
+        }
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending_key = None;
+    }
+
+    fn schedule(&mut self, request: CompletionResolveWorkerRequest) {
+        let key = (
+            request.buffer_id,
+            request.provider_id.clone(),
+            request.replacement.clone(),
+        );
+        if self.pending_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.pending_key = Some(key);
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let mut request = request;
+        request.request_id = self.next_request_id;
+        let _ = self.request_tx.send(request);
+    }
+
+    fn take_latest_result(&self) -> Option<CompletionResolveWorkerResult> {
+        let mut results = self.results.lock().ok()?;
+        results.drain(..).next_back()
+    }
 }

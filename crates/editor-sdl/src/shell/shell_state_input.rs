@@ -769,6 +769,67 @@ impl ShellState {
         Ok(false)
     }
 
+    fn refresh_pending_completion_resolve(&mut self) -> Result<bool, ShellError> {
+        let mut changed = false;
+        if let Some(result) = self.ui()?.completion_resolve_worker.take_latest_result() {
+            let applied = {
+                let ui = self.ui_mut()?;
+                if let Some(autocomplete) = ui.autocomplete_mut()
+                    && autocomplete.buffer_id == result.buffer_id
+                    && autocomplete.is_visible()
+                {
+                    autocomplete.apply_resolved_documentation(
+                        &result.provider_id,
+                        &result.replacement,
+                        result.documentation,
+                    )
+                } else {
+                    false
+                }
+            };
+            if applied {
+                changed = true;
+            }
+            self.ui_mut()?.completion_resolve_worker.clear_pending();
+        }
+
+        let schedule = {
+            let ui = self.ui()?;
+            let Some(autocomplete) = ui.autocomplete() else {
+                return Ok(changed);
+            };
+            if !autocomplete.is_visible() {
+                return Ok(changed);
+            }
+            let Some(entry) = autocomplete.selected() else {
+                return Ok(changed);
+            };
+            let Some(resolve) = entry.resolve.as_ref() else {
+                return Ok(changed);
+            };
+            let lsp_client = self
+                .runtime
+                .services()
+                .get::<Arc<LspClientManager>>()
+                .cloned();
+            let Some(lsp_client) = lsp_client else {
+                return Ok(changed);
+            };
+            Some(CompletionResolveWorkerRequest {
+                request_id: 0,
+                buffer_id: autocomplete.buffer_id,
+                provider_id: entry.provider_id.clone(),
+                replacement: entry.replacement.clone(),
+                payload: resolve.clone(),
+                lsp_client,
+            })
+        };
+        if let Some(request) = schedule {
+            self.ui_mut()?.completion_resolve_worker.schedule(request);
+        }
+        Ok(changed)
+    }
+
     fn refresh_hover_state(&mut self) -> Result<bool, ShellError> {
         let should_close = {
             let ui = self.ui()?;
@@ -1023,6 +1084,112 @@ impl ShellState {
         }
     }
 
+    fn handle_focused_autocomplete_docs_keydown(
+        &mut self,
+        keycode: Keycode,
+        keymod: Mod,
+    ) -> Result<bool, ShellError> {
+        let docs_focused = self
+            .ui()?
+            .autocomplete()
+            .is_some_and(|autocomplete| autocomplete.is_visible() && autocomplete.docs_focused);
+        if !docs_focused {
+            return Ok(false);
+        }
+        match keycode {
+            Keycode::Escape => {
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    autocomplete.blur_docs();
+                }
+                Ok(true)
+            }
+            Keycode::Tab => {
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    autocomplete.blur_docs();
+                }
+                self.queue_suppressed_text_input_for_chord("Tab");
+                Ok(true)
+            }
+            Keycode::Down | Keycode::J => {
+                let visible_rows = user_autocomplete_docs_visible_rows(&self.runtime);
+                let token_icon = shell_user_library(&self.runtime)
+                    .autocomplete_token_icon()
+                    .to_owned();
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    let total_lines =
+                        autocomplete_docs_line_count(autocomplete, visible_rows, &token_icon);
+                    autocomplete.scroll_docs_by(1, visible_rows, total_lines);
+                }
+                if matches!(keycode, Keycode::J) {
+                    self.queue_suppressed_text_input_for_chord("j");
+                }
+                Ok(true)
+            }
+            Keycode::Up | Keycode::K => {
+                let visible_rows = user_autocomplete_docs_visible_rows(&self.runtime);
+                let token_icon = shell_user_library(&self.runtime)
+                    .autocomplete_token_icon()
+                    .to_owned();
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    let total_lines =
+                        autocomplete_docs_line_count(autocomplete, visible_rows, &token_icon);
+                    autocomplete.scroll_docs_by(-1, visible_rows, total_lines);
+                }
+                if matches!(keycode, Keycode::K) {
+                    self.queue_suppressed_text_input_for_chord("k");
+                }
+                Ok(true)
+            }
+            Keycode::PageDown => {
+                let visible_rows = user_autocomplete_docs_visible_rows(&self.runtime);
+                let token_icon = shell_user_library(&self.runtime)
+                    .autocomplete_token_icon()
+                    .to_owned();
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    let total_lines =
+                        autocomplete_docs_line_count(autocomplete, visible_rows, &token_icon);
+                    autocomplete.scroll_docs_by(
+                        visible_rows.max(1) as i32,
+                        visible_rows,
+                        total_lines,
+                    );
+                }
+                Ok(true)
+            }
+            Keycode::PageUp => {
+                let visible_rows = user_autocomplete_docs_visible_rows(&self.runtime);
+                let token_icon = shell_user_library(&self.runtime)
+                    .autocomplete_token_icon()
+                    .to_owned();
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    let total_lines =
+                        autocomplete_docs_line_count(autocomplete, visible_rows, &token_icon);
+                    autocomplete.scroll_docs_by(
+                        -(visible_rows.max(1) as i32),
+                        visible_rows,
+                        total_lines,
+                    );
+                }
+                Ok(true)
+            }
+            Keycode::N if keymod.intersects(ctrl_mod()) => {
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    autocomplete.select_next();
+                }
+                self.queue_suppressed_text_input_for_chord("Ctrl+n");
+                Ok(true)
+            }
+            Keycode::P if keymod.intersects(ctrl_mod()) => {
+                if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
+                    autocomplete.select_previous();
+                }
+                self.queue_suppressed_text_input_for_chord("Ctrl+p");
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn handle_autocomplete_keydown(
         &mut self,
         keycode: Keycode,
@@ -1038,7 +1205,10 @@ impl ShellState {
             if !autocomplete.is_visible() {
                 return Ok(false);
             }
-            if chord == AUTOCOMPLETE_NEXT_CHORD {
+            if chord == "Tab" {
+                autocomplete.toggle_docs_focus();
+                true
+            } else if chord == AUTOCOMPLETE_NEXT_CHORD {
                 autocomplete.select_next();
                 true
             } else if chord == AUTOCOMPLETE_PREVIOUS_CHORD {

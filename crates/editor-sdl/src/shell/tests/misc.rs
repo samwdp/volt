@@ -3406,9 +3406,12 @@ fn accept_autocomplete_avoids_double_dot_when_lsp_insert_includes_trigger() -> R
             replace_range: None,
             detail: None,
             documentation: None,
+            resolve: None,
         }],
         selected_index: 0,
         loading: false,
+        docs_focused: false,
+        docs_scroll_offset: 0,
     };
     shell_ui_mut(&mut state.runtime)?.set_autocomplete(overlay);
     accept_autocomplete(&mut state.runtime)?;
@@ -3447,9 +3450,12 @@ fn accept_autocomplete_uses_lsp_text_edit_range_covering_trigger() -> Result<(),
             replace_range: Some(TextRange::new(TextPoint::new(0, 3), TextPoint::new(0, 4))),
             detail: None,
             documentation: None,
+            resolve: None,
         }],
         selected_index: 0,
         loading: false,
+        docs_focused: false,
+        docs_scroll_offset: 0,
     };
     shell_ui_mut(&mut state.runtime)?.set_autocomplete(overlay);
     accept_autocomplete(&mut state.runtime)?;

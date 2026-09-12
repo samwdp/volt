@@ -43,6 +43,9 @@ pub(crate) fn submit_acp_prompt(
     prompt: &str,
     text: &str,
 ) -> Result<(), String> {
+    if try_run_universal_acp_slash(runtime, buffer_id, text)? {
+        return Ok(());
+    }
     let manager = runtime
         .services()
         .get::<Arc<Mutex<AcpManager>>>()
@@ -286,6 +289,59 @@ pub(crate) fn format_acp_model_label(model_id: &ModelId) -> String {
     raw
 }
 
+/// Host-owned slash commands available for every ACP client.
+pub(crate) fn universal_acp_slash_commands() -> Vec<AvailableCommand> {
+    vec![AvailableCommand::new("clear", "Start a new ACP session")]
+}
+
+/// Merge host universal slash commands ahead of agent-provided ones.
+/// Host names win when the agent advertises the same command.
+pub(crate) fn merge_acp_slash_commands(
+    agent_commands: impl IntoIterator<Item = AvailableCommand>,
+) -> Vec<AvailableCommand> {
+    let mut commands = universal_acp_slash_commands();
+    let universal_names = commands
+        .iter()
+        .map(|command| command.name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    for command in agent_commands {
+        if !universal_names.contains(&command.name) {
+            commands.push(command);
+        }
+    }
+    commands
+}
+
+pub(crate) fn acp_leading_slash_command_name(text: &str) -> Option<&str> {
+    let trimmed = text.strip_prefix('/')?.trim_start();
+    let name = trimmed.split_whitespace().next()?;
+    (!name.is_empty()).then_some(name)
+}
+
+pub(crate) fn try_run_universal_acp_slash(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    text: &str,
+) -> Result<bool, String> {
+    let Some(name) = acp_leading_slash_command_name(text) else {
+        return Ok(false);
+    };
+    match name {
+        "clear" => {
+            {
+                let buffer = shell_buffer_mut(runtime, buffer_id)?;
+                buffer.clear_input();
+            }
+            refresh_acp_input_hint(runtime, buffer_id)?;
+            runtime
+                .execute_command("acp.new-session")
+                .map_err(|error| error.to_string())?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 pub(crate) fn command_input_hint(command: &AvailableCommand) -> Option<&str> {
     match command.input.as_ref() {
         Some(agent_client_protocol::AvailableCommandInput::Unstructured(input)) => {
@@ -347,7 +403,8 @@ pub(crate) fn update_acp_input_hint(
         .ok()
         .and_then(|buffer| buffer.input_field().map(|input| input.text().to_owned()))
         .unwrap_or_default();
-    let command_hint = active_command_input_hint(available_commands, &input_text);
+    let commands = merge_acp_slash_commands(available_commands.iter().cloned());
+    let command_hint = active_command_input_hint(&commands, &input_text);
     let hint = build_acp_input_hint(mode_id, model_id, command_hint.as_deref());
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
         && let Some(footer) = buffer.acp_footer_pane_mut()

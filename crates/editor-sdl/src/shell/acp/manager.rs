@@ -219,9 +219,10 @@ pub(crate) fn open_slash_command_picker(
         let mut manager = manager
             .lock()
             .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-        let commands = manager
+        let agent_commands = manager
             .available_commands_for_buffer(buffer_id)
             .unwrap_or_default();
+        let commands = merge_acp_slash_commands(agent_commands);
         if commands.is_empty() {
             manager.queue_slash_completion(buffer_id, pending_slash_trigger(&trigger));
             return Ok(());
@@ -1145,9 +1146,7 @@ impl AcpManager {
                         model_id,
                         &session.available_commands,
                     );
-                    if !session.available_commands.is_empty()
-                        && let Some(trigger) = self.pending_slash.remove(&session.buffer_id)
-                    {
+                    if let Some(trigger) = self.pending_slash.remove(&session.buffer_id) {
                         self.pending_ui_actions
                             .push(AcpUiAction::OpenSlashCompletion {
                                 buffer_id: session.buffer_id,

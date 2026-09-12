@@ -472,6 +472,14 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                let completion_resolve_changed = match state.refresh_pending_completion_resolve() {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.completion-resolve-refresh", error);
+                        false
+                    }
+                };
+                let autocomplete_changed = autocomplete_changed || completion_resolve_changed;
                 if let Some(frame) = typing_frame.as_mut() {
                     frame.autocomplete_refresh = autocomplete_refresh_started.elapsed();
                 }
