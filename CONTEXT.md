@@ -146,6 +146,30 @@ _Avoid_: completed_at, resolved_at
 A process the editor spawns outside its own address space (for example git or a build tool), distinct from an internal editor command id.
 _Avoid_: job (as the spoken product term), shell command (as the umbrella), subprocess (as the spoken product term)
 
+**Owned Process**:
+A process-tree root Volt started and must terminate as a unit (Windows Job Object or Unix process group), not merely a single PID.
+_Avoid_: Job (except one-shot `editor-jobs` work), Session (protocol/PTY facade), stray process
+
+**Process Registry**:
+The app-wide index of Owned Processes, each with an `OwnedProcessId` and zero or more Workspace tags (shared ownership via Share Key refcount).
+_Avoid_: JobManager (ID minting / one-shot runners only), dictionary-of-workspaces (as the primary key)
+
+**Share Key**:
+An identity used when one Owned Process serves multiple Workspaces (for example a language server for one on-disk root); the process dies when the last Workspace tag is removed or the application quits.
+_Avoid_: SessionKey (LSP implementation detail unless elevated later)
+
+**Process Launch**:
+The sole allowed way Volt starts an Owned Process; every OS spawn goes through it into the Process Registry.
+_Avoid_: ad-hoc Command::spawn in feature code, best-effort registration
+
+**Workspace Close**:
+Teardown for one Workspace: graceful-then-force against Owned Processes tagged with that Workspace (and shared ones whose last tag was removed).
+_Avoid_: application quit
+
+**Application Quit**:
+Teardown for the whole app: one global graceful-then-force against the entire Process Registry (not a loop of Workspace Closes).
+_Avoid_: Workspace Close
+
 **Command Stream**:
 Live stdout/stderr of an External Command written into a popup buffer while the process runs. Default presentation for user-facing long, network, or progress External Commands.
 _Avoid_: terminal session (when meaning this popup), log buffer, streamed job

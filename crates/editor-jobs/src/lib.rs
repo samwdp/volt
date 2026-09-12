@@ -13,7 +13,7 @@ use std::{
 
 /// Human-readable summary of this crate's responsibility.
 pub const ROLE: &str =
-    "Asynchronous job scheduling, process supervision, and compilation task coordination.";
+    "Asynchronous job scheduling, process supervision, Process Registry / Process Launch, and compilation task coordination.";
 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
@@ -38,7 +38,7 @@ pub const PROCESS_SUPERVISOR_EXE_ENV: &str = "VOLT_PROCESS_SUPERVISOR_EXE";
 /// Hidden flag used to run the Volt executable in child-process supervision mode.
 pub const PROCESS_SUPERVISOR_FLAG: &str = "--process-supervisor";
 
-const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
+pub(crate) const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
 
 /// Controls how the supervised child should be launched on the current platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +120,19 @@ pub fn supervised_command(
     args: &[String],
     mode: ProcessSupervisionMode,
 ) -> (String, Vec<String>) {
-    let supervisor_exe = env::var_os(PROCESS_SUPERVISOR_EXE_ENV)
-        .map(PathBuf::from)
+    supervised_command_with_exe(None, program, args, mode)
+}
+
+/// Like [`supervised_command`], but prefers an explicit supervisor executable when provided.
+pub fn supervised_command_with_exe(
+    process_supervisor_exe: Option<&Path>,
+    program: &str,
+    args: &[String],
+    mode: ProcessSupervisionMode,
+) -> (String, Vec<String>) {
+    let supervisor_exe = process_supervisor_exe
+        .map(Path::to_path_buf)
+        .or_else(|| env::var_os(PROCESS_SUPERVISOR_EXE_ENV).map(PathBuf::from))
         .or_else(default_process_supervisor_executable);
     let Some(supervisor_exe) = supervisor_exe else {
         return (program.to_owned(), args.to_vec());
@@ -144,7 +155,7 @@ pub fn supervised_command(
     )
 }
 
-fn default_process_supervisor_executable() -> Option<PathBuf> {
+pub(crate) fn default_process_supervisor_executable() -> Option<PathBuf> {
     let current_exe = env::current_exe().ok()?;
     let stem = current_exe.file_stem()?.to_str()?;
     (stem == "volt").then_some(current_exe)
@@ -883,5 +894,15 @@ fn explicit_windows_env_value<'a>(env: &'a [(String, String)], key: &str) -> Opt
         .find_map(|(entry_key, value)| entry_key.eq_ignore_ascii_case(key).then_some(value))
 }
 
+mod process_registry;
+
+pub use process_registry::{
+    OwnedProcessId, ProcessLaunchSpec, ProcessRegistry, ProcessRegistryError, ShareKey,
+    WorkspaceId, owned_process_pid_alive,
+};
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod process_registry_tests;
