@@ -8,19 +8,15 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use crate::{
-    configure_background_command,
-    repository_files::{
-        FileFingerprint, cache_key, file_fingerprint, resolve_git_dirs, resolve_git_path,
-        worktree_common_dir,
-    },
+use crate::repository_files::{
+    FileFingerprint, cache_key, file_fingerprint, resolve_git_dirs, resolve_git_path,
+    worktree_common_dir,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,14 +473,26 @@ fn probe_numstat(root: &Path) -> (usize, usize) {
 
 fn run_git(root: &Path, args: &[&str], allowed_exit_codes: &[i32]) -> Option<String> {
     spawn_generation().fetch_add(1, Ordering::Relaxed);
-    let mut command = Command::new("git");
-    configure_background_command(&mut command);
-    let output = command.args(args).current_dir(root).output().ok()?;
-    let exit_code = output.status.code()?;
+    let output = run_owned_git(root, args)?;
+    let exit_code = output.exit_code?;
     if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_owned_git(root: &Path, args: &[&str]) -> Option<editor_jobs::CapturedProcessOutput> {
+    let spec = editor_jobs::ProcessLaunchSpec::new(
+        "git",
+        args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+    )
+    .with_mode(editor_jobs::ProcessSupervisionMode::Background)
+    .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
+    .with_current_dir(root);
+    match editor_jobs::run_captured_in_app_registry(spec) {
+        Some(Ok(output)) => Some(output),
+        Some(Err(_)) | None => None,
+    }
 }
 
 #[cfg(test)]

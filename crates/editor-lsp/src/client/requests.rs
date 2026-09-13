@@ -8,7 +8,7 @@ use std::{
 };
 
 use editor_buffer::{TextPoint, TextRange};
-use editor_jobs::WorkspaceId;
+use editor_jobs::{ProcessLaunchSpec, ProcessLaunchStdio, ProcessSupervisionMode, WorkspaceId};
 use lsp_types::TextDocumentSyncKind;
 use serde_json::Value;
 
@@ -593,19 +593,37 @@ impl LspClientManager {
         let workspace_configuration = Arc::new(Mutex::new(SessionWorkspaceConfiguration::new(
             &session, None,
         )));
-        let (child, writer) = spawn_inert_child().map_err(|error| {
-            LspClientError::Protocol(format!(
-                "failed to spawn inert Language Server Session for `{server_id}`: {error}"
-            ))
+        #[cfg(windows)]
+        let (program, args) = ("cmd", vec!["/C".to_owned(), "more".to_owned()]);
+        #[cfg(not(windows))]
+        let (program, args) = ("sh", vec!["-c".to_owned(), "cat >/dev/null".to_owned()]);
+        let mut launched = {
+            let mut registry = self.process_registry.lock().map_err(|_| {
+                LspClientError::Protocol("process registry mutex poisoned".to_owned())
+            })?;
+            registry
+                .launch(
+                    ProcessLaunchSpec::new(program, args)
+                        .with_mode(ProcessSupervisionMode::Background)
+                        .with_stdio(ProcessLaunchStdio::Protocol),
+                )
+                .map_err(|error| {
+                    LspClientError::Protocol(format!(
+                        "failed to launch inert Language Server Session for `{server_id}`: {error}"
+                    ))
+                })?
+        };
+        let writer = launched.stdin.take().ok_or_else(|| {
+            LspClientError::Protocol("inert language server child is missing stdin pipe".to_owned())
         })?;
         let mut diagnostics_by_path = BTreeMap::new();
         diagnostics_by_path.insert(path.to_path_buf(), diagnostics);
         Ok(Arc::new(LspSessionHandle {
             key: SessionKey::new(server_id, session.root().map(PathBuf::as_path)),
             session,
-            child: Some(Mutex::new(child)),
-            owned_process_id: None,
-            process_registry: None,
+            child: None,
+            owned_process_id: Some(launched.id),
+            process_registry: Some(Arc::clone(&self.process_registry)),
             writer: Arc::new(Mutex::new(writer)),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),

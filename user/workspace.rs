@@ -747,6 +747,10 @@ mod tests {
         run_git(&root, &["init", "-q"])?;
         run_git(&root, &["add", ".gitignore", "src/deep/nested.rs"])?;
 
+        let registry =
+            std::sync::Arc::new(std::sync::Mutex::new(editor_jobs::ProcessRegistry::new()));
+        editor_jobs::install_app_process_registry(registry);
+
         let mut context = PickerProviderContext::new(
             "workspace.files",
             "Workspace Files",

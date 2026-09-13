@@ -1,7 +1,10 @@
 use std::io::{BufRead as _, BufReader, Read as _};
-use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
-use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
+use editor_jobs::{
+    ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry, ProcessSupervisionMode,
+    WorkspaceId as ProcessWorkspaceId,
+};
 use editor_lsp::{
     DiagnosticSeverity as WorkspaceDiagnosticSeverity, LspDocumentTextEdits, LspWorkspaceDiagnostic,
 };
@@ -28,7 +31,12 @@ pub(super) struct SearchPickerData {
     pub(super) selected_index: usize,
 }
 
-pub(super) fn workspace_search_entries(root: &Path, query: &str) -> SearchPickerData {
+pub(super) fn workspace_search_entries(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: ProcessWorkspaceId,
+    root: &Path,
+    query: &str,
+) -> SearchPickerData {
     let query = query.trim();
     if query.is_empty() {
         return SearchPickerData {
@@ -37,7 +45,7 @@ pub(super) fn workspace_search_entries(root: &Path, query: &str) -> SearchPicker
         };
     }
 
-    let entries = match workspace_search_output(root, query) {
+    let entries = match workspace_search_output(process_registry, workspace_id, root, query) {
         Ok(output) => {
             let parsed = parse_workspace_search_entries(root, query, &output);
             if parsed.is_empty() {
@@ -65,16 +73,27 @@ pub(super) fn workspace_search_entries(root: &Path, query: &str) -> SearchPicker
     }
 }
 
-pub(super) fn workspace_search_output(root: &Path, query: &str) -> Result<String, String> {
-    match workspace_search_rg_output(root, query) {
+pub(super) fn workspace_search_output(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: ProcessWorkspaceId,
+    root: &Path,
+    query: &str,
+) -> Result<String, String> {
+    match workspace_search_rg_output(process_registry, workspace_id, root, query) {
         Ok(output) => Ok(output),
-        Err(rg_error) => workspace_search_grep_output(root, query).map_err(|grep_error| {
-            format!("workspace search requires `rg` or `grep`: {rg_error}; {grep_error}")
-        }),
+        Err(rg_error) => workspace_search_grep_output(process_registry, workspace_id, root, query)
+            .map_err(|grep_error| {
+                format!("workspace search requires `rg` or `grep`: {rg_error}; {grep_error}")
+            }),
     }
 }
 
-pub(super) fn workspace_search_rg_output(root: &Path, query: &str) -> Result<String, String> {
+pub(super) fn workspace_search_rg_output(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: ProcessWorkspaceId,
+    root: &Path,
+    query: &str,
+) -> Result<String, String> {
     let mut args = vec![
         "--vimgrep".to_owned(),
         "--no-heading".to_owned(),
@@ -88,10 +107,15 @@ pub(super) fn workspace_search_rg_output(root: &Path, query: &str) -> Result<Str
     args.push("--".to_owned());
     args.push(query.to_owned());
     args.push(".".to_owned());
-    run_search_command(root, "rg", &args)
+    run_search_command(process_registry, workspace_id, root, "rg", &args)
 }
 
-pub(super) fn workspace_search_grep_output(root: &Path, query: &str) -> Result<String, String> {
+pub(super) fn workspace_search_grep_output(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: ProcessWorkspaceId,
+    root: &Path,
+    query: &str,
+) -> Result<String, String> {
     let mut args = vec![
         "-R".to_owned(),
         "-n".to_owned(),
@@ -105,39 +129,39 @@ pub(super) fn workspace_search_grep_output(root: &Path, query: &str) -> Result<S
     args.push("--".to_owned());
     args.push(query.to_owned());
     args.push(".".to_owned());
-    run_search_command(root, "grep", &args)
+    run_search_command(process_registry, workspace_id, root, "grep", &args)
 }
 
 pub(super) fn run_search_command(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: ProcessWorkspaceId,
     root: &Path,
     command: &str,
     args: &[String],
 ) -> Result<String, String> {
-    let (program, args) = supervised_command_if_resolved(
-        command,
-        args,
-        &[],
-        None,
-        ProcessSupervisionMode::Background,
-    );
-    let mut process = Command::new(&program);
-    configure_background_command(&mut process);
-    let mut child = process
-        .args(&args)
-        .current_dir(root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to run `{command}`: {error}"))?;
+    let launch_spec = ProcessLaunchSpec::new(command, args.to_vec())
+        .with_workspace(workspace_id)
+        .with_mode(ProcessSupervisionMode::Background)
+        .with_stdio(ProcessLaunchStdio::Piped)
+        .with_current_dir(root);
 
-    let stdout = child
+    let mut registry = process_registry
+        .lock()
+        .map_err(|_| "process registry mutex poisoned".to_owned())?;
+    let mut launched = registry
+        .launch(launch_spec)
+        .map_err(|error| format!("failed to run `{command}`: {error}"))?;
+    let owned_id = launched.id;
+    let stdout = launched
         .stdout
         .take()
         .ok_or_else(|| format!("failed to capture `{command}` stdout"))?;
-    let stderr = child
+    let stderr = launched
         .stderr
         .take()
         .ok_or_else(|| format!("failed to capture `{command}` stderr"))?;
+    drop(registry);
+
     let stderr_reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
         let mut stderr = BufReader::new(stderr);
         let mut bytes = Vec::new();
@@ -148,22 +172,31 @@ pub(super) fn run_search_command(
     let (stdout, reached_limit) = collect_search_output(stdout, WORKSPACE_SEARCH_OUTPUT_LIMIT)
         .map_err(|error| format!("failed to read `{command}` output: {error}"))?;
     if reached_limit {
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Ok(mut registry) = process_registry.lock() {
+            let _ = registry.teardown_process(owned_id, std::time::Duration::ZERO);
+        }
         let _ = stderr_reader.join();
         return Ok(stdout);
     }
 
-    let status = child
-        .wait()
-        .map_err(|error| format!("failed to wait for `{command}`: {error}"))?;
+    if let Ok(mut registry) = process_registry.lock() {
+        while registry.is_alive(owned_id) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     let stderr = stderr_reader
         .join()
         .map_err(|_| format!("failed to read `{command}` stderr"))?
         .map_err(|error| format!("failed to read `{command}` stderr: {error}"))?;
-    let exit_code = status
-        .code()
-        .ok_or_else(|| format!("`{command}` terminated unexpectedly"))?;
+    let exit_code = {
+        let mut registry = process_registry
+            .lock()
+            .map_err(|_| "process registry mutex poisoned".to_owned())?;
+        let exit_code = registry.exit_code(owned_id);
+        let _ = registry.reclaim(owned_id);
+        exit_code
+    };
+    let exit_code = exit_code.ok_or_else(|| format!("`{command}` terminated unexpectedly"))?;
     if exit_code != 0 && exit_code != 1 {
         let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
         let message = if stderr.is_empty() {

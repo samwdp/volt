@@ -3,7 +3,7 @@
 mod probe;
 mod repository_files;
 
-use std::{error::Error, fmt, io, path::Path, process::Command};
+use std::{error::Error, fmt, io, path::Path};
 
 pub use probe::{
     GitProbeSnapshot, git_probe_generation, git_probe_snapshot, git_probe_snapshot_with_numstat,
@@ -23,18 +23,6 @@ pub const ROLE: &str = "Git status parsing, repository file discovery, identity 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
     ROLE
-}
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-pub(crate) fn configure_background_command(_command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-
-        _command.creation_flags(CREATE_NO_WINDOW);
-    }
 }
 
 /// One file entry in a git status listing.

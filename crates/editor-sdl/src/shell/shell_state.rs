@@ -207,6 +207,7 @@ impl ShellState {
             .insert(Mutex::new(TerminalBufferState::default()));
         runtime.services_mut().insert(FormatterRegistry::default());
         let process_registry = Arc::new(Mutex::new(editor_jobs::ProcessRegistry::new()));
+        editor_jobs::install_app_process_registry(Arc::clone(&process_registry));
         runtime
             .services_mut()
             .insert(Arc::clone(&process_registry));

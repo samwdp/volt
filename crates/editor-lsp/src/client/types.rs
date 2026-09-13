@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    process::{ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1888,7 +1888,8 @@ pub(crate) fn note_session_disconnect_diagnostics(
     }
 }
 
-pub(crate) fn spawn_inert_child() -> std::io::Result<(Child, ChildStdin)> {
+#[cfg(test)]
+pub(crate) fn spawn_inert_child() -> std::io::Result<(std::process::Child, ChildStdin)> {
     #[cfg(windows)]
     let mut child = {
         use std::os::windows::process::CommandExt as _;

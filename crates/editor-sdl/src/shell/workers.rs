@@ -120,6 +120,8 @@ struct PendingWorkspaceSearchRequest {
 
 struct WorkspaceSearchWorkerRequest {
     request_id: u64,
+    workspace_id: editor_jobs::WorkspaceId,
+    process_registry: Arc<Mutex<editor_jobs::ProcessRegistry>>,
     root: PathBuf,
     query: String,
 }
@@ -148,7 +150,12 @@ impl WorkspaceSearchWorkerState {
                 while let Ok(newer_request) = request_rx.try_recv() {
                     request = newer_request;
                 }
-                let data = workspace_search_entries(&request.root, &request.query);
+                let data = workspace_search_entries(
+                    &request.process_registry,
+                    request.workspace_id,
+                    &request.root,
+                    &request.query,
+                );
                 if let Ok(mut results) = worker_results.lock() {
                     results.push(WorkspaceSearchWorkerResult {
                         request_id: request.request_id,
@@ -175,13 +182,21 @@ impl WorkspaceSearchWorkerState {
         self.pending = None;
     }
 
-    fn schedule(&mut self, root: PathBuf, query: String) {
+    fn schedule(
+        &mut self,
+        workspace_id: editor_jobs::WorkspaceId,
+        process_registry: Arc<Mutex<editor_jobs::ProcessRegistry>>,
+        root: PathBuf,
+        query: String,
+    ) {
         const SEARCH_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.pending = Some(PendingWorkspaceSearchRequest {
             due_at: Instant::now() + SEARCH_REFRESH_DEBOUNCE,
             request: WorkspaceSearchWorkerRequest {
                 request_id: self.next_request_id,
+                workspace_id,
+                process_registry,
                 root,
                 query,
             },

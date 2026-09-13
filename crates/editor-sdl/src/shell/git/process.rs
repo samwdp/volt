@@ -2,7 +2,6 @@ use super::super::*;
 
 use super::remote::*;
 use super::status::*;
-use std::process::Stdio;
 
 pub(crate) fn git_args_with_no_pager(command: &str, extra: &[&str]) -> Vec<String> {
     let mut args = Vec::with_capacity(2 + extra.len());
@@ -18,7 +17,7 @@ pub(crate) fn git_command_output_background(
     allowed_exit_codes: &[i32],
 ) -> Option<String> {
     let output = run_direct_git_command(root, args).ok()?;
-    let exit_code = output.status.code()?;
+    let exit_code = output.exit_code?;
     if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
         return None;
     }
@@ -106,7 +105,7 @@ pub(crate) fn git_read_command_output_allow_exit_codes(
     allowed_exit_codes: &[i32],
 ) -> Result<String, String> {
     let output = run_direct_git_command(root, args)?;
-    let exit_code = output.status.code().ok_or_else(|| {
+    let exit_code = output.exit_code.ok_or_else(|| {
         format!(
             "git {label} failed to return an exit code: {}",
             command_output_transcript(&output)
@@ -124,24 +123,30 @@ pub(crate) fn git_read_command_output_allow_exit_codes(
 pub(crate) fn run_direct_git_command(
     root: &Path,
     args: &[&str],
-) -> Result<std::process::Output, String> {
-    let mut command = Command::new("git");
-    configure_background_command(&mut command);
-    command
-        .args(args)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| {
-            format!(
-                "failed to run git {:?} in {}: {error}",
-                args,
-                root.display()
-            )
-        })
+) -> Result<editor_jobs::CapturedProcessOutput, String> {
+    let spec = editor_jobs::ProcessLaunchSpec::new(
+        "git",
+        args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+    )
+    .with_mode(editor_jobs::ProcessSupervisionMode::Background)
+    .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
+    .with_current_dir(root);
+    match editor_jobs::run_captured_in_app_registry(spec) {
+        Some(Ok(output)) => Ok(output),
+        Some(Err(error)) => Err(format!(
+            "failed to run git {:?} in {}: {error}",
+            args,
+            root.display()
+        )),
+        None => Err(format!(
+            "failed to run git {:?} in {}: app Process Registry is not installed",
+            args,
+            root.display()
+        )),
+    }
 }
 
-pub(crate) fn command_output_transcript(output: &std::process::Output) -> String {
+pub(crate) fn command_output_transcript(output: &editor_jobs::CapturedProcessOutput) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.is_empty() {

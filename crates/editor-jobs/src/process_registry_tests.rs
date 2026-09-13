@@ -597,3 +597,90 @@ fn language_tooling_single_tagged_helper_dies_on_quit() {
         !owned_process_pid_alive(pid)
     }));
 }
+
+#[test]
+fn run_captured_registers_then_reclaims_silent_command() {
+    let mut registry = ProcessRegistry::new();
+    let workspace = WorkspaceId::from_raw(91);
+    #[cfg(windows)]
+    let (program, args) = (
+        "cmd".to_owned(),
+        vec!["/C".to_owned(), "echo captured-ok".to_owned()],
+    );
+    #[cfg(unix)]
+    let (program, args) = ("printf".to_owned(), vec!["captured-ok".to_owned()]);
+
+    let output = must(
+        registry.run_captured(
+            ProcessLaunchSpec::new(program, args)
+                .with_workspace(workspace)
+                .with_stdio(ProcessLaunchStdio::Piped),
+        ),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("captured-ok"),
+        "unexpected stdout `{stdout}`"
+    );
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(registry.alive_count(), 0);
+}
+
+#[test]
+fn release_shaped_quit_leaves_no_strays_and_frees_project_dir() {
+    let project_dir = unique_temp_path("volt-release-quit-project");
+    fs::create_dir_all(&project_dir).expect("create project dir");
+    let lock_probe = project_dir.join("lock-probe.txt");
+    fs::write(&lock_probe, b"probe").expect("write lock probe");
+
+    let registry = Arc::new(Mutex::new(ProcessRegistry::new()));
+    let mut jobs = JobManager::with_registry(Arc::clone(&registry));
+    let workspace = WorkspaceId::from_raw(101);
+
+    let (program, args) = synthetic_sleep_command(60);
+    let job_handle = must(
+        jobs.spawn(
+            JobSpec::command("release-quit-job", program, args)
+                .with_workspace(workspace)
+                .with_cwd(project_dir.clone()),
+        ),
+    );
+
+    let interactive_pid = spawn_unmanaged_sleep();
+    let (helper_id, interactive_id, helper_pid) = {
+        let mut registry = registry.lock().expect("registry");
+        let helper_id = launch_id(
+            &mut registry,
+            with_supervisor(
+                ProcessLaunchSpec::new(
+                    synthetic_sleep_command(60).0,
+                    synthetic_sleep_command(60).1,
+                )
+                .with_workspace(workspace)
+                .with_share_key(ShareKey::new("helper:release-quit"))
+                .with_stdio(ProcessLaunchStdio::Protocol)
+                .with_current_dir(&project_dir),
+            ),
+        );
+        let interactive_id = must(registry.launch_interactive_root(interactive_pid, [workspace]));
+        let helper_pid = registry.root_pid(helper_id).expect("helper pid");
+        (helper_id, interactive_id, helper_pid)
+    };
+    assert!(owned_process_pid_alive(helper_pid));
+    assert!(owned_process_pid_alive(interactive_pid));
+
+    {
+        let mut registry = registry.lock().expect("registry");
+        must(registry.application_quit(Duration::from_millis(200)));
+        assert!(!registry.is_alive(helper_id));
+        assert!(!registry.is_alive(interactive_id));
+    }
+    let _ = job_handle.wait();
+    assert!(wait_until(Duration::from_secs(3), || {
+        !owned_process_pid_alive(helper_pid) && !owned_process_pid_alive(interactive_pid)
+    }));
+
+    // Project directory must be free of Volt-started locks after quit.
+    fs::remove_file(&lock_probe).expect("remove lock probe after quit");
+    fs::remove_dir_all(&project_dir).expect("remove project dir after quit");
+}

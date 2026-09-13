@@ -18,8 +18,8 @@ use std::{
 mod process_registry;
 
 pub use process_registry::{
-    LaunchedProcess, OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry,
-    ProcessRegistryError, ShareKey, WorkspaceId, language_server_share_key,
+    CapturedProcessOutput, LaunchedProcess, OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio,
+    ProcessRegistry, ProcessRegistryError, ShareKey, WorkspaceId, language_server_share_key,
     owned_process_pid_alive,
 };
 
@@ -50,6 +50,37 @@ pub const PROCESS_SUPERVISOR_EXE_ENV: &str = "VOLT_PROCESS_SUPERVISOR_EXE";
 pub const PROCESS_SUPERVISOR_FLAG: &str = "--process-supervisor";
 
 pub(crate) const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
+
+static APP_PROCESS_REGISTRY: Mutex<Option<Arc<Mutex<ProcessRegistry>>>> = Mutex::new(None);
+
+/// Installs the app-wide Process Registry used by library crates that cannot
+/// thread `EditorRuntime` (for example `editor-git` probes). Shell and bootstrap
+/// must call this with the same registry stored in runtime services.
+pub fn install_app_process_registry(registry: Arc<Mutex<ProcessRegistry>>) {
+    if let Ok(mut guard) = APP_PROCESS_REGISTRY.lock() {
+        *guard = Some(registry);
+    }
+}
+
+/// Returns the app-wide Process Registry when shell/bootstrap has installed it.
+pub fn app_process_registry() -> Option<Arc<Mutex<ProcessRegistry>>> {
+    APP_PROCESS_REGISTRY
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(Arc::clone))
+}
+
+/// Runs a Silent Command through the app Process Registry when installed.
+///
+/// Returns `None` when no app registry is installed so callers can skip spawning
+/// outside Process Launch instead of falling back to ad-hoc `Command::spawn`.
+pub fn run_captured_in_app_registry(
+    spec: ProcessLaunchSpec,
+) -> Option<Result<CapturedProcessOutput, ProcessRegistryError>> {
+    let registry = app_process_registry()?;
+    let mut registry = registry.lock().ok()?;
+    Some(registry.run_captured(spec))
+}
 
 /// Controls how the supervised child should be launched on the current platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -520,6 +551,8 @@ impl Default for JobManager {
 
 impl JobManager {
     /// Creates a new job manager with a private Process Registry.
+    ///
+    /// Prefer [`Self::with_registry`] in product code so jobs share the app Process Registry.
     pub fn new() -> Self {
         Self::with_registry(Arc::new(Mutex::new(ProcessRegistry::new())))
     }

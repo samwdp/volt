@@ -6,6 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    io::Read,
     path::{Path, PathBuf},
     process::{ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     thread,
@@ -188,6 +189,24 @@ pub struct LaunchedProcess {
     pub stderr: Option<ChildStderr>,
 }
 
+/// Captured stdout/stderr from a Silent Command run through Process Launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedProcessOutput {
+    /// Bytes written to stdout before the tree exited (or was torn down).
+    pub stdout: Vec<u8>,
+    /// Bytes written to stderr before the tree exited (or was torn down).
+    pub stderr: Vec<u8>,
+    /// Exit code when the tree exited on its own.
+    pub exit_code: Option<i32>,
+}
+
+impl CapturedProcessOutput {
+    /// Reports whether the process exited with status zero.
+    pub fn succeeded(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+}
+
 /// Builds a Share Key for a language server serving one on-disk root.
 pub fn language_server_share_key(server_id: &str, root: Option<&Path>) -> ShareKey {
     match root {
@@ -293,6 +312,52 @@ impl ProcessRegistry {
             stdin,
             stdout,
             stderr,
+        })
+    }
+
+    /// Silent Command helper: Process Launch with piped stdio, wait for exit,
+    /// capture output, then reclaim. Application Quit can still tear the tree
+    /// down if the wait is interrupted by a concurrent quit sweep.
+    pub fn run_captured(
+        &mut self,
+        mut spec: ProcessLaunchSpec,
+    ) -> Result<CapturedProcessOutput, ProcessRegistryError> {
+        if matches!(spec.stdio, ProcessLaunchStdio::Null) {
+            spec = spec.with_stdio(ProcessLaunchStdio::Piped);
+        }
+        let mut launched = self.launch(spec)?;
+        let id = launched.id;
+        let stdout_reader = launched.stdout.take().map(|mut stdout| {
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = stdout.read_to_end(&mut buffer);
+                buffer
+            })
+        });
+        let stderr_reader = launched.stderr.take().map(|mut stderr| {
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = stderr.read_to_end(&mut buffer);
+                buffer
+            })
+        });
+
+        while self.is_alive(id) {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let exit_code = self.exit_code(id);
+        let stdout = stdout_reader
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let stderr = stderr_reader
+            .and_then(|handle| handle.join().ok())
+            .unwrap_or_default();
+        let _ = self.reclaim(id);
+        Ok(CapturedProcessOutput {
+            stdout,
+            stderr,
+            exit_code,
         })
     }
 

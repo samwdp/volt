@@ -1206,6 +1206,9 @@ dependencies = [
 [[package]]
 name = "editor-git"
 version = "0.1.0"
+dependencies = [
+ "editor-jobs",
+]
 
 [[package]]
 name = "editor-icons"
@@ -5464,6 +5467,7 @@ dependencies = [
  "editor-fs",
  "editor-git",
  "editor-icons",
+ "editor-jobs",
  "editor-plugin-api",
  "editor-syntax",
  "editor-theme",

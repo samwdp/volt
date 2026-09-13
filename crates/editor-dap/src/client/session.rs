@@ -87,7 +87,10 @@ pub struct DapClientManager {
 }
 
 impl DapClientManager {
-    /// Creates a manager around a populated adapter registry.
+    /// Test helper that embeds a private Process Registry.
+    ///
+    /// Product code must use [`Self::with_process_registry`] with the app-wide registry.
+    #[cfg(test)]
     pub fn new(registry: DebugAdapterRegistry) -> Self {
         Self::with_process_registry(registry, Arc::new(Mutex::new(ProcessRegistry::new())))
     }

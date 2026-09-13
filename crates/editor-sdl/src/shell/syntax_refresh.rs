@@ -185,7 +185,9 @@ fn compute_buffer_syntax(
         *parse_session = None;
         return (None, None);
     };
-    let syntax_result = match match highlight_window {
+    // Product grammar installs go through Process Launch via treesitter_install
+    // streamed commands. Do not auto-spawn clone/compile outside the registry.
+    let syntax_result = match highlight_window {
         Some(window) => registry.highlight_buffer_for_language_window_with_session(
             &language_id,
             text,
@@ -195,31 +197,6 @@ fn compute_buffer_syntax(
         None => {
             registry.highlight_buffer_for_language_with_session(&language_id, text, parse_session)
         }
-    } {
-        Ok(snapshot) => Ok(snapshot),
-        Err(SyntaxError::GrammarNotInstalled {
-            language_id: missing_language_id,
-            ..
-        }) => {
-            if let Err(error) = registry.install_language(&missing_language_id) {
-                Err(error)
-            } else {
-                match highlight_window {
-                    Some(window) => registry.highlight_buffer_for_language_window_with_session(
-                        &language_id,
-                        text,
-                        window,
-                        parse_session,
-                    ),
-                    None => registry.highlight_buffer_for_language_with_session(
-                        &language_id,
-                        text,
-                        parse_session,
-                    ),
-                }
-            }
-        }
-        Err(error) => Err(error),
     };
     (Some(language_id), Some(syntax_result))
 }

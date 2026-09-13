@@ -15,8 +15,14 @@ workspace = true
 
 [dependencies]
 
+[dependencies.editor-jobs]
+path = "../editor-jobs"
+
 [lib]
 path = "src/lib.rs"
 name = "editor_git"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

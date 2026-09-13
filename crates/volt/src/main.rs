@@ -713,7 +713,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         .services_mut()
         .insert(StartupProfile { name: "foundation" });
     runtime.services_mut().insert(EventLog::default());
-    runtime.services_mut().insert(Mutex::new(JobManager::new()));
+    let process_registry = Arc::new(Mutex::new(editor_jobs::ProcessRegistry::new()));
+    editor_jobs::install_app_process_registry(Arc::clone(&process_registry));
+    runtime.services_mut().insert(Arc::clone(&process_registry));
+    runtime
+        .services_mut()
+        .insert(Mutex::new(JobManager::with_registry(process_registry)));
 
     let window_id = runtime.model_mut().create_window("volt");
     let workspace_id = runtime

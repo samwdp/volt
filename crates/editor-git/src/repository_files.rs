@@ -3,7 +3,6 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Component, Path, PathBuf},
-    process::Command,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -11,7 +10,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::{RepositoryFilesError, configure_background_command};
+use crate::RepositoryFilesError;
 
 /// Byte cap for Workspace Files picker previews.
 pub const REPOSITORY_FILE_PREVIEW_MAX_BYTES: u64 = 16 * 1024;
@@ -103,28 +102,43 @@ pub fn list_repository_files_uncached(
     root: impl AsRef<Path>,
 ) -> Result<Vec<PathBuf>, RepositoryFilesError> {
     let root = root.as_ref();
-    let mut command = Command::new("git");
-    configure_background_command(&mut command);
-    let output = command
-        .args([
+    let spec = editor_jobs::ProcessLaunchSpec::new(
+        "git",
+        [
             "ls-files",
             "-z",
             "--cached",
             "--others",
             "--exclude-standard",
             "--full-name",
-        ])
-        .current_dir(root)
-        .output()
-        .map_err(RepositoryFilesError::Io)?;
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>(),
+    )
+    .with_mode(editor_jobs::ProcessSupervisionMode::Background)
+    .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
+    .with_current_dir(root);
+    let output = match editor_jobs::run_captured_in_app_registry(spec) {
+        Some(Ok(output)) => output,
+        Some(Err(error)) => {
+            return Err(RepositoryFilesError::CommandFailed(error.to_string()));
+        }
+        None => {
+            return Err(RepositoryFilesError::CommandFailed(
+                "app Process Registry is not installed; cannot spawn git outside Process Launch"
+                    .to_owned(),
+            ));
+        }
+    };
 
-    if !output.status.success() {
+    if !output.succeeded() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let message = if stderr.is_empty() {
             format!(
-                "git ls-files failed in `{}` with status {}",
+                "git ls-files failed in `{}` with status {:?}",
                 root.display(),
-                output.status
+                output.exit_code
             )
         } else {
             format!("git ls-files failed in `{}`: {stderr}", root.display())

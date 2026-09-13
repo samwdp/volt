@@ -47,6 +47,9 @@ features = ["derive"]
 [dev-dependencies.editor-buffer]
 path = "../crates/editor-buffer"
 
+[dev-dependencies.editor-jobs]
+path = "../crates/editor-jobs"
+
 [dev-dependencies.editor-syntax]
 path = "../crates/editor-syntax"
 

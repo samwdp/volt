@@ -14,7 +14,10 @@ use std::sync::{Mutex, MutexGuard};
 
 fn repository_file_list_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let registry = std::sync::Arc::new(Mutex::new(editor_jobs::ProcessRegistry::new()));
+    editor_jobs::install_app_process_registry(registry);
+    guard
 }
 
 fn configure_git_identity(root: &Path) -> Result<(), Box<dyn std::error::Error>> {

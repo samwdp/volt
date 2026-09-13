@@ -391,7 +391,19 @@ impl ShellState {
                 );
             }
             Some(DynamicPickerSearch::Workspace { root, query }) => {
-                self.ui_mut()?.workspace_search_worker.schedule(root, query);
+                let workspace_id = self
+                    .runtime
+                    .model()
+                    .active_workspace_id()
+                    .map_err(|error| ShellError::Runtime(error.to_string()))?;
+                let process_registry = process_registry_service(&self.runtime)
+                    .map_err(ShellError::Runtime)?;
+                self.ui_mut()?.workspace_search_worker.schedule(
+                    editor_jobs::WorkspaceId::from_raw(workspace_id.get()),
+                    process_registry,
+                    root,
+                    query,
+                );
             }
             None => {}
         }
