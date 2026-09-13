@@ -35,6 +35,9 @@ path = "../../crates/editor-git"
 [dependencies.editor-icons]
 path = "../../crates/editor-icons"
 
+[dependencies.editor-jobs]
+path = "../../crates/editor-jobs"
+
 [dependencies.editor-lsp]
 path = "../../crates/editor-lsp"
 

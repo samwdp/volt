@@ -121,7 +121,7 @@ mod tests {
     use crate::treesittercontext_shared::{
         context_icon, extract_control_flow_header, extract_signature, summarize_context,
     };
-    use editor_syntax::{SyntaxNodeContext, SyntaxPoint};
+    use editor_plugin_api::{SyntaxNodeContext, SyntaxPoint};
 
     #[test]
     fn extract_signature_drops_modifiers_and_return_types() {

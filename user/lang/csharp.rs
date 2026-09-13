@@ -1,7 +1,7 @@
+use editor_plugin_api::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginPackage,
 };
-use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
 /// Returns the metadata for the C# language package.
 pub fn package() -> PluginPackage {

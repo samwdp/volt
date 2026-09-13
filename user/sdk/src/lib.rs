@@ -8,23 +8,38 @@ use abi_stable::{
     std_types::{ROption, RString, RVec},
 };
 
-pub use editor_core::{Section, SectionAction, SectionItem, SectionTree};
+pub use editor_buffer::TextBuffer;
+pub use editor_core::{
+    DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS, Section, SectionAction, SectionItem, SectionTree,
+};
 pub use editor_dap::{
     BreakpointState, BreakpointStore, BreakpointToggle, DapClientError, DapClientManager,
     DapLogEntry, DapLogSnapshot, DapSessionInfo, DebugAdapterRegistry, DebugAdapterRootStrategy,
     DebugAdapterSpec, DebugAdapterTransport, DebugConfiguration, DebugRequestKind,
     DebugSessionPlan, StoredBreakpoint,
 };
-pub use editor_fs::{DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot};
-pub use editor_git::{GitStatusSnapshot, StatusEntry};
-pub use editor_icons::{IconFontCategory, IconFontSymbol};
+pub use editor_fs::{
+    DirectoryEntry, DirectoryEntryKind, ProjectCandidate, ProjectKind, ProjectSearchRoot,
+    project_discovery_for_picker, project_discovery_snapshot, reset_project_discovery_cache,
+    set_project_discovery_persist_path_for_test, set_project_discovery_ttl_for_test,
+    set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
+};
+pub use editor_git::{
+    GitLogEntry, GitStatusSnapshot, RepositoryStatus, StatusEntry, list_repository_files,
+    parse_stash_list, parse_status,
+};
+pub use editor_icons::{
+    IconFontCategory, IconFontSymbol, all_symbols, find_symbol, seti_directory_icon, seti_file_icon,
+};
+pub use editor_jobs::{ProcessRegistry, install_app_process_registry};
 pub use editor_lsp::{
     InstallRecipe, LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind,
 };
 pub use editor_syntax::{
     CaptureThemeMapping, GrammarSource, LanguageConfiguration, SyntaxNodeContext, SyntaxPoint,
+    SyntaxRegistry,
 };
-pub use editor_theme::{Color, Theme, ThemeOption};
+pub use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
 
 pub use abi::{
     AbiAcpClient, AbiAutocompleteProvider, AbiBrowserFeatureSpec, AbiCaptureThemeMapping, AbiColor,

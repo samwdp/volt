@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
+use editor_plugin_api::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 use editor_plugin_api::{
     MarkdownPrettyConfig, MarkdownPrettyIcon, PluginAction, PluginCommand, PluginHookBinding,
     PluginHookDeclaration, PluginKeyBinding, PluginKeymapScope, PluginPackage, PluginVimMode,
 };
-use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
 /// Returns the metadata for the Markdown language package.
 pub fn package() -> PluginPackage {
@@ -78,7 +78,7 @@ pub fn pretty_config() -> MarkdownPrettyConfig {
 
 /// treesitter node kind → icon map shipped as the default Pretty style.
 pub fn default_pretty_icons() -> Vec<MarkdownPrettyIcon> {
-    use editor_icons::symbols::{fa, md, oct};
+    use editor_plugin_api::symbols::{fa, md, oct};
     let entries: [(&str, &str); 22] = [
         ("atx_h1_marker", fa::FA_CIRCLE_DOT),
         ("atx_h2_marker", fa::FA_CIRCLE_THIN),

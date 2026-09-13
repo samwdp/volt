@@ -1,4 +1,4 @@
-use editor_syntax::LanguageConfiguration;
+use editor_plugin_api::LanguageConfiguration;
 
 /// Bash language support and theme mappings.
 pub mod bash;

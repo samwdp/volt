@@ -1,10 +1,10 @@
-use editor_core::{Section, SectionAction, SectionItem, SectionTree};
-use editor_git::{GitStatusSnapshot, StatusEntry};
 use editor_plugin_api::{
     ContextHelpEntry, ContextHelpSpec, GitCommandBinding, GitFeatureSpec, GitPrefixBinding,
     GitStatusPrefix, PluginAction, PluginCommand, PluginPackage, buffer_kinds, git_actions,
     git_hooks, git_sections,
 };
+use editor_plugin_api::{GitStatusSnapshot, StatusEntry};
+use editor_plugin_api::{Section, SectionAction, SectionItem, SectionTree};
 
 pub const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;
 pub const GIT_COMMIT_KIND: &str = buffer_kinds::GIT_COMMIT;
@@ -1399,7 +1399,7 @@ fn section_with_placeholder(id: &str, title: String, items: Vec<SectionItem>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_git::GitLogEntry;
+    use editor_plugin_api::GitLogEntry;
 
     fn log_entry(hash: &str, summary: &str) -> GitLogEntry {
         GitLogEntry::new(hash.to_owned(), summary.to_owned())
@@ -1453,8 +1453,8 @@ mod tests {
 
     #[test]
     fn status_entries_and_untracked_items_omit_status_words() {
-        let status =
-            editor_git::parse_status(" M src/main.rs\n?? notes.txt\n").expect("status snapshot");
+        let status = editor_plugin_api::parse_status(" M src/main.rs\n?? notes.txt\n")
+            .expect("status snapshot");
         assert_eq!(
             status_entry_label(&status.unstaged()[0], false),
             format!(
@@ -1476,9 +1476,9 @@ mod tests {
 
     #[test]
     fn stashes_display_compact_indices() {
-        let snapshot = GitStatusSnapshot::default().with_stashes(editor_git::parse_stash_list(
-            "stash@{0}: WIP on master: overnight todo",
-        ));
+        let snapshot = GitStatusSnapshot::default().with_stashes(
+            editor_plugin_api::parse_stash_list("stash@{0}: WIP on master: overnight todo"),
+        );
         let section = stashes_section(&snapshot);
         assert_eq!(
             section.items()[0].text(),
@@ -1532,7 +1532,8 @@ mod tests {
     #[test]
     fn status_sections_render_change_sections_as_top_level_headers() {
         let snapshot = GitStatusSnapshot::default().with_status(
-            editor_git::parse_status(" M src/main.rs\n?? notes.txt\n").expect("status snapshot"),
+            editor_plugin_api::parse_status(" M src/main.rs\n?? notes.txt\n")
+                .expect("status snapshot"),
         );
         let sections = status_sections(&snapshot);
         let status = sections
@@ -1607,7 +1608,7 @@ mod tests {
         let snapshot = GitStatusSnapshot::default()
             .with_head(Some(log_entry("abc1234", "seed")))
             .with_upstreams(Some("origin/master".to_owned()), None)
-            .with_status(editor_git::RepositoryStatus::new(
+            .with_status(editor_plugin_api::RepositoryStatus::new(
                 Some("master".to_owned()),
                 0,
                 0,
@@ -1644,14 +1645,15 @@ mod tests {
 
     #[test]
     fn commit_buffer_template_shows_initial_commit_without_head() {
-        let snapshot = GitStatusSnapshot::default().with_status(editor_git::RepositoryStatus::new(
-            Some("master".to_owned()),
-            0,
-            0,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ));
+        let snapshot =
+            GitStatusSnapshot::default().with_status(editor_plugin_api::RepositoryStatus::new(
+                Some("master".to_owned()),
+                0,
+                0,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ));
         let lines = commit_buffer_template(&snapshot);
         assert!(lines.iter().any(|line| line == "# Initial commit"));
         assert!(

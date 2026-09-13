@@ -1,4 +1,4 @@
-use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
+use editor_plugin_api::{Color, Theme, ThemeOption, ThemeStyle};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -476,7 +476,7 @@ mod tests {
         GLOBAL_THEME_FILE_NAME, SharedThemeConfig, list_theme_files, parse_shared_theme_config,
         parse_theme, themes_dir_from_exe_dir,
     };
-    use editor_theme::Color;
+    use editor_plugin_api::Color;
     use std::{
         fs,
         path::{Path, PathBuf},

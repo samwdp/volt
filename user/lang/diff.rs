@@ -1,4 +1,4 @@
-use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+use editor_plugin_api::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
 const EXTENSIONS: &[&str] = &["diff", "patch"];
 

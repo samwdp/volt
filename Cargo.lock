@@ -1267,6 +1267,7 @@ dependencies = [
  "editor-fs",
  "editor-git",
  "editor-icons",
+ "editor-jobs",
  "editor-lsp",
  "editor-syntax",
  "editor-theme",
@@ -5462,15 +5463,7 @@ name = "volt-user"
 version = "0.1.0"
 dependencies = [
  "abi_stable",
- "editor-buffer",
- "editor-core",
- "editor-fs",
- "editor-git",
- "editor-icons",
- "editor-jobs",
  "editor-plugin-api",
- "editor-syntax",
- "editor-theme",
  "serde",
  "serde_yaml",
  "toml",

@@ -19,39 +19,12 @@ abi_stable = "0.11"
 serde_yaml = "0.9"
 toml = "0.8.23"
 
-[dependencies.editor-core]
-path = "../crates/editor-core"
-
-[dependencies.editor-fs]
-path = "../crates/editor-fs"
-
-[dependencies.editor-git]
-path = "../crates/editor-git"
-
-[dependencies.editor-icons]
-path = "../crates/editor-icons"
-
 [dependencies.editor-plugin-api]
 path = "sdk"
-
-[dependencies.editor-syntax]
-path = "../crates/editor-syntax"
-
-[dependencies.editor-theme]
-path = "../crates/editor-theme"
 
 [dependencies.serde]
 version = "1.0.228"
 features = ["derive"]
-
-[dev-dependencies.editor-buffer]
-path = "../crates/editor-buffer"
-
-[dev-dependencies.editor-jobs]
-path = "../crates/editor-jobs"
-
-[dev-dependencies.editor-syntax]
-path = "../crates/editor-syntax"
 
 [lib]
 path = "lib.rs"

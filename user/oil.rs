@@ -1,10 +1,10 @@
-use editor_core::{Section, SectionAction, SectionItem, SectionTree};
-use editor_fs::{DirectoryEntry, DirectoryEntryKind};
 use editor_plugin_api::{
     ContextHelpEntry, ContextHelpSpec, OilDefaults, OilFeatureSpec, OilKeyAction, OilKeybindings,
     OilSortMode, PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage,
     PluginVimMode, oil_hooks, oil_protocol,
 };
+use editor_plugin_api::{DirectoryEntry, DirectoryEntryKind};
+use editor_plugin_api::{Section, SectionAction, SectionItem, SectionTree};
 use std::path::Path;
 
 pub const ACTION_OIL_ENTRY: &str = oil_protocol::ACTION_OIL_ENTRY;
@@ -383,11 +383,11 @@ fn oil_entry_icon(name: &str, path: &Path, kind: DirectoryEntryKind) -> &'static
 }
 
 fn oil_directory_icon(name: &str) -> &'static str {
-    editor_icons::seti_directory_icon(name)
+    editor_plugin_api::seti_directory_icon(name)
 }
 
 fn oil_file_icon(path: &Path) -> &'static str {
-    editor_icons::seti_file_icon(path)
+    editor_plugin_api::seti_file_icon(path)
 }
 
 fn is_oil_icon(glyph: &str) -> bool {

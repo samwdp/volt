@@ -1,5 +1,5 @@
+use editor_plugin_api::LanguageConfiguration;
 use editor_plugin_api::PluginPackage;
-use editor_syntax::LanguageConfiguration;
 
 use super::common;
 

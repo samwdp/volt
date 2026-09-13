@@ -1,4 +1,4 @@
-use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+use editor_plugin_api::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
 /// Returns the syntax registration for the git commit tree-sitter language.
 pub fn syntax_language() -> LanguageConfiguration {

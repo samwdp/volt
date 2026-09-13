@@ -1,7 +1,7 @@
+use editor_plugin_api::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginHookBinding, PluginHookDeclaration, PluginPackage,
 };
-use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
 
 const EXTRA_HIGHLIGHT_QUERY: &str = r#"
 [

@@ -128,7 +128,7 @@ fn db_buffer_headerline(name: &str) -> Option<String> {
 mod tests {
     use super::{HEADERLINE_SEPARATOR, build_headerline_lines};
     use crate::{icon_font, treesittercontext_shared::summarize_context};
-    use editor_syntax::{SyntaxNodeContext, SyntaxPoint};
+    use editor_plugin_api::{SyntaxNodeContext, SyntaxPoint};
 
     #[test]
     fn build_headerline_lines_orders_contexts_outermost_first() {

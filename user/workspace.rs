@@ -3,11 +3,13 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use editor_fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, project_discovery_for_picker};
-use editor_git::list_repository_files;
+use editor_plugin_api::list_repository_files;
 use editor_plugin_api::{
     PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
     PluginAction, PluginCommand, PluginPackage,
+};
+use editor_plugin_api::{
+    ProjectCandidate, ProjectKind, ProjectSearchRoot, project_discovery_for_picker,
 };
 
 /// Returns the metadata for the workspace management package.
@@ -384,7 +386,7 @@ fn workspace_file_picker_items(context: &PickerProviderContext) -> Vec<PickerIte
                 PickerActionSpec::open_file(path.display().to_string()),
             )
             .with_search_text(search_text)
-            .with_fringe(editor_icons::seti_file_icon(&path))
+            .with_fringe(editor_plugin_api::seti_file_icon(&path))
         })
         .collect()
 }
@@ -424,13 +426,13 @@ fn hook_command(name: &str, description: &str, hook_name: &str) -> PluginCommand
 mod tests {
     use super::*;
     use abi_stable::std_types::ROption;
-    use editor_fs::{
+    use editor_plugin_api::{
+        PickerActionSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
+    };
+    use editor_plugin_api::{
         ProjectSearchRoot, project_discovery_snapshot, reset_project_discovery_cache,
         set_project_discovery_persist_path_for_test, set_project_discovery_worker_blocked_for_test,
         wait_for_project_discovery,
-    };
-    use editor_plugin_api::{
-        PickerActionSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
     };
     use std::{
         fs,
@@ -683,7 +685,7 @@ mod tests {
         let _guard = begin_discovery_override(vec![ProjectSearchRoot::new(&root, 2)])?;
         let scanning = project_discovery_snapshot(&project_search_roots());
         wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
-        editor_fs::set_project_discovery_ttl_for_test(Duration::ZERO);
+        editor_plugin_api::set_project_discovery_ttl_for_test(Duration::ZERO);
         set_project_discovery_worker_blocked_for_test(true);
 
         let context = PickerProviderContext::new(
@@ -747,9 +749,10 @@ mod tests {
         run_git(&root, &["init", "-q"])?;
         run_git(&root, &["add", ".gitignore", "src/deep/nested.rs"])?;
 
-        let registry =
-            std::sync::Arc::new(std::sync::Mutex::new(editor_jobs::ProcessRegistry::new()));
-        editor_jobs::install_app_process_registry(registry);
+        let registry = std::sync::Arc::new(std::sync::Mutex::new(
+            editor_plugin_api::ProcessRegistry::new(),
+        ));
+        editor_plugin_api::install_app_process_registry(registry);
 
         let mut context = PickerProviderContext::new(
             "workspace.files",
@@ -767,7 +770,8 @@ mod tests {
             item.label() == "src/deep/nested.rs"
                 && item.search_text() == Some("src/deep/nested.rs")
                 && item.detail().is_empty()
-                && item.fringe() == Some(editor_icons::seti_file_icon(&nested.join("nested.rs")))
+                && item.fringe()
+                    == Some(editor_plugin_api::seti_file_icon(&nested.join("nested.rs")))
         }));
         assert!(items.iter().any(|item| item.label() == "notes.txt"));
         assert!(items.iter().all(|item| item.label() != "ignored.txt"));

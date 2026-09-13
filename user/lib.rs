@@ -435,11 +435,11 @@ impl UserLibrary for UserLibraryImpl {
     fn oil_directory_sections(
         &self,
         root: &std::path::Path,
-        entries: &[editor_fs::DirectoryEntry],
+        entries: &[editor_plugin_api::DirectoryEntry],
         show_hidden: bool,
         sort_mode: editor_plugin_api::OilSortMode,
         trash_enabled: bool,
-    ) -> editor_core::SectionTree {
+    ) -> editor_plugin_api::SectionTree {
         oil::directory_sections(root, entries, show_hidden, sort_mode, trash_enabled)
     }
 
@@ -449,12 +449,12 @@ impl UserLibrary for UserLibraryImpl {
 
     fn git_status_sections(
         &self,
-        snapshot: &editor_git::GitStatusSnapshot,
-    ) -> editor_core::SectionTree {
+        snapshot: &editor_plugin_api::GitStatusSnapshot,
+    ) -> editor_plugin_api::SectionTree {
         git::status_sections(snapshot)
     }
 
-    fn git_commit_template(&self, snapshot: &editor_git::GitStatusSnapshot) -> Vec<String> {
+    fn git_commit_template(&self, snapshot: &editor_plugin_api::GitStatusSnapshot) -> Vec<String> {
         git::commit_buffer_template(snapshot)
     }
 
@@ -580,8 +580,8 @@ impl UserLibrary for UserLibraryImpl {
         gitfringe::SYMBOL
     }
 
-    fn icon_symbols(&self) -> &'static [editor_icons::IconFontSymbol] {
-        editor_icons::all_symbols()
+    fn icon_symbols(&self) -> &'static [editor_plugin_api::IconFontSymbol] {
+        editor_plugin_api::all_symbols()
     }
 
     fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String> {
@@ -1132,9 +1132,9 @@ mod tests {
         UserLibraryImpl, debug_adapters, language_servers, packages, syntax_languages, themes,
     };
     use crate::calculator;
-    use editor_buffer::TextBuffer;
+    use editor_plugin_api::TextBuffer;
     use editor_plugin_api::UserLibrary;
-    use editor_syntax::{LanguageConfiguration, SyntaxRegistry};
+    use editor_plugin_api::{LanguageConfiguration, SyntaxRegistry};
     use std::{
         collections::BTreeSet,
         fs,

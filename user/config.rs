@@ -1,4 +1,4 @@
-use editor_fs::ProjectSearchRoot;
+use editor_plugin_api::ProjectSearchRoot;
 use editor_plugin_api::{
     OilDefaults, OilKeybindings, OilSortMode, PaneConfig, PickerTruncateStrategy,
     WorkspaceDockConfig, WorkspaceDockSide,
@@ -413,7 +413,7 @@ impl Default for KeymapSection {
 }
 
 const fn default_ambiguous_prefix_timeout_ms() -> u64 {
-    editor_core::DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS
+    editor_plugin_api::DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS
 }
 
 fn default_picker_truncate_strategy() -> ConfigPickerTruncateStrategy {

@@ -208,7 +208,7 @@ pub fn inline_workspace_package_fields(mut manifest: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManifestPathReplacement, inline_workspace_package_fields,
+        ManifestPathReplacement, inline_workspace_package_fields, manifest_path_dependencies,
         standalone_user_path_replacements, standalone_user_vendor_crates,
     };
     use std::path::PathBuf;
@@ -253,14 +253,7 @@ mod tests {
         )
         .expect("sdk manifest replacements");
 
-        assert!(user_manifest.contains(&ManifestPathReplacement {
-            from: "../crates/editor-core".to_owned(),
-            to: "vendor/editor-core".to_owned(),
-        }));
-        assert!(user_manifest.contains(&ManifestPathReplacement {
-            from: "../crates/editor-syntax".to_owned(),
-            to: "vendor/editor-syntax".to_owned(),
-        }));
+        assert!(user_manifest.is_empty());
         assert!(sdk_manifest.contains(&ManifestPathReplacement {
             from: "../../crates/editor-lsp".to_owned(),
             to: "../vendor/editor-lsp".to_owned(),
@@ -269,6 +262,30 @@ mod tests {
             from: "../../crates/editor-theme".to_owned(),
             to: "../vendor/editor-theme".to_owned(),
         }));
+    }
+
+    #[test]
+    fn user_library_manifest_path_depends_only_on_plugin_sdk() {
+        let workspace_root = workspace_root();
+        let manifest_path = workspace_root.join("user").join("Cargo.toml");
+        let replacements =
+            standalone_user_path_replacements(&manifest_path, &workspace_root, "vendor")
+                .expect("user manifest replacements");
+        assert!(
+            replacements.is_empty(),
+            "User Library must not path-depend on Volt crates under crates/: {replacements:?}"
+        );
+
+        let dependencies =
+            manifest_path_dependencies(&manifest_path).expect("user path dependencies");
+        assert_eq!(
+            dependencies
+                .iter()
+                .map(|dependency| dependency.raw_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sdk"],
+            "User Library must path-depend only on the Plugin SDK"
+        );
     }
 
     #[test]
