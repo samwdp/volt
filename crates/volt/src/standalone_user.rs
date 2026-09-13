@@ -4,7 +4,15 @@ use std::{
     process::{Command, Stdio},
 };
 
-const STANDALONE_USER_GITIGNORE: &str = "target/\nsdk/\n";
+const STANDALONE_USER_GITIGNORE: &str = "target/\n";
+
+pub const STANDALONE_USER_CARGO_CONFIG: &str = "\
+[build]
+target-dir = \"target\"
+
+[env]
+CARGO_TARGET_DIR = { value = \"target\", relative = true, force = true }
+";
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -25,6 +33,9 @@ pub fn setup_standalone_user_repository(
         user_destination.join(".gitignore"),
         STANDALONE_USER_GITIGNORE,
     )?;
+    let cargo_dir = user_destination.join(".cargo");
+    fs::create_dir_all(&cargo_dir)?;
+    fs::write(cargo_dir.join("config.toml"), STANDALONE_USER_CARGO_CONFIG)?;
 
     let mut command = Command::new("git");
     configure_background_command(&mut command);
@@ -45,7 +56,9 @@ pub fn setup_standalone_user_repository(
 
 #[cfg(test)]
 mod tests {
-    use super::{STANDALONE_USER_GITIGNORE, setup_standalone_user_repository};
+    use super::{
+        STANDALONE_USER_CARGO_CONFIG, STANDALONE_USER_GITIGNORE, setup_standalone_user_repository,
+    };
     use std::{
         env, fs,
         process::Command,
@@ -69,6 +82,11 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temp_root.join(".gitignore")).expect("read .gitignore"),
             STANDALONE_USER_GITIGNORE
+        );
+        assert_eq!(
+            fs::read_to_string(temp_root.join(".cargo").join("config.toml"))
+                .expect("read cargo config"),
+            STANDALONE_USER_CARGO_CONFIG
         );
         assert!(temp_root.join(".git").is_dir());
 

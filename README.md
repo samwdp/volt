@@ -119,21 +119,23 @@ After that, `target/release/` contains:
 - `assets/`
 - a copied `user/` tree that can be rebuilt standalone
 
-The `volt` binary now prefers the shared library that lives next to the executable, so the
-release-style rebuild workflow is:
-
-1. build `volt` and `volt-user`
-2. edit files under `user/`
-3. rebuild just the user library with `cargo build -p volt-user --release`
-4. replace the shared library next to `volt`
-
-If you want to rebuild the copied standalone user tree that was staged into the release folder,
-you can also run:
+End users rebuild the User Library from the User Source Tree shipped next to the binary
+(`user/` beside `volt.exe`). That tree is the authoring surface. Do not rebuild plugins from the
+Volt git checkout; install users do not have that repository.
 
 ```bash
-cd target/release/user
+cd /path/to/install/user    # e.g. C:\tools\volt2\release\user
 cargo build --release -p volt-user
 ```
+
+The staged tree writes `.cargo/config.toml` so Cargo always uses `user/target/`, even when a parent
+`CARGO_TARGET_DIR` points at the install profile dir. That keeps a live `user.dll` next to `volt`
+from being truncated to zero bytes while Volt still has it mapped.
+
+On the next start, Volt prefers `user/target/release/` (then `user/target/debug/`), then the
+library next to the executable. It copies the file before mapping it so a later Cargo rebuild can
+overwrite the artifact. An empty file is skipped and Volt falls back to the next candidate (or the
+library compiled into the binary).
 
 You can also point the binary at a specific user library with `VOLT_USER_LIBRARY=/path/to/libuser.so`
 (or the platform equivalent file name).

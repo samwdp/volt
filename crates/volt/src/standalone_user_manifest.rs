@@ -211,7 +211,10 @@ mod tests {
         ManifestPathReplacement, inline_workspace_package_fields, manifest_path_dependencies,
         standalone_user_path_replacements, standalone_user_vendor_crates,
     };
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -262,6 +265,56 @@ mod tests {
             from: "../../crates/editor-theme".to_owned(),
             to: "../vendor/editor-theme".to_owned(),
         }));
+    }
+
+    fn user_library_source_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = fs::read_dir(&dir).expect("read user library directory");
+            for entry in entries {
+                let entry = entry.expect("read user library entry");
+                let path = entry.path();
+                let file_type = entry.file_type().expect("user library file type");
+                if file_type.is_dir() {
+                    if path.file_name().and_then(|name| name.to_str()) == Some("sdk") {
+                        continue;
+                    }
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    files.push(path);
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn user_library_modules_outside_sdk_import_only_plugin_sdk() {
+        let user_root = workspace_root().join("user");
+        let mut violations = Vec::new();
+        for path in user_library_source_files(&user_root) {
+            let source = fs::read_to_string(&path).expect("read user library source");
+            for (index, line) in source.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                let Some(import) = trimmed.strip_prefix("use ") else {
+                    continue;
+                };
+                if import.starts_with("editor_") && !import.starts_with("editor_plugin_api") {
+                    violations.push(format!("{}:{}: {trimmed}", path.display(), index + 1));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "User Library modules must import Volt types only via editor_plugin_api:\n{}",
+            violations.join("\n")
+        );
     }
 
     #[test]

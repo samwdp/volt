@@ -93,8 +93,8 @@ A Plugin Package that ships inside the User Library / User Source Tree. Users ma
 _Avoid_: core package (when meaning these modules), built-in crate
 
 **Plugin SDK**:
-The stable API crate inside the User Library sources (`user/sdk`, package name `editor-plugin-api`) that Plugin Packages use to talk to Volt fundamentals (buffers, sections, hooks, and related types). Host loads the User Library over the ABI; Builtin Plugin modules under the User Library sources author against this SDK only and do not import other Volt crates directly. The SDK crate itself may depend on those Volt crates.
-_Avoid_: editor-core (as the authoring API), plugin host (loader), user package API
+The stable authoring crate inside the User Source Tree (`user/sdk`, package name `editor-plugin-api`). Plugin Packages talk to high-level editor concepts only through this crate (plus crates.io). Target: it is a leaf (crates.io plus its own sources; no path deps on other Volt crates). Host and core crates depend on it and adapt to engine internals. Users rebuild the User Library from the User Source Tree; they do not need the Volt git checkout. `vendor/` of engine crates is a staging stopgap until the SDK is a leaf, not an authoring surface.
+_Avoid_: editor-core (as the authoring API), plugin host (loader), user package API, vendor folder (as the shipped authoring surface)
 
 ### Issues
 

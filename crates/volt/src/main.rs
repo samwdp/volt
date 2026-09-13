@@ -6,10 +6,11 @@
 use std::{
     collections::BTreeSet,
     error::Error,
+    fs,
     panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use abi_stable::library::RootModule;
@@ -557,13 +558,43 @@ fn user_library_candidates(exe_path: Option<&Path>, env_path: Option<&str>) -> V
             candidates.push(path);
         }
     }
-    if let Some(exe_path) = exe_path.and_then(Path::parent) {
-        let path = UserLibraryModuleRef::get_library_path(exe_path);
-        if seen.insert(path.clone()) {
-            candidates.push(path);
+    if let Some(exe_dir) = exe_path.and_then(Path::parent) {
+        let staged_target = exe_dir.join("user").join("target");
+        for profile in ["release", "debug"] {
+            let path = UserLibraryModuleRef::get_library_path(&staged_target.join(profile));
+            if seen.insert(path.clone()) {
+                candidates.push(path);
+            }
+        }
+        let beside_exe = UserLibraryModuleRef::get_library_path(exe_dir);
+        if seen.insert(beside_exe.clone()) {
+            candidates.push(beside_exe);
         }
     }
     candidates
+}
+
+fn stage_user_library_for_startup(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let stage_dir = parent.join("volt-user-hot");
+    if fs::create_dir_all(&stage_dir).is_err() {
+        return path.to_path_buf();
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "user-library".to_owned());
+    let staged_path = stage_dir.join(format!("user-{}-{}-{file_name}", std::process::id(), stamp));
+    match fs::copy(path, &staged_path) {
+        Ok(_) => staged_path,
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 fn catch_unwind_silently<F, T>(operation: F) -> Result<T, String>
@@ -589,6 +620,12 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+fn user_library_is_loadable(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
 fn validate_runtime_user_library(library: &dyn UserLibrary) -> Result<(), String> {
     catch_unwind_silently(|| {
         let _ = library.syntax_languages();
@@ -603,10 +640,11 @@ fn load_user_library(trace: &mut Option<StartupTrace>) -> Arc<dyn UserLibrary> {
         current_exe.as_deref(),
         std::env::var("VOLT_USER_LIBRARY").ok().as_deref(),
     ) {
-        if !path.is_file() {
+        if !user_library_is_loadable(&path) {
             continue;
         }
-        match UserLibraryModuleRef::load_from_file(&path) {
+        let load_path = stage_user_library_for_startup(&path);
+        match UserLibraryModuleRef::load_from_file(&load_path) {
             Ok(module) => {
                 if let Some(trace) = trace.as_mut() {
                     trace.mark("user-library.load-dylib");
@@ -1420,18 +1458,47 @@ mod tests {
     }
 
     #[test]
-    fn user_library_candidates_prefer_env_then_executable_directory() {
+    fn user_library_candidates_prefer_env_then_user_source_tree_then_beside_exe() {
+        let exe_dir = Path::new("/tmp/volt/bin");
+        let staged_target = exe_dir.join("user").join("target");
         let candidates = user_library_candidates(
-            Some(Path::new("/tmp/volt/bin/volt")),
+            Some(&exe_dir.join("volt")),
             Some("/tmp/custom/user/libuser.so"),
         );
         assert_eq!(
             candidates,
             vec![
                 PathBuf::from("/tmp/custom/user/libuser.so"),
-                UserLibraryModuleRef::get_library_path(Path::new("/tmp/volt/bin")),
+                UserLibraryModuleRef::get_library_path(&staged_target.join("release")),
+                UserLibraryModuleRef::get_library_path(&staged_target.join("debug")),
+                UserLibraryModuleRef::get_library_path(exe_dir),
             ]
         );
+    }
+
+    #[test]
+    fn stage_user_library_for_startup_copies_away_from_the_build_artifact() {
+        let root =
+            std::env::temp_dir().join(format!("volt-stage-user-library-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create stage root");
+        let artifact = root.join("user.dll");
+        fs::write(&artifact, b"library").expect("write artifact");
+        let staged = stage_user_library_for_startup(&artifact);
+        assert_ne!(staged, artifact);
+        assert_eq!(fs::read(&staged).expect("read staged"), b"library");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn user_library_is_loadable_rejects_empty_files() {
+        let path = std::env::temp_dir().join(format!(
+            "volt-empty-user-library-{}.dll",
+            std::process::id()
+        ));
+        fs::write(&path, []).expect("write empty user library");
+        assert!(!user_library_is_loadable(&path));
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
