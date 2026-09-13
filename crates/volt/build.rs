@@ -109,7 +109,7 @@ fn rewrite_manifest(
     add_workspace_root: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut manifest = fs::read_to_string(manifest_path)?.replace("\r\n", "\n");
-    manifest = inline_workspace_package_fields(manifest);
+    manifest = standalone_user_manifest::inline_workspace_package_fields(manifest);
     for replacement in path_replacements {
         manifest = manifest.replace(&replacement.from, &replacement.to);
     }
@@ -118,21 +118,6 @@ fn rewrite_manifest(
     }
     fs::write(manifest_path, manifest)?;
     Ok(())
-}
-
-fn inline_workspace_package_fields(mut manifest: String) -> String {
-    manifest = manifest.replace("rust-version.workspace = true", "rust-version = \"1.91\"");
-    manifest = manifest.replace("version.workspace = true", "version = \"0.1.0\"");
-    manifest = manifest.replace("edition.workspace = true", "edition = \"2024\"");
-    manifest = manifest.replace(
-        "license.workspace = true",
-        "license = \"MIT OR Apache-2.0\"",
-    );
-    manifest = manifest.replace(
-        "[lints]\nworkspace = true\n",
-        "[lints.rust]\nunsafe_code = \"forbid\"\nunused_crate_dependencies = \"warn\"\n\n[lints.clippy]\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunwrap_used = \"deny\"\n",
-    );
-    manifest
 }
 
 fn add_standalone_workspace_root(mut manifest: String) -> String {

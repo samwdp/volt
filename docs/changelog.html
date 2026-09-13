@@ -400,6 +400,16 @@
                             <p class="cl-section-label">Fixed</p>
                             <ul>
                                 <li>
+                                    <strong>Staged User Source Tree builds standalone.</strong>
+                                    Release staging inlines table-form and dotted-key
+                                    <code>workspace = true</code> package fields so
+                                    <code>cargo build --release -p volt-user</code> works inside
+                                    the shipped <code>user/</code> tree without the full Volt
+                                    workspace. Release CI rebuilds that tree after packaging.
+                                    <span class="cl-pr">#92</span>
+                                    <span class="cl-tag cl-tag-fix">fix</span>
+                                </li>
+                                <li>
                                     <strong>Popup <code>j</code>/<code>k</code> no longer cycle the
                                     workspace dock.</strong>
                                     Dock navigation is its own Minor Mode

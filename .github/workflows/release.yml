@@ -73,6 +73,10 @@ jobs:
           }
           Compress-Archive -Path (Join-Path $bundleRoot '*') -DestinationPath $bundlePath
 
+      - name: Build staged User Source Tree
+        run: cargo build --release -p volt-user
+        working-directory: target/release/user
+
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:

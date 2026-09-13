@@ -174,10 +174,42 @@ fn canonicalize_path(path: &Path) -> Result<PathBuf, String> {
     })
 }
 
+/// Inline inherited workspace package fields so a staged User Source Tree builds without
+/// `[workspace.package]`. Handles dotted-key and table-form TOML.
+pub fn inline_workspace_package_fields(mut manifest: String) -> String {
+    manifest = manifest.replace("rust-version.workspace = true", "rust-version = \"1.91\"");
+    manifest = manifest.replace("version.workspace = true", "version = \"0.1.0\"");
+    manifest = manifest.replace("edition.workspace = true", "edition = \"2024\"");
+    manifest = manifest.replace(
+        "license.workspace = true",
+        "license = \"MIT OR Apache-2.0\"",
+    );
+    manifest = manifest.replace("[package.edition]\nworkspace = true", "edition = \"2024\"");
+    manifest = manifest.replace("[package.version]\nworkspace = true", "version = \"0.1.0\"");
+    manifest = manifest.replace(
+        "[package.license]\nworkspace = true",
+        "license = \"MIT OR Apache-2.0\"",
+    );
+    manifest = manifest.replace(
+        "[package.rust-version]\nworkspace = true",
+        "rust-version = \"1.91\"",
+    );
+    manifest = manifest.replace(
+        "lints.workspace = true",
+        "[lints.rust]\nunsafe_code = \"forbid\"\nunused_crate_dependencies = \"warn\"\n\n[lints.clippy]\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunwrap_used = \"deny\"",
+    );
+    manifest = manifest.replace(
+        "[lints]\nworkspace = true",
+        "[lints.rust]\nunsafe_code = \"forbid\"\nunused_crate_dependencies = \"warn\"\n\n[lints.clippy]\ndbg_macro = \"deny\"\ntodo = \"deny\"\nunwrap_used = \"deny\"",
+    );
+    manifest
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ManifestPathReplacement, standalone_user_path_replacements, standalone_user_vendor_crates,
+        ManifestPathReplacement, inline_workspace_package_fields,
+        standalone_user_path_replacements, standalone_user_vendor_crates,
     };
     use std::path::PathBuf;
 
@@ -237,5 +269,68 @@ mod tests {
             from: "../../crates/editor-theme".to_owned(),
             to: "../vendor/editor-theme".to_owned(),
         }));
+    }
+
+    #[test]
+    fn inline_workspace_package_fields_inlines_table_form_inheritance() {
+        let manifest = "\
+[package]
+name = \"demo\"
+
+[package.edition]
+workspace = true
+
+[package.version]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.rust-version]
+workspace = true
+
+[lints]
+workspace = true
+";
+        let inlined = inline_workspace_package_fields(manifest.to_owned());
+
+        assert!(inlined.contains("edition = \"2024\""));
+        assert!(inlined.contains("version = \"0.1.0\""));
+        assert!(inlined.contains("license = \"MIT OR Apache-2.0\""));
+        assert!(inlined.contains("rust-version = \"1.91\""));
+        assert!(inlined.contains("[lints.rust]"));
+        assert!(inlined.contains("unsafe_code = \"forbid\""));
+        assert!(!inlined.contains("[package.edition]"));
+        assert!(!inlined.contains("[package.version]"));
+        assert!(!inlined.contains("[package.license]"));
+        assert!(!inlined.contains("[package.rust-version]"));
+        assert!(!inlined.contains("[lints]\nworkspace = true"));
+        assert!(!inlined.contains("workspace = true"));
+    }
+
+    #[test]
+    fn inline_workspace_package_fields_keeps_dotted_key_inheritance_working() {
+        let manifest = "\
+[package]
+name = \"demo\"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+lints.workspace = true
+";
+        let inlined = inline_workspace_package_fields(manifest.to_owned());
+
+        assert!(inlined.contains("edition = \"2024\""));
+        assert!(inlined.contains("version = \"0.1.0\""));
+        assert!(inlined.contains("license = \"MIT OR Apache-2.0\""));
+        assert!(inlined.contains("rust-version = \"1.91\""));
+        assert!(inlined.contains("[lints.rust]"));
+        assert!(!inlined.contains("edition.workspace = true"));
+        assert!(!inlined.contains("version.workspace = true"));
+        assert!(!inlined.contains("license.workspace = true"));
+        assert!(!inlined.contains("rust-version.workspace = true"));
+        assert!(!inlined.contains("lints.workspace = true"));
+        assert!(!inlined.contains("workspace = true"));
     }
 }
