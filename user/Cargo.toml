@@ -22,6 +22,10 @@ toml = "0.8.23"
 [dependencies.editor-plugin-api]
 path = "sdk"
 
+[dev-dependencies.editor-plugin-api]
+path = "sdk"
+features = ["test-helpers"]
+
 [dependencies.serde]
 version = "1.0.228"
 features = ["derive"]

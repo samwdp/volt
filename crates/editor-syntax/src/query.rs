@@ -36,7 +36,7 @@ pub(crate) fn load_language(
         })
         .collect::<BTreeMap<_, _>>();
 
-    match &config.loader {
+    match config.loader() {
         LanguageLoader::Static {
             language_provider,
             highlight_query,

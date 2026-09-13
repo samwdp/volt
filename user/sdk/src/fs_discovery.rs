@@ -10,14 +10,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use editor_path::volt_data_dir;
+use crate::path::volt_data_dir;
 use serde::{Deserialize, Serialize};
 
 const PROJECT_DISCOVERY_BACKGROUND_TICK: Duration = Duration::from_secs(2);
 const PROJECTS_FILE_NAME: &str = "projects.json";
 const PROJECTS_FILE_VERSION: u32 = 1;
 
-use super::{ProjectCandidate, ProjectKind, ProjectSearchRoot, discover_projects};
+use crate::fs::{ProjectCandidate, ProjectKind, ProjectSearchRoot, discover_projects};
 
 /// Freshness window for cached Project Workspace candidates.
 pub const PROJECT_DISCOVERY_TTL: Duration = Duration::from_secs(5);
@@ -275,7 +275,8 @@ pub fn project_discovery_persist_path() -> PathBuf {
         .unwrap_or_else(|| volt_data_dir().join(PROJECTS_FILE_NAME))
 }
 
-/// Overrides the projects.json path. Intended for tests.
+/// Overrides the projects.json path. Host/dev crates only (`test-helpers`).
+#[cfg(feature = "test-helpers")]
 pub fn set_project_discovery_persist_path_for_test(path: Option<PathBuf>) {
     *lock_poison(persist_path_override().lock()) = path;
 }
@@ -545,9 +546,17 @@ pub fn cancel_project_discovery_scan() {
     hub.condvar.notify_all();
 }
 
+fn set_discovery_worker_blocked(blocked: bool) {
+    let hub = hub();
+    hub.worker_blocked.store(blocked, Ordering::SeqCst);
+    if !blocked {
+        hub.block_condvar.notify_all();
+    }
+}
+
 /// Clears cache bookkeeping. Intended for tests so cases do not leak.
 pub fn reset_project_discovery_cache() {
-    set_project_discovery_worker_blocked_for_test(false);
+    set_discovery_worker_blocked(false);
     *lock_poison(background_tick_state().lock()) = None;
     let hub = hub();
     let mut inner = lock_state(hub);
@@ -558,16 +567,14 @@ pub fn reset_project_discovery_cache() {
     hub.condvar.notify_all();
 }
 
-/// Blocks the discovery worker before each walk. Intended for tests.
+/// Blocks the discovery worker before each walk. Host/dev crates only (`test-helpers`).
+#[cfg(feature = "test-helpers")]
 pub fn set_project_discovery_worker_blocked_for_test(blocked: bool) {
-    let hub = hub();
-    hub.worker_blocked.store(blocked, Ordering::SeqCst);
-    if !blocked {
-        hub.block_condvar.notify_all();
-    }
+    set_discovery_worker_blocked(blocked);
 }
 
-/// Overrides the cache TTL. Intended for tests.
+/// Overrides the cache TTL. Host/dev crates only (`test-helpers`).
+#[cfg(feature = "test-helpers")]
 pub fn set_project_discovery_ttl_for_test(ttl: Duration) {
     lock_state(hub()).ttl = ttl;
 }

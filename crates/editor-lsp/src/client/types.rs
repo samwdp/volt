@@ -17,6 +17,7 @@ use editor_jobs::{
     OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry, ProcessSupervisionMode,
     WorkspaceId, language_server_share_key,
 };
+pub use editor_plugin_api::LspCompletionKind;
 use lsp_types::{
     ClientCapabilities, CodeActionContext, CodeActionParams, CodeActionTriggerKind,
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity, Documentation,
@@ -245,35 +246,6 @@ impl LspCompletionResolvePayload {
     pub fn root(&self) -> Option<&Path> {
         self.root.as_deref()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LspCompletionKind {
-    Text,
-    Method,
-    Function,
-    Constructor,
-    Field,
-    Variable,
-    Class,
-    Interface,
-    Module,
-    Property,
-    Unit,
-    Value,
-    Enum,
-    Keyword,
-    Snippet,
-    Color,
-    File,
-    Reference,
-    Folder,
-    EnumMember,
-    Constant,
-    Struct,
-    Event,
-    Operator,
-    TypeParameter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 //!
 //! # Example
 //! ```
-//! assert_eq!(user::icon_font_symbols::md::MD_PERIODIC_TABLE, "󰢶");
+//! assert_eq!(editor_plugin_api::symbols::md::MD_PERIODIC_TABLE, "󰢶");
 //! ```
 
 /// Codicons

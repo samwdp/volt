@@ -18,6 +18,9 @@ workspace = true
 [dependencies.editor-jobs]
 path = "../editor-jobs"
 
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
+
 [lib]
 path = "src/lib.rs"
 name = "editor_git"

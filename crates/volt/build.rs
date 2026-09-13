@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, io, path::Path};
+use std::{fs, io, path::Path};
 
 #[path = "src/standalone_user.rs"]
 mod standalone_user;
@@ -34,31 +34,18 @@ fn copy_user_directory() -> Result<(), Box<dyn std::error::Error>> {
     }
     let vendor_crates =
         standalone_user_manifest::standalone_user_vendor_crates(workspace_root, &user_dir)?;
+    if !vendor_crates.is_empty() {
+        return Err(format!(
+            "Plugin SDK must be a leaf crate; unexpected vendor crates: {vendor_crates:?}"
+        )
+        .into());
+    }
     let target_profile_dir = target_profile_dir()?;
     let destination = target_profile_dir.join("user");
     remove_dir_all_if_exists(&destination)?;
     copy_dir_recursive(&user_dir, &destination)?;
-    vendor_user_support_crates(workspace_root, &destination, &vendor_crates)?;
-    rewrite_standalone_user_manifests(workspace_root, &user_dir, &destination, &vendor_crates)?;
+    rewrite_standalone_user_manifests(workspace_root, &user_dir, &destination)?;
     standalone_user::setup_standalone_user_repository(&destination)?;
-
-    Ok(())
-}
-
-fn vendor_user_support_crates(
-    workspace_root: &Path,
-    user_destination: &Path,
-    vendor_crates: &BTreeSet<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let vendor_dir = user_destination.join("vendor");
-    remove_dir_all_if_exists(&vendor_dir)?;
-    create_dir_all_with_retry(&vendor_dir)?;
-
-    for crate_name in vendor_crates {
-        let source = workspace_root.join("crates").join(crate_name);
-        let destination = vendor_dir.join(crate_name);
-        copy_dir_recursive(&source, &destination)?;
-    }
 
     Ok(())
 }
@@ -67,7 +54,6 @@ fn rewrite_standalone_user_manifests(
     workspace_root: &Path,
     user_source: &Path,
     user_destination: &Path,
-    vendor_crates: &BTreeSet<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let user_replacements = standalone_user_manifest::standalone_user_path_replacements(
         &user_source.join("Cargo.toml"),
@@ -89,17 +75,6 @@ fn rewrite_standalone_user_manifests(
         &sdk_replacements,
         false,
     )?;
-    for crate_name in vendor_crates {
-        rewrite_manifest(
-            &user_destination
-                .join("vendor")
-                .join(crate_name)
-                .join("Cargo.toml"),
-            &[],
-            false,
-        )?;
-    }
-
     Ok(())
 }
 

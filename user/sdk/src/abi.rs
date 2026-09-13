@@ -1,20 +1,17 @@
+use crate::{
+    CaptureThemeMapping, Color, DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport,
+    DirectoryEntry, DirectoryEntryKind, GitLogEntry, GitStashEntry, GitStatusSnapshot,
+    GrammarSource, IconFontCategory, IconFontSymbol, InstallRecipe, LanguageConfiguration,
+    LanguageServerRootStrategy, LanguageServerSpec, RepositoryStatus, Section, SectionAction,
+    SectionItem, SectionTree, StatusEntry, Theme, ThemeOption, ThemeStyle, WorkspaceConfiguration,
+    WorkspaceConfigurationValue,
+};
 use abi_stable::{
     StableAbi,
     library::RootModule,
     sabi_types::VersionStrings,
     std_types::{ROption, RStr, RString, RVec},
 };
-use editor_core::{Section, SectionAction, SectionItem, SectionTree};
-use editor_dap::{DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport};
-use editor_fs::{DirectoryEntry, DirectoryEntryKind};
-use editor_git::{GitLogEntry, GitStashEntry, GitStatusSnapshot, RepositoryStatus, StatusEntry};
-use editor_icons::{IconFontCategory, IconFontSymbol};
-use editor_lsp::{
-    InstallRecipe, LanguageServerRootStrategy, LanguageServerSpec, WorkspaceConfiguration,
-    WorkspaceConfigurationValue,
-};
-use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
-use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
 use serde_json::Number;
 
 use crate::{
@@ -2802,9 +2799,10 @@ impl RootModule for UserLibraryModuleRef {
 mod tests {
     use std::path::Path;
 
-    use editor_dap::DebugAdapterSpec;
-    use editor_lsp::{InstallRecipe, LanguageServerSpec};
-    use editor_syntax::{CaptureThemeMapping, GrammarSource, LanguageConfiguration};
+    use crate::{
+        CaptureThemeMapping, DebugAdapterSpec, GrammarSource, InstallRecipe, LanguageConfiguration,
+        LanguageServerSpec, WorkspaceConfigurationValue,
+    };
 
     use super::{AbiDebugAdapterSpec, AbiLanguageConfiguration, AbiLanguageServerSpec};
 
@@ -2909,24 +2907,18 @@ mod tests {
                     LanguageServerSpec::workspace_settings_object([
                         (
                             "enableAnalyzersSupport",
-                            editor_lsp::WorkspaceConfigurationValue::from(true),
+                            WorkspaceConfigurationValue::from(true),
                         ),
-                        (
-                            "sdk",
-                            editor_lsp::WorkspaceConfigurationValue::from("dotnet"),
-                        ),
-                        (
-                            "queueDepth",
-                            editor_lsp::WorkspaceConfigurationValue::integer(-7),
-                        ),
+                        ("sdk", WorkspaceConfigurationValue::from("dotnet")),
+                        ("queueDepth", WorkspaceConfigurationValue::integer(-7)),
                         (
                             "workspaceLimit",
-                            editor_lsp::WorkspaceConfigurationValue::unsigned(u64::MAX),
+                            WorkspaceConfigurationValue::unsigned(u64::MAX),
                         ),
                         (
                             "inlayHints",
                             LanguageServerSpec::workspace_settings_array([
-                                editor_lsp::WorkspaceConfigurationValue::from("types"),
+                                WorkspaceConfigurationValue::from("types"),
                                 LanguageServerSpec::workspace_settings_null(),
                             ]),
                         ),

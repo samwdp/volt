@@ -18,7 +18,11 @@ const MODULES: &[(&str, &str)] = &[
 fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
-    let symbols_dir = manifest_dir.join("nerd_font_symbols");
+    let symbols_dir = manifest_dir
+        .parent()
+        .map(|parent| parent.join("nerd_font_symbols"))
+        .ok_or("unable to locate user/nerd_font_symbols")?;
+    println!("cargo:rerun-if-changed={}", symbols_dir.display());
 
     let mut output = String::from("pub const ICON_FONT_SYMBOLS: &[IconFontSymbol] = &[\n");
     for (module, category) in MODULES {

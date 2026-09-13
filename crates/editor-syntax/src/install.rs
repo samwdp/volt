@@ -115,23 +115,6 @@ pub(crate) fn command_failure_message(command_name: &str, output: &std::process:
     format!("{command_name} exited with status {}", output.status)
 }
 
-pub(crate) fn normalize_unique_entries<I, S>(values: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let mut normalized = Vec::new();
-    for value in values {
-        let value = value.into();
-        let trimmed = value.trim();
-        if trimmed.is_empty() || normalized.iter().any(|entry| entry == trimmed) {
-            continue;
-        }
-        normalized.push(trimmed.to_owned());
-    }
-    normalized
-}
-
 pub(crate) fn default_install_root() -> PathBuf {
     editor_path::grammar_install_root()
 }
@@ -171,16 +154,6 @@ pub(crate) fn normalize_extension(extension: &str) -> String {
         .trim()
         .trim_start_matches('.')
         .to_ascii_lowercase()
-}
-
-pub(crate) fn shared_library_file_name(install_dir_name: &str) -> String {
-    if cfg!(target_os = "windows") {
-        format!("lib{install_dir_name}.dll")
-    } else if cfg!(target_os = "macos") {
-        format!("lib{install_dir_name}.dylib")
-    } else {
-        format!("lib{install_dir_name}.so")
-    }
 }
 
 pub(crate) fn temp_guid_like_directory_name() -> String {

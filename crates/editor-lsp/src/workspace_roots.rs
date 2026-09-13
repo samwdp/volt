@@ -6,31 +6,6 @@ use std::{
 
 use editor_path::{PathPattern, normalize_extension};
 
-pub(crate) fn normalize_unique_entries<I, S>(values: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let mut normalized = Vec::new();
-    for value in values {
-        let value = value.into();
-        let value = value.trim();
-        if !value.is_empty() && !normalized.iter().any(|existing| existing == value) {
-            normalized.push(value.to_owned());
-        }
-    }
-    normalized
-}
-
-pub(crate) fn normalize_optional_string(value: String) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_owned())
-    }
-}
-
 pub(crate) fn document_language_id_for_path<'a>(
     document_language_ids: &'a BTreeMap<String, String>,
     file_name: Option<&str>,

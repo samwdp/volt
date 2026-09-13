@@ -7,9 +7,7 @@
 //! pending short without firing it.
 
 use crate::{KeymapRegistry, KeymapScope, KeymapVimMode};
-
-/// Default ambiguous-prefix timeout in milliseconds (`ui.keymap.ambiguous_prefix_timeout_ms`).
-pub const DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS: u64 = 250;
+use editor_plugin_api::DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS;
 
 /// Idle timeout for incomplete (non-ambiguous) multi-key prefixes before they are dropped.
 pub const DEFAULT_SEQUENCE_IDLE_TIMEOUT_MS: u64 = 1200;

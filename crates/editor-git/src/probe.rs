@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-use crate::repository_files::{
+use editor_plugin_api::{
     FileFingerprint, cache_key, file_fingerprint, resolve_git_dirs, resolve_git_path,
     worktree_common_dir,
 };

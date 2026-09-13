@@ -3,6 +3,7 @@ use std::{
     fs::{self, File},
     io::Read,
     path::{Component, Path, PathBuf},
+    process::Command,
     sync::{
         Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -10,7 +11,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::RepositoryFilesError;
+use crate::git::RepositoryFilesError;
 
 /// Byte cap for Workspace Files picker previews.
 pub const REPOSITORY_FILE_PREVIEW_MAX_BYTES: u64 = 16 * 1024;
@@ -18,7 +19,7 @@ pub const REPOSITORY_FILE_PREVIEW_MAX_BYTES: u64 = 16 * 1024;
 pub const REPOSITORY_FILE_PREVIEW_MAX_LINES: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FileFingerprint {
+pub struct FileFingerprint {
     modified: Option<SystemTime>,
     len: u64,
 }
@@ -102,43 +103,26 @@ pub fn list_repository_files_uncached(
     root: impl AsRef<Path>,
 ) -> Result<Vec<PathBuf>, RepositoryFilesError> {
     let root = root.as_ref();
-    let spec = editor_jobs::ProcessLaunchSpec::new(
-        "git",
-        [
+    let output = Command::new("git")
+        .args([
             "ls-files",
             "-z",
             "--cached",
             "--others",
             "--exclude-standard",
             "--full-name",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>(),
-    )
-    .with_mode(editor_jobs::ProcessSupervisionMode::Background)
-    .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
-    .with_current_dir(root);
-    let output = match editor_jobs::run_captured_in_app_registry(spec) {
-        Some(Ok(output)) => output,
-        Some(Err(error)) => {
-            return Err(RepositoryFilesError::CommandFailed(error.to_string()));
-        }
-        None => {
-            return Err(RepositoryFilesError::CommandFailed(
-                "app Process Registry is not installed; cannot spawn git outside Process Launch"
-                    .to_owned(),
-            ));
-        }
-    };
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(RepositoryFilesError::Io)?;
 
-    if !output.succeeded() {
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         let message = if stderr.is_empty() {
             format!(
                 "git ls-files failed in `{}` with status {:?}",
                 root.display(),
-                output.exit_code
+                output.status.code()
             )
         } else {
             format!("git ls-files failed in `{}`: {stderr}", root.display())
@@ -182,7 +166,7 @@ pub fn repository_file_preview(path: &Path) -> String {
     lines.join("\n")
 }
 
-pub(crate) fn cache_key(root: &Path) -> PathBuf {
+pub fn cache_key(root: &Path) -> PathBuf {
     fs::canonicalize(root).unwrap_or_else(|_| normalize_path(root))
 }
 
@@ -211,7 +195,7 @@ fn symbolic_ref_name(head: &[u8]) -> Option<&str> {
         .filter(|name| !name.is_empty())
 }
 
-pub(crate) fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
+pub fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     let metadata = fs::metadata(path).ok()?;
     Some(FileFingerprint {
         modified: metadata.modified().ok(),
@@ -219,7 +203,7 @@ pub(crate) fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     })
 }
 
-pub(crate) fn resolve_git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
+pub fn resolve_git_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
     let marker = root.join(".git");
     if marker.is_dir() {
         return Some((marker.clone(), marker));
@@ -242,7 +226,7 @@ fn parse_gitdir_reference(contents: &str) -> Option<&str> {
         .filter(|reference| !reference.is_empty())
 }
 
-pub(crate) fn worktree_common_dir(gitdir: &Path) -> Option<PathBuf> {
+pub fn worktree_common_dir(gitdir: &Path) -> Option<PathBuf> {
     let commondir_path = gitdir.join("commondir");
     let common_dir = match fs::read_to_string(&commondir_path) {
         Ok(contents) => parse_relative_git_path(gitdir, &contents)
@@ -271,7 +255,7 @@ fn parse_relative_git_path(base: &Path, contents: &str) -> Option<PathBuf> {
         .map(|reference| resolve_git_path(base, reference))
 }
 
-pub(crate) fn resolve_git_path(base: &Path, reference: &str) -> PathBuf {
+pub fn resolve_git_path(base: &Path, reference: &str) -> PathBuf {
     #[cfg(windows)]
     if let Some(path) = windows_git_absolute_path(reference) {
         return normalize_path(&path);

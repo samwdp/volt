@@ -13,6 +13,9 @@ workspace = true
 [package.rust-version]
 workspace = true
 
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
+
 [lib]
 path = "src/lib.rs"
 name = "editor_path"

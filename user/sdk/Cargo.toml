@@ -1,5 +1,6 @@
 [package]
 name = "editor-plugin-api"
+build = "build.rs"
 
 [package.edition]
 workspace = true
@@ -13,39 +14,18 @@ workspace = true
 [package.rust-version]
 workspace = true
 
+[features]
+default = []
+# Host/dev crates only. Staged User Library builds leave this off.
+test-helpers = []
+
 [dependencies]
 abi_stable = "0.11"
+libloading = "0.8.9"
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-
-[dependencies.editor-buffer]
-path = "../../crates/editor-buffer"
-
-[dependencies.editor-core]
-path = "../../crates/editor-core"
-
-[dependencies.editor-dap]
-path = "../../crates/editor-dap"
-
-[dependencies.editor-fs]
-path = "../../crates/editor-fs"
-
-[dependencies.editor-git]
-path = "../../crates/editor-git"
-
-[dependencies.editor-icons]
-path = "../../crates/editor-icons"
-
-[dependencies.editor-jobs]
-path = "../../crates/editor-jobs"
-
-[dependencies.editor-lsp]
-path = "../../crates/editor-lsp"
-
-[dependencies.editor-syntax]
-path = "../../crates/editor-syntax"
-
-[dependencies.editor-theme]
-path = "../../crates/editor-theme"
+tree-sitter = "0.26.7"
+tree-sitter-language = "0.1.7"
 
 [lib]
 path = "src/lib.rs"

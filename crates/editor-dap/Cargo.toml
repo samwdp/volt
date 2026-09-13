@@ -24,6 +24,9 @@ path = "../editor-jobs"
 [dependencies.editor-tool-install]
 path = "../editor-tool-install"
 
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
+
 [lib]
 path = "src/lib.rs"
 name = "editor_dap"

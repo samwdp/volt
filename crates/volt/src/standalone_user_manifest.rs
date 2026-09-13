@@ -208,7 +208,7 @@ pub fn inline_workspace_package_fields(mut manifest: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManifestPathReplacement, inline_workspace_package_fields, manifest_path_dependencies,
+        inline_workspace_package_fields, manifest_path_dependencies,
         standalone_user_path_replacements, standalone_user_vendor_crates,
     };
     use std::{
@@ -225,18 +225,14 @@ mod tests {
     }
 
     #[test]
-    fn standalone_user_vendor_crates_include_transitive_workspace_dependencies() {
+    fn standalone_user_vendor_crates_is_empty_when_plugin_sdk_is_a_leaf() {
         let workspace_root = workspace_root();
         let vendor_crates =
             standalone_user_vendor_crates(&workspace_root, &workspace_root.join("user"))
                 .expect("collect standalone user vendor crates");
-
-        assert!(vendor_crates.contains("editor-core"));
-        assert!(vendor_crates.contains("editor-lsp"));
-        assert!(vendor_crates.contains("editor-syntax"));
         assert!(
-            vendor_crates.contains("editor-path"),
-            "transitive workspace crates should be vendored for standalone user builds"
+            vendor_crates.is_empty(),
+            "Plugin SDK must not path-depend on Volt crates, so staging must not vendor them: {vendor_crates:?}"
         );
     }
 
@@ -256,15 +252,14 @@ mod tests {
         )
         .expect("sdk manifest replacements");
 
-        assert!(user_manifest.is_empty());
-        assert!(sdk_manifest.contains(&ManifestPathReplacement {
-            from: "../../crates/editor-lsp".to_owned(),
-            to: "../vendor/editor-lsp".to_owned(),
-        }));
-        assert!(sdk_manifest.contains(&ManifestPathReplacement {
-            from: "../../crates/editor-theme".to_owned(),
-            to: "../vendor/editor-theme".to_owned(),
-        }));
+        assert!(
+            user_manifest.is_empty(),
+            "User Library must not path-depend on crates/: {user_manifest:?}"
+        );
+        assert!(
+            sdk_manifest.is_empty(),
+            "Plugin SDK must not path-depend on crates/: {sdk_manifest:?}"
+        );
     }
 
     fn user_library_source_files(root: &Path) -> Vec<PathBuf> {
@@ -331,12 +326,13 @@ mod tests {
 
         let dependencies =
             manifest_path_dependencies(&manifest_path).expect("user path dependencies");
+        let unique_paths = dependencies
+            .iter()
+            .map(|dependency| dependency.raw_path.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            dependencies
-                .iter()
-                .map(|dependency| dependency.raw_path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["sdk"],
+            unique_paths,
+            ["sdk"].into_iter().collect(),
             "User Library must path-depend only on the Plugin SDK"
         );
     }

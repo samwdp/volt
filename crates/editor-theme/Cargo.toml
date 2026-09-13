@@ -13,7 +13,8 @@ workspace = true
 [package.rust-version]
 workspace = true
 
-[dependencies]
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
 
 [lib]
 path = "src/lib.rs"

@@ -1164,6 +1164,9 @@ dependencies = [
 [[package]]
 name = "editor-core"
 version = "0.1.0"
+dependencies = [
+ "editor-plugin-api",
+]
 
 [[package]]
 name = "editor-dap"
@@ -1171,6 +1174,7 @@ version = "0.1.0"
 dependencies = [
  "dap-types",
  "editor-jobs",
+ "editor-plugin-api",
  "editor-tool-install",
  "serde",
  "serde_json",
@@ -1198,8 +1202,7 @@ dependencies = [
 name = "editor-fs"
 version = "0.1.0"
 dependencies = [
- "editor-path",
- "serde",
+ "editor-plugin-api",
  "serde_json",
 ]
 
@@ -1208,11 +1211,15 @@ name = "editor-git"
 version = "0.1.0"
 dependencies = [
  "editor-jobs",
+ "editor-plugin-api",
 ]
 
 [[package]]
 name = "editor-icons"
 version = "0.1.0"
+dependencies = [
+ "editor-plugin-api",
+]
 
 [[package]]
 name = "editor-issues"
@@ -1233,6 +1240,7 @@ dependencies = [
  "editor-buffer",
  "editor-jobs",
  "editor-path",
+ "editor-plugin-api",
  "editor-tool-install",
  "lsp-types",
  "serde",
@@ -1251,6 +1259,9 @@ dependencies = [
 [[package]]
 name = "editor-path"
 version = "0.1.0"
+dependencies = [
+ "editor-plugin-api",
+]
 
 [[package]]
 name = "editor-picker"
@@ -1261,17 +1272,11 @@ name = "editor-plugin-api"
 version = "0.1.0"
 dependencies = [
  "abi_stable",
- "editor-buffer",
- "editor-core",
- "editor-dap",
- "editor-fs",
- "editor-git",
- "editor-icons",
- "editor-jobs",
- "editor-lsp",
- "editor-syntax",
- "editor-theme",
+ "libloading 0.8.9",
+ "serde",
  "serde_json",
+ "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -1345,6 +1350,7 @@ dependencies = [
  "criterion",
  "editor-buffer",
  "editor-path",
+ "editor-plugin-api",
  "find-msvc-tools",
  "libloading 0.8.9",
  "tree-sitter",
@@ -1364,6 +1370,9 @@ dependencies = [
 [[package]]
 name = "editor-theme"
 version = "0.1.0"
+dependencies = [
+ "editor-plugin-api",
+]
 
 [[package]]
 name = "editor-tool-install"
@@ -1371,6 +1380,7 @@ version = "0.1.0"
 dependencies = [
  "editor-jobs",
  "editor-path",
+ "editor-plugin-api",
 ]
 
 [[package]]

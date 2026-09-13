@@ -5,7 +5,6 @@ mod registry;
 mod workspace_roots;
 
 pub use client::*;
-pub use editor_tool_install::InstallRecipe;
 pub use registry::*;
 
 #[cfg(test)]

@@ -5,24 +5,23 @@ mod hooks;
 mod key_sequence;
 mod keymaps;
 mod model;
-mod sections;
 mod services;
 mod workspace_nav;
 
 pub use commands::{CommandDefinition, CommandError, CommandRegistry, CommandSource};
+pub use editor_plugin_api::{
+    DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS, Section, SectionAction, SectionCollapseState, SectionItem,
+    SectionRenderLine, SectionRenderLineKind, SectionTree,
+};
 pub use hooks::{HookBus, HookDefinition, HookError, HookEvent, builtins};
 pub use key_sequence::{
-    DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS, DEFAULT_SEQUENCE_IDLE_TIMEOUT_MS, KeySequenceOptions,
-    KeySequencePush, KeySequenceTick, PendingKeySequence, push_key_sequence, tick_key_sequence,
+    DEFAULT_SEQUENCE_IDLE_TIMEOUT_MS, KeySequenceOptions, KeySequencePush, KeySequenceTick,
+    PendingKeySequence, push_key_sequence, tick_key_sequence,
 };
 pub use keymaps::{KeyBinding, KeymapError, KeymapRegistry, KeymapScope, KeymapVimMode};
 pub use model::{
     Buffer, BufferId, BufferKind, EditorModel, ModelError, Pane, PaneId, Popup, PopupId, Window,
     WindowId, Workspace, WorkspaceId,
-};
-pub use sections::{
-    Section, SectionAction, SectionCollapseState, SectionItem, SectionRenderLine,
-    SectionRenderLineKind, SectionTree,
 };
 pub use services::ServiceRegistry;
 pub use workspace_nav::{

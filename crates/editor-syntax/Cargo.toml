@@ -24,6 +24,9 @@ path = "../editor-buffer"
 [dependencies.editor-path]
 path = "../editor-path"
 
+[dependencies.editor-plugin-api]
+path = "../../user/sdk"
+
 [dev-dependencies]
 criterion = "0.5.1"
 tree-sitter-html = "0.23.2"

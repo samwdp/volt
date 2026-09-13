@@ -1,6 +1,18 @@
 #![doc = r#"Shared extension-facing types used by the core editor and the compiled user library."#]
 
 pub mod abi;
+pub mod dap;
+pub mod fs;
+mod fs_discovery;
+pub mod git;
+mod git_repository_files;
+pub mod icons;
+pub mod install;
+pub mod lsp;
+pub mod path;
+pub mod sections;
+pub mod syntax;
+pub mod theme;
 pub mod treesitter;
 
 use abi_stable::{
@@ -8,38 +20,59 @@ use abi_stable::{
     std_types::{ROption, RString, RVec},
 };
 
-pub use editor_buffer::TextBuffer;
-pub use editor_core::{
-    DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS, Section, SectionAction, SectionItem, SectionTree,
-};
-pub use editor_dap::{
-    BreakpointState, BreakpointStore, BreakpointToggle, DapClientError, DapClientManager,
-    DapLogEntry, DapLogSnapshot, DapSessionInfo, DebugAdapterRegistry, DebugAdapterRootStrategy,
-    DebugAdapterSpec, DebugAdapterTransport, DebugConfiguration, DebugRequestKind,
-    DebugSessionPlan, StoredBreakpoint,
-};
-pub use editor_fs::{
+pub const DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS: u64 = 250;
+
+pub use dap::{DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport};
+pub use fs::{
     DirectoryEntry, DirectoryEntryKind, ProjectCandidate, ProjectKind, ProjectSearchRoot,
-    project_discovery_for_picker, project_discovery_snapshot, reset_project_discovery_cache,
+    compact_project_path, discover_projects,
+};
+pub use fs_discovery::{
+    PROJECT_DISCOVERY_TTL, ProjectDiscoveryFingerprint, ProjectDiscoverySnapshot,
+    cancel_project_discovery_scan, current_project_discovery_snapshot,
+    invalidate_project_discovery_cache, project_discovery_background_tick,
+    project_discovery_for_picker, project_discovery_forget_candidate,
+    project_discovery_persist_path, project_discovery_request_scan,
+    project_discovery_rescan_cached_roots, project_discovery_snapshot,
+    reset_project_discovery_cache, wait_for_project_discovery,
+};
+#[cfg(feature = "test-helpers")]
+pub use fs_discovery::{
     set_project_discovery_persist_path_for_test, set_project_discovery_ttl_for_test,
-    set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
+    set_project_discovery_worker_blocked_for_test,
 };
-pub use editor_git::{
-    GitLogEntry, GitStatusSnapshot, RepositoryStatus, StatusEntry, list_repository_files,
-    parse_stash_list, parse_status,
+pub use git::{
+    GitLogEntry, GitStashEntry, GitStatusError, GitStatusSnapshot, RepositoryFilesError,
+    RepositoryStatus, StatusEntry, parse_log_oneline, parse_stash_list, parse_status,
 };
-pub use editor_icons::{
+pub use git_repository_files::{
+    FileFingerprint, REPOSITORY_FILE_PREVIEW_MAX_BYTES, REPOSITORY_FILE_PREVIEW_MAX_LINES,
+    cache_key, file_fingerprint, invalidate_repository_file_list_cache,
+    invalidate_repository_file_list_cache_for, list_repository_files,
+    list_repository_files_uncached, repository_file_list_generation, repository_file_preview,
+    resolve_git_dirs, resolve_git_path, worktree_common_dir,
+};
+pub use icons::{
     IconFontCategory, IconFontSymbol, all_symbols, find_symbol, seti_directory_icon, seti_file_icon,
 };
-pub use editor_jobs::{ProcessRegistry, install_app_process_registry};
-pub use editor_lsp::{
-    InstallRecipe, LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind,
+pub use install::InstallRecipe;
+pub use lsp::{
+    LanguageServerRootStrategy, LanguageServerSpec, LspCompletionKind, WorkspaceConfiguration,
+    WorkspaceConfigurationValue,
 };
-pub use editor_syntax::{
-    CaptureThemeMapping, GrammarSource, LanguageConfiguration, SyntaxNodeContext, SyntaxPoint,
-    SyntaxRegistry,
+pub use path::{
+    PathMatcher, PathPattern, PathPatternKind, grammar_install_root, normalize_extension,
+    volt_data_dir,
 };
-pub use editor_theme::{Color, Theme, ThemeOption, ThemeStyle};
+pub use sections::{
+    Section, SectionAction, SectionCollapseState, SectionItem, SectionRenderLine,
+    SectionRenderLineKind, SectionTree,
+};
+pub use syntax::{
+    CaptureThemeMapping, GrammarSource, LanguageConfiguration, LanguageLoader, LanguageProvider,
+    SyntaxNodeContext, SyntaxPoint, shared_library_file_name,
+};
+pub use theme::{Color, Theme, ThemeOption, ThemeStyle, ThemeTokenStyle};
 
 pub use abi::{
     AbiAcpClient, AbiAutocompleteProvider, AbiBrowserFeatureSpec, AbiCaptureThemeMapping, AbiColor,
@@ -56,7 +89,7 @@ pub use abi::{
     AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceDockSide, AbiWorkspaceRoot,
     UserLibraryModule, UserLibraryModuleRef,
 };
-pub use editor_icons::symbols;
+pub use icons::symbols;
 
 // ─── Protocol hook name constants ───────────────────────────────────────────
 //
@@ -1834,7 +1867,7 @@ pub trait UserLibrary: Send + Sync {
         8
     }
     fn autocomplete_token_icon(&self) -> &'static str {
-        editor_icons::symbols::md::MD_FORM_TEXTBOX
+        crate::symbols::md::MD_FORM_TEXTBOX
     }
     fn hover_providers(&self) -> Vec<HoverProvider> {
         Vec::new()
@@ -1843,10 +1876,10 @@ pub trait UserLibrary: Send + Sync {
         10
     }
     fn hover_token_icon(&self) -> &'static str {
-        editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE
+        crate::symbols::md::MD_HELP_CIRCLE_OUTLINE
     }
     fn hover_signature_icon(&self) -> &'static str {
-        editor_icons::symbols::md::MD_SIGNATURE
+        crate::symbols::md::MD_SIGNATURE
     }
     fn picker_providers(&self) -> Vec<PickerProviderSpec> {
         Vec::new()
@@ -2066,13 +2099,13 @@ pub trait UserLibrary: Send + Sync {
         decode_modeline(&self.statusline_render(context))
     }
     fn statusline_lsp_connected_icon(&self) -> &'static str {
-        editor_icons::symbols::md::MD_LAN_CONNECT
+        crate::symbols::md::MD_LAN_CONNECT
     }
     fn statusline_lsp_error_icon(&self) -> &'static str {
-        editor_icons::symbols::cod::COD_ERROR
+        crate::symbols::cod::COD_ERROR
     }
     fn statusline_lsp_warning_icon(&self) -> &'static str {
-        editor_icons::symbols::cod::COD_WARNING
+        crate::symbols::cod::COD_WARNING
     }
     fn lsp_diagnostic_icon(&self) -> &'static str {
         "●"
@@ -2096,7 +2129,7 @@ pub trait UserLibrary: Send + Sync {
         "⏽"
     }
     fn icon_symbols(&self) -> &'static [IconFontSymbol] {
-        editor_icons::all_symbols()
+        crate::all_symbols()
     }
     fn supports_plugin_evaluate(&self, kind: &str) -> bool {
         self.plugin_buffer(kind)
@@ -3109,7 +3142,7 @@ pub struct KeymapConfig {
 impl Default for KeymapConfig {
     fn default() -> Self {
         Self {
-            ambiguous_prefix_timeout_ms: editor_core::DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS,
+            ambiguous_prefix_timeout_ms: DEFAULT_AMBIGUOUS_PREFIX_TIMEOUT_MS,
         }
     }
 }
