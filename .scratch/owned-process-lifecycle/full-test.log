@@ -1,0 +1,1503 @@
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-lsp\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+37 ~ crate-type = ["lib"]
+38 + [lints]
+39 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+37 ~ crate-type = ["lib"]
+38 + [lints]
+   |
+warning: `editor-lsp` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-buffer\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+25 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+   |
+warning: `editor-buffer` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-syntax\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+63 ~ harness = false
+64 + [lints]
+65 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+63 ~ harness = false
+64 + [lints]
+   |
+warning: `editor-syntax` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-render\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+25 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+   |
+warning: `editor-render` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-tool-install\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+26 ~ crate-type = ["lib"]
+27 + [lints]
+28 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+26 ~ crate-type = ["lib"]
+27 + [lints]
+   |
+warning: `editor-tool-install` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-terminal\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+28 ~ crate-type = ["lib"]
+29 + [lints]
+30 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+28 ~ crate-type = ["lib"]
+29 + [lints]
+   |
+warning: `editor-terminal` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-theme\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-theme` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-picker\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-picker` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-path\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+20 ~ crate-type = ["lib"]
+21 + [lints]
+22 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+20 ~ crate-type = ["lib"]
+21 + [lints]
+   |
+warning: `editor-path` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-icons\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+25 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+   |
+warning: `editor-icons` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\volt\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+94 ~ required-features = []
+95 + [lints]
+96 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+94 ~ required-features = []
+95 + [lints]
+   |
+warning: `volt` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-git\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-git` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-db\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+72 ~ crate-type = ["lib"]
+73 + [lints]
+74 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+72 ~ crate-type = ["lib"]
+73 + [lints]
+   |
+warning: `editor-db` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-issues\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-issues` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-core\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-core` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> user\sdk\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+51 ~ crate-type = ["lib"]
+52 + [lints]
+53 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+51 ~ crate-type = ["lib"]
+52 + [lints]
+   |
+warning: `editor-plugin-api` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> xtask\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ required-features = []
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ required-features = []
+23 + [lints]
+   |
+warning: `xtask` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-dap\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+31 ~ crate-type = ["lib"]
+32 + [lints]
+33 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+31 ~ crate-type = ["lib"]
+32 + [lints]
+   |
+warning: `editor-dap` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+   --> crates\editor-sdl\Cargo.toml
+    = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+    |
+159 ~ crate-type = ["lib"]
+160 + [lints]
+161 + workspace = true
+    |
+help: to clarify your intent to not inherit, add:
+    |
+159 ~ crate-type = ["lib"]
+160 + [lints]
+    |
+warning: `editor-sdl` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-plugin-host\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+29 ~ crate-type = ["lib"]
+30 + [lints]
+31 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+29 ~ crate-type = ["lib"]
+30 + [lints]
+   |
+warning: `editor-plugin-host` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-fs\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+27 ~ crate-type = ["lib"]
+28 + [lints]
+29 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+27 ~ crate-type = ["lib"]
+28 + [lints]
+   |
+warning: `editor-fs` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> user\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+57 ~ crate-type = ["cdylib", "rlib"]
+58 + [lints]
+59 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+57 ~ crate-type = ["cdylib", "rlib"]
+58 + [lints]
+   |
+warning: `volt-user` (manifest) generated 1 warning
+   Compiling winapi v0.3.9
+   Compiling editor-path v0.1.0 (P:\volt\crates\editor-path)
+   Compiling editor-buffer v0.1.0 (P:\volt\crates\editor-buffer)
+   Compiling editor-icons v0.1.0 (P:\volt\crates\editor-icons)
+   Compiling editor-git v0.1.0 (P:\volt\crates\editor-git)
+   Compiling editor-theme v0.1.0 (P:\volt\crates\editor-theme)
+   Compiling editor-core v0.1.0 (P:\volt\crates\editor-core)
+   Compiling editor-render v0.1.0 (P:\volt\crates\editor-render)
+   Compiling volt-user v0.1.0 (P:\volt\user)
+   Compiling editor-fs v0.1.0 (P:\volt\crates\editor-fs)
+   Compiling editor-picker v0.1.0 (P:\volt\crates\editor-picker)
+   Compiling editor-issues v0.1.0 (P:\volt\crates\editor-issues)
+   Compiling volt v0.1.0 (P:\volt\crates\volt)
+   Compiling editor-syntax v0.1.0 (P:\volt\crates\editor-syntax)
+   Compiling editor-ui v0.1.0 (P:\volt\crates\editor-ui)
+   Compiling xtask v0.1.0 (P:\volt\xtask)
+   Compiling editor-markdown v0.1.0 (P:\volt\crates\editor-markdown)
+   Compiling command-group v5.0.1
+   Compiling libloading v0.7.4
+   Compiling ntapi v0.4.3
+   Compiling editor-jobs v0.1.0 (P:\volt\crates\editor-jobs)
+   Compiling abi_stable v0.11.3
+   Compiling editor-tool-install v0.1.0 (P:\volt\crates\editor-tool-install)
+   Compiling editor-terminal v0.1.0 (P:\volt\crates\editor-terminal)
+   Compiling editor-dap v0.1.0 (P:\volt\crates\editor-dap)
+   Compiling editor-lsp v0.1.0 (P:\volt\crates\editor-lsp)
+   Compiling sysinfo v0.37.2
+   Compiling editor-plugin-api v0.1.0 (P:\volt\user\sdk)
+   Compiling editor-db v0.1.0 (P:\volt\crates\editor-db)
+   Compiling editor-plugin-host v0.1.0 (P:\volt\crates\editor-plugin-host)
+   Compiling editor-sdl v0.1.0 (P:\volt\crates\editor-sdl)
+warning: linker stdout: LINK : warning LNK4098: defaultlib 'MSVCRTD' conflicts with use of other libs; use /NODEFAULTLIB:library
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `editor-sdl` (test "idle_wait") generated 1 warning
+warning: `volt` (bin "volt" test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 21s
+     Running unittests src\lib.rs (target\debug\build\editor-buffer/91b16d757b4ee150\out\editor_buffer-91b16d757b4ee150.exe)
+
+running 53 tests
+test tests::encode_text_for_disk_applies_preferred_ending ... ok
+test tests::around_word_ranges_at_line_end_exclude_newline ... ok
+test tests::edits_since_returns_contiguous_forward_edits ... ok
+test tests::from_reader_normalizes_crlf_and_tracks_line_endings ... ok
+test tests::language_matches_markup_tags_only_html_xml_jsx_tsx ... ok
+test tests::highlight_document_captures_edits_without_undo_history ... ok
+test tests::delimited_and_tag_ranges_cover_quickref_objects ... ok
+test tests::line_ranges_and_char_searches_resolve_expected_points ... ok
+test tests::delimited_ranges_cover_quotes_and_brackets ... ok
+test tests::move_matching_delimiter_ignores_html_tags_outside_markup_languages ... ok
+test tests::highlight_document_falls_back_to_full_parse_without_contiguous_edits ... ok
+test tests::big_word_backward_end_and_match_pair_cover_quickref_motion_slice ... ok
+test tests::move_matching_delimiter_scans_forward_to_paren_on_the_line ... ok
+test tests::move_word_backward_and_end_cover_word_navigation ... ok
+test tests::move_matching_delimiter_jumps_between_html_tags ... ok
+test tests::reload_from_path_requires_a_backing_file ... ok
+test tests::move_word_forward_advances_to_the_next_word ... ok
+test tests::move_matching_delimiter_scans_forward_to_html_tag_on_the_line ... ok
+test tests::paragraph_ranges_cover_inner_and_around_text_objects ... ok
+test tests::replace_insert_and_backspace_update_cursor_and_content ... ok
+test tests::move_matching_delimiter_jumps_nested_html_tags ... ok
+test tests::show_paren_at_closing_paren_finds_opening_paren ... ok
+test tests::show_paren_at_closing_html_tag_finds_opening_tag ... ok
+test tests::show_paren_at_comparison_with_greater_on_same_line_is_not_html_tag ... ok
+test tests::show_paren_at_html_tag_ignores_inner_content ... ok
+test tests::show_paren_at_html_tag_with_attributes_finds_closing_tag ... ok
+test tests::show_paren_at_ignores_cursor_off_delimiter ... ok
+test tests::show_paren_at_html_tags_ignored_outside_markup_languages ... ok
+test tests::reload_from_path_returns_false_when_disk_state_is_unchanged ... ok
+test tests::show_paren_at_less_than_identifier_is_not_an_html_tag ... ok
+test tests::show_paren_at_less_than_zero_is_not_an_html_tag ... ok
+test tests::sentence_and_paragraph_motions_cover_structure_navigation ... ok
+test tests::show_paren_at_jsx_tag_with_and_expression_finds_closing_tag ... ok
+test tests::sentence_ranges_cover_inner_and_around_text_objects ... ok
+test tests::show_paren_at_multiline_html_tag_finds_closing_tag ... ok
+test tests::show_paren_at_nested_paren_matches_inner_pair ... ok
+test tests::show_paren_at_opening_html_tag_finds_closing_tag ... ok
+test tests::show_paren_at_opening_paren_finds_closing_paren ... ok
+test tests::show_paren_at_self_closing_html_tag_has_no_pair ... ok
+test tests::reload_from_path_updates_content_preserves_cursor_and_marks_clean ... ok
+test tests::show_paren_at_unmatched_html_tag_marks_mismatch ... ok
+test tests::show_paren_at_unmatched_paren_marks_mismatch ... ok
+test tests::save_preserves_crlf_bytes_after_edit ... ok
+test tests::show_paren_at_nested_html_tags_match_same_name ... ok
+test tests::text_snapshot_preserves_pre_edit_content_and_cursor ... ok
+test tests::undo_and_redo_restore_previous_states ... ok
+test tests::word_kind_ranges_cover_big_word_objects ... ok
+test tests::word_motions_treat_punctuation_runs_as_words ... ok
+test tests::write_to_uses_the_selected_line_ending ... ok
+test tests::word_ranges_cover_inner_and_around_text_objects ... ok
+test tests::word_motions_stop_on_punctuation_before_crossing_lines ... ok
+test tests::whole_buffer_replace_keeps_preferred_line_ending_on_save ... ok
+test tests::large_buffers_expose_line_windows_without_full_materialization ... ok
+
+test result: ok. 53 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running unittests src\lib.rs (target\debug\build\editor-core/9da8c54c2d75800f\out\editor_core-9da8c54c2d75800f.exe)
+
+running 43 tests
+test key_sequence::tests::ambiguous_short_waits_then_fires_on_timeout ... ok
+test key_sequence::tests::exact_chord_without_longer_prefix_fires_immediately ... ok
+test keymaps::tests::global_is_fallback_when_no_minor_mode_claims_chord ... ok
+test key_sequence::tests::ambiguous_prefix_timeout_is_configurable ... ok
+test key_sequence::tests::incompatible_input_fires_pending_short_then_retries_token ... ok
+test key_sequence::tests::longer_chord_within_window_cancels_short ... ok
+test keymaps::tests::autocomplete_overrides_workspace_while_active ... ok
+test keymaps::tests::duplicate_detection_uses_canonical_chords ... ok
+test keymaps::tests::hover_overrides_workspace_while_active ... ok
+test keymaps::tests::normalize_chord_reorders_modifiers_and_aliases ... ok
+test keymaps::tests::popup_mode_does_not_claim_workspace_dock_chords ... ok
+test keymaps::tests::popup_overrides_workspace_and_global_while_active ... ok
+test keymaps::tests::dap_mode_overrides_global_f5_while_session_live ... ok
+test keymaps::tests::workspace_minor_mode_overrides_global_for_same_chord ... ok
+test key_sequence::tests::incompatible_input_without_pending_short_cancels ... ok
+test sections::tests::render_lines_respects_collapsed_state ... ok
+test keymaps::tests::registry_resolves_equivalent_sequence_spellings ... ok
+test tests::model_focuses_existing_buffer_in_active_pane ... ok
+test tests::command_registry_executes_commands_and_hooks_dispatch_events ... ok
+test tests::model_closes_active_pane_without_closing_buffers ... ok
+test tests::model_splits_pane_and_focuses ... ok
+test tests::model_switches_and_closes_workspaces ... ok
+test tests::runtime_bootstrap_tracks_editor_graph_and_services ... ok
+test tests::runtime_descriptor_matches_expected_foundation_values ... ok
+test tests::runtime_executes_keybindings_registered_with_legacy_aliases ... ok
+test tests::runtime_executes_stacked_keybinding_commands_in_order ... ok
+test workspace_nav::tests::default_workspace_not_in_list_enters_cycle_at_ends ... ok
+test tests::runtime_resolves_mode_specific_keybindings ... ok
+test workspace_nav::tests::fewer_than_two_project_workspaces_yields_none ... ok
+test workspace_nav::tests::mark_and_jump_use_normalized_path_identity ... ok
+test workspace_nav::tests::mark_appends_absent_root_and_duplicate_is_no_op ... ok
+test workspace_nav::tests::mark_list_parse_and_serialize_strip_blank_lines_and_preserve_order ... ok
+test workspace_nav::tests::marked_workspace_jump_switches_open_root_opens_closed_and_notifies_missing ... ok
+test workspace_nav::tests::next_and_previous_wrap_at_ends ... ok
+test workspace_nav::tests::next_moves_forward_in_open_order ... ok
+test workspace_nav::tests::normalize_project_root_path_strips_windows_verbatim_prefix ... ok
+test workspace_nav::tests::previous_moves_backward_in_open_order ... ok
+test workspace_nav::tests::project_roots_equal_treats_verbatim_and_plain_spellings_as_same_identity ... ok
+test workspace_nav::tests::slot_returns_first_four_marked_workspaces_and_empty_beyond_list ... ok
+test workspace_nav::tests::unmark_removes_root_without_reordering_remaining_marks ... ok
+test workspace_nav::tests::worktree_remove_missing_path_is_noop ... ok
+test workspace_nav::tests::worktree_remove_plans_matching_workspaces_and_force_remove_args ... ok
+test workspace_nav::tests::worktree_remove_with_no_matching_workspaces_still_plans_git_remove ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-dap/d70f2ab3e48479e4\out\editor_dap-d70f2ab3e48479e4.exe)
+
+running 35 tests
+test breakpoints::tests::debug_source_paths_eq_ignores_slash_style_and_windows_case ... ok
+test breakpoints::tests::extras_persist_on_stored_breakpoint ... ok
+test breakpoints::tests::store_survives_conceptually_across_buffer_close ... ok
+test breakpoints::tests::verification_updates_state_from_adapter ... ok
+test breakpoints::tests::delete_removes_current_line_breakpoint ... ok
+test breakpoints::tests::toggle_adds_and_removes_without_session ... ok
+test breakpoints::tests::workspaces_are_isolated ... ok
+test client::tests::launch_arguments_always_send_program_path ... ok
+test client::tests::stdio_framing_round_trips_initialize ... ok
+test client::tests::toggle_breakpoint_without_session_stays_pending ... ok
+test client::tests::one_session_per_workspace_enforced ... ok
+test config::tests::configuration_holes_detect_missing_launch_program ... ok
+test client::tests::continue_to_process_exit_queues_terminated ... ok
+test client::tests::live_toggle_calls_set_breakpoints ... ok
+test client::tests::start_session_syncs_stored_breakpoints_to_adapter ... ok
+test config::tests::history_records_last_and_recent ... ok
+test client::tests::missing_adapter_binary_is_clear ... ok
+test tests::prepared_session_includes_configuration_and_launch_spec ... ok
+test tests::registry_prefers_higher_preference_when_multiple_match ... ok
+test config::tests::default_workspace_skips_deep_inference ... ok
+test tests::registry_resolves_adapter_by_extension ... ok
+test config::tests::deep_inference_finds_dotnet_dll ... ok
+test config::tests::loads_project_debug_configurations ... ok
+test config::tests::deep_inference_finds_cargo_binary_and_heuristic ... ok
+test client::tests::watches_eval_switch_context_and_breakpoint_extras_against_fake_adapter ... ok
+test client::tests::expand_collapse_and_reapply_nested_locals_and_watches ... ok
+test client::tests::restart_reuses_configuration_against_fake_adapter ... ok
+test client::tests::continue_step_pause_and_locals_against_fake_adapter ... ok
+test client::tests::debug_stop_after_attach_leaves_process_running ... ok
+test client::tests::client_initialize_launch_disconnect_against_fake_tcp_adapter ... ok
+test client::tests::sharpdbg_step_into_struct_construction_keeps_session ... ok
+test client::tests::sharpdbg_step_over_struct_construction_keeps_session ... ok
+test client::tests::sharpdbg_step_into_from_entry_keeps_session_through_struct_ctor ... ok
+test client::tests::sharpdbg_double_step_over_struct_construction_keeps_session ... ok
+test client::tests::sharpdbg_expand_struct_local_keeps_session ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.62s
+
+     Running unittests src\lib.rs (target\debug\build\editor-db/d5ce010f37ab03fd\out\editor_db-d5ce010f37ab03fd.exe)
+
+running 14 tests
+test tests::split_sql_statements_skips_semicolons_inside_quotes_and_comments ... ok
+test tests::sql_scope_prefers_selection_and_falls_back_to_current_statement ... ok
+test tests::parse_connect_prompt_supports_session_only_and_remembered_formats ... ok
+test tests::render_rows_draws_boxed_table_and_right_aligns_numbers ... ok
+test tests::connection_descriptor_detects_all_supported_engines ... ok
+test tests::db_browser_renderer_customizes_rows_and_preserves_actions ... ok
+test tests::db_browser_renderer_rejects_row_count_mismatch ... ok
+test tests::sqls_workspace_settings_for_query_buffer_use_attached_session ... ok
+test tests::sqls_initialization_options_for_query_buffer_use_attached_session ... ok
+test tests::sqls_workspace_settings_preserve_mssql_data_source_name ... ok
+test tests::remembered_connections_store_metadata_separately_from_secret ... ok
+test tests::snippets_and_history_persist ... ok
+test tests::sqlite_batch_execution_concatenates_query_results ... ok
+test tests::sqlite_query_execution_and_schema_cache_work ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\lib.rs (target\debug\build\editor-fs/2d50a95397688787\out\editor_fs-2d50a95397688787.exe)
+
+running 16 tests
+test tests::discover_projects_skips_missing_roots_without_failing ... ok
+test tests::directory_buffer_reads_and_renames_entries ... ok
+test tests::discover_projects_finds_git_repositories_and_worktrees ... ok
+test tests::discover_projects_max_depth_zero_considers_only_the_root ... ok
+test tests::discover_projects_resolves_worktree_repository_metadata ... ok
+test tests::discover_projects_resolves_git_for_windows_worktree_metadata ... ok
+test tests::project_discovery_second_snapshot_with_same_roots_is_cache_hit ... ok
+test tests::project_discovery_superseded_scan_is_dropped ... ok
+test tests::project_discovery_fingerprint_change_invalidates_cache ... ok
+test tests::project_discovery_blocked_snapshot_is_empty_until_scan_completes ... ok
+test tests::project_discovery_for_picker_reschedules_when_cache_is_fresh ... ok
+test tests::project_discovery_forget_candidate_updates_memory_and_disk ... ok
+test tests::project_discovery_persists_and_reseeds_cache_from_disk ... ok
+test tests::project_discovery_snapshot_returns_git_and_worktree_candidates ... ok
+test tests::project_discovery_stale_snapshot_returns_candidates_while_rescan_runs ... ok
+test tests::project_discovery_cache_preserves_worktree_display_name ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running unittests src\lib.rs (target\debug\build\editor-git/de44297a60e0ce12\out\editor_git-de44297a60e0ce12.exe)
+
+running 19 tests
+test tests::parser_extracts_unborn_branch_name ... ok
+test tests::parser_extracts_branch_and_sections ... ok
+test probe::tests::parse_git_numstat_sums_rows_and_ignores_binary_placeholders ... ok
+test tests::parses_log_oneline_entries ... ok
+test tests::parses_stash_list_entries ... ok
+test tests::repository_file_preview_falls_back_to_path_for_invalid_utf8 ... ok
+test tests::repository_file_preview_includes_path_and_caps_lines ... ok
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it
+test tests::cached_repository_file_listing_reuses_paths_until_identity_changes ... ok
+warning: in the working copy of 'alpha.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'beta.txt', LF will be replaced by CRLF the next time Git touches it
+test probe::tests::git_probe_numstat_spawns_once_until_head_or_index_changes ... ok
+test tests::cached_repository_file_listing_is_keyed_by_workspace_root ... ok
+warning: in the working copy of 'main.txt', LF will be replaced by CRLF the next time Git touches it
+test probe::tests::git_probe_snapshot_hides_detached_head_from_dock ... ok
+warning: in the working copy of 'extra.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'other.txt', LF will be replaced by CRLF the next time Git touches it
+test probe::tests::git_probe_snapshot_two_roots_do_not_share_entries ... ok
+test probe::tests::git_probe_snapshot_non_git_root_is_absent_without_spawn ... ok
+test tests::cached_repository_file_listing_refreshes_after_index_or_head_change ... ok
+warning: in the working copy of 'keep.txt', LF will be replaced by CRLF the next time Git touches it
+test tests::invalidate_repository_file_list_cache_forces_rescan ... ok
+test probe::tests::git_probe_snapshot_shares_cache_across_canonical_roots ... ok
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it
+test tests::repository_file_listing_excludes_gitignored_paths ... ok
+test probe::tests::git_probe_snapshot_matches_rev_parse_and_reuses_identity ... ok
+test probe::tests::git_probe_snapshot_worktree_gitdir_file_is_present ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.37s
+
+     Running unittests src\lib.rs (target\debug\build\editor-icons/7f30caa7b6644a53\out\editor_icons-7f30caa7b6644a53.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-issues/12439d748b967549\out\editor_issues-12439d748b967549.exe)
+
+running 13 tests
+test tests::jump_decision_handles_zero_one_many ... ok
+test tests::parse_linked_and_unlinked_forms ... ok
+test tests::rewrite_if_unchanged_helper ... ok
+test tests::spoken_names_use_issue_not_task ... ok
+test tests::capture_ignores_hack_and_xxx ... ok
+test tests::next_id_uses_max_existing ... ok
+test tests::capture_can_finish_after_caller_continues ... ok
+test tests::place_records_location ... ok
+test tests::capture_mints_and_rewrites_todo_and_fixme ... ok
+test tests::create_mints_sequential_ids_and_opens_store ... ok
+test tests::board_hides_closed_by_default ... ok
+test tests::status_moves_freely_and_manages_closed_at ... ok
+test tests::scan_prunes_stale_and_reports_orphan_without_delete ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\build\editor-jobs/9837dae734e6923b\out\editor_jobs-9837dae734e6923b.exe)
+
+running 18 tests
+test tests::parse_windows_nvm_current_version_extracts_active_version ... ok
+test tests::merge_windows_explicit_and_runtime_env_keeps_runtime_path_first ... ok
+test tests::build_job_command_keeps_fnm_path_ahead_of_explicit_path ... ok
+test tests::build_job_command_keeps_nvm_path_ahead_of_explicit_path ... ok
+test tests::windows_parse_cmd_environment_extracts_variables ... ok
+test tests::windows_should_retry_invalid_exe_format ... ok
+test tests::windows_fnm_launch_program_candidates_resolve_absolute_command_shims ... ok
+test tests::windows_nvm_node_dir_accepts_version_with_or_without_v_prefix ... ok
+test tests::windows_fnm_launch_program_candidates_prefer_windows_shims_over_extensionless_scripts ... ok
+test tests::enrich_env_with_node_manager_preserves_explicit_vars_when_manager_missing ... ok
+test tests::job_manager_runs_commands_and_collects_output ... ok
+test tests::compilation_runner_marks_jobs_as_compilation ... ok
+test process_registry_tests::owner_crash_leaves_no_orphans_for_launch_created_tree ... ok
+test process_registry_tests::graceful_then_force_deadline_always_reaps_tree ... ok
+test process_registry_tests::share_key_keeps_process_until_last_workspace_tag_drops ... ok
+test process_registry_tests::process_launch_registers_alive_owned_process_tree ... ok
+test process_registry_tests::workspace_close_kills_processes_tagged_for_that_workspace_only ... ok
+test process_registry_tests::application_quit_clears_entire_registry ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.72s
+
+     Running unittests src\lib.rs (target\debug\build\editor-lsp/cbc5d05a4651ad6a\out\editor_lsp-cbc5d05a4651ad6a.exe)
+
+running 103 tests
+test client::tests::completion_parser_handles_lists_and_docs ... ok
+test client::tests::completion_parser_reads_insert_replace_edit_replace_range ... ok
+test client::tests::completion_parser_prefers_text_edit_over_insert_text_and_keeps_range ... ok
+test client::tests::copilot_status_notifications_ignore_non_error_updates ... ok
+test client::tests::completion_parser_falls_back_to_detail_for_documentation_panel ... ok
+test client::tests::csharp_and_copilot_servers_receive_initialization_options ... ok
+test client::tests::copilot_status_notifications_offer_sign_in_action ... ok
+test client::tests::code_action_parser_tracks_command_and_resource_operations ... ok
+test client::tests::code_action_parser_collects_active_file_edits ... ok
+test client::tests::default_workspace_lists_only_sessions_serving_open_buffers ... ok
+test client::tests::diagnostics_parser_maps_lsp_fields ... ok
+test client::tests::definition_parser_preserves_uri_backed_locations ... ok
+test client::tests::file_uri_roundtrip_handles_windows_paths ... ok
+test client::tests::code_action_params_use_flattened_lsp_shape ... ok
+test client::tests::definition_parser_supports_location_links ... ok
+test client::tests::formatting_parser_maps_text_edits ... ok
+test client::tests::client_capabilities_enable_window_work_done_progress_and_show_document ... ok
+test client::tests::full_sync_uses_null_range_change ... ok
+test client::tests::hover_parser_formats_marked_string_language_blocks_as_markdown ... ok
+test client::tests::hover_parser_keeps_plaintext_markup_plain ... ok
+test client::tests::hover_parser_preserves_markdown_content ... ok
+test client::tests::initialize_request_timeout_is_extended ... ok
+test client::tests::live_session_picker_label_includes_server_and_root ... ok
+test client::tests::location_sorting_deduplicates_reference_results ... ok
+test client::tests::log_and_notification_revision_skip_cloning_unchanged_snapshots ... ok
+test client::tests::log_message_error_from_ols_does_not_become_ui_notification ... ok
+test client::tests::non_csharp_non_copilot_servers_do_not_receive_initialization_options ... ok
+test client::tests::notification_log_snapshot_is_bounded_and_tracks_revision ... ok
+test client::tests::parse_windows_nvm_current_version_extracts_active_version ... ok
+test client::tests::point_requests_match_covering_diagnostics ... ok
+test client::tests::progress_notifications_update_existing_track ... ok
+test client::tests::runtime_initialization_options_merge_with_server_defaults ... ok
+test client::tests::server_request_response_turns_copilot_show_document_into_browser_action ... ok
+test client::tests::session_in_scope_when_open_buffer_is_tracked ... ok
+test client::tests::session_in_scope_when_root_under_project_workspace_without_open_buffer ... ok
+test client::tests::session_key_normalizes_windows_root_casing ... ok
+test client::tests::session_labels_ignore_stale_tracked_session_keys ... ok
+test client::tests::session_out_of_scope_when_parent_root_and_no_open_buffer ... ok
+test client::tests::show_message_notifications_ignore_non_error_levels ... ok
+test client::tests::show_message_notifications_map_severity_levels ... ok
+test client::tests::signature_help_active_parameter_range_supports_simple_labels ... ok
+test client::tests::signature_help_parser_supports_label_offsets ... ok
+test client::tests::signature_help_parser_surfaces_active_parameter_and_docs ... ok
+test client::tests::close_then_open_then_incremental_edits_work_again ... ok
+test client::tests::close_buffer_keeps_session_alive_for_next_file ... ok
+test client::tests::did_open_still_sends_full_text ... ok
+test client::tests::full_sync_sends_null_range_and_full_text_even_with_edits ... ok
+test client::tests::incremental_did_change_uses_utf16_columns_on_emoji_line ... ok
+test client::tests::incremental_did_change_emits_one_event_per_contiguous_edit ... ok
+test client::tests::transport_log_snapshot_is_bounded_and_tracks_revision ... ok
+test client::tests::transport_message_redacts_sqls_connection_secrets ... ok
+test client::tests::incremental_did_change_includes_newline_in_range_and_text ... ok
+test client::tests::incremental_did_change_replace_covers_old_range_and_new_text ... ok
+test client::tests::windows_fnm_environment_keeps_fnm_path_ahead_of_explicit_path ... ok
+test client::tests::windows_fnm_launch_program_candidates_prefer_windows_shims_over_extensionless_scripts ... ok
+test client::tests::incremental_did_change_sends_empty_text_for_range_delete ... ok
+test client::tests::windows_launch_program_candidates_include_command_shims ... ok
+test client::tests::windows_nvm_environment_keeps_nvm_path_ahead_of_explicit_path ... ok
+test client::tests::windows_fnm_launch_program_candidates_resolve_absolute_command_shims ... ok
+test client::tests::windows_parse_cmd_environment_extracts_variables ... ok
+test client::tests::windows_should_retry_invalid_exe_format ... ok
+test client::tests::work_done_progress_params_generate_unique_tokens ... ok
+test client::tests::workspace_configuration_requests_return_matching_section_settings ... ok
+test client::tests::workspace_configuration_requests_support_unsectioned_settings ... ok
+test client::tests::incremental_did_change_sends_only_inserted_character ... ok
+test client::tests::workspace_configuration_settings_unwrap_matching_section ... ok
+test client::tests::windows_nvm_node_dir_accepts_version_with_or_without_v_prefix ... ok
+test tests::language_server_spec_exposes_workspace_configuration_builders ... ok
+test tests::prepare_sessions_for_extension_returns_all_matching_servers ... ok
+test tests::prepare_session_for_path_reports_missing_activation_markers_for_explicit_server ... ok
+test client::tests::incremental_missing_edit_chain_uses_full_document_replacement ... ok
+test tests::prepare_sessions_for_path_returns_filename_matches_without_extensions ... ok
+test tests::prepare_sessions_for_path_skips_servers_disabled_by_default ... ok
+test tests::prepared_session_contains_launch_spec_and_diagnostics ... ok
+test tests::prepared_session_carries_workspace_configuration_from_spec ... ok
+test tests::prepare_sessions_for_path_requires_activation_markers_when_declared ... ok
+test client::tests::incremental_send_error_recovers_with_full_document ... ok
+test tests::prepared_session_for_path_falls_back_to_csproj_without_solution_arg ... ok
+test tests::prepared_session_for_path_falls_back_to_workspace_root_when_markers_do_not_match ... ok
+test tests::prepared_session_for_path_finds_solution_above_git_project_workspace ... ok
+test client::tests::memory_session_disconnect_bumps_generation_and_clears_path ... ok
+test tests::prepared_session_resolves_document_language_ids_by_filename_and_glob ... ok
+test tests::prepared_session_resolves_document_language_ids_per_extension ... ok
+test tests::registry_allows_multiple_servers_for_extension ... ok
+test tests::prepared_session_for_path_finds_solution_above_nested_workspace ... ok
+test tests::registry_prefers_filename_globs_over_extension_matches ... ok
+test tests::registry_resolves_rust_server_by_extension ... ok
+test tests::registry_resolves_servers_by_filename_and_glob ... ok
+test tests::workspace_configuration_value_round_trips_through_json ... ok
+test tests::prepared_session_for_path_prefers_solution_root_over_nested_csharp_project ... ok
+test client::tests::memory_session_publish_bumps_generation_and_dirty_path ... ok
+test tests::prepared_session_for_path_finds_unique_solution_outside_file_ancestors ... ok
+test tests::prepared_session_for_path_skips_solution_arg_when_multiple_solutions_exist ... ok
+test client::tests::stop_buffer_shuts_down_session ... ok
+test client::tests::stop_session_removes_live_session_and_returns_tracked_paths ... ok
+test client::tests::sync_buffer_onto_session_attaches_to_exact_root ... ok
+test client::tests::sync_buffer_reuses_one_session_across_files_in_same_workspace ... ok
+test client::tests::live_sessions_for_workspace_includes_root_scoped_and_buffer_served ... ok
+test client::tests::sync_buffer_preserves_manually_started_default_disabled_sessions ... ok
+test client::tests::sync_buffer_reopens_document_for_restarted_session_with_same_key ... ok
+test client::tests::two_memory_sessions_merge_and_sort_diagnostics_for_path ... ok
+test client::tests::two_sessions_receive_the_same_incremental_content_changes ... ok
+test client::tests::workspace_diagnostics_collect_entries_across_live_sessions ... ok
+
+test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src\lib.rs (target\debug\build\editor-markdown/3ffbc819cb46946b\out\editor_markdown-3ffbc819cb46946b.exe)
+
+running 10 tests
+test tests::anti_conceal_detects_cursor_and_visual ... ok
+test cache::tests::disabled_pretty_sentinel_skips_build ... ok
+test tests::kill_switch_skips_when_enabled ... ok
+test tests::resolve_relative_dot_slash_from_buffer_dir ... ok
+test cache::tests::kill_switch_sentinel_skips_build_and_reuses_plan ... ok
+test tests::ephemeral_plan_reuses_hash_key ... ok
+test cache::tests::cached_plan_reuses_arc_for_same_revision ... ok
+test cache::tests::cached_plan_rebuilds_when_revision_changes ... ok
+test cache::tests::anti_conceal_overlay_reuses_cached_plan ... ok
+test tests::plans_headings_lists_hr_links_and_images ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-path/8e4ec08fcb2d3479\out\editor_path-8e4ec08fcb2d3479.exe)
+
+running 4 tests
+test tests::filter_parsing_preserves_extension_filename_and_glob_forms ... ok
+test tests::grammar_install_root_is_under_volt_data_dir_without_override ... ok
+test tests::normalize_extension_strips_dots_and_lowercases ... ok
+test tests::matcher_scores_filename_glob_and_extension_paths ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-picker/be419b99cee7e31b\out\editor_picker-be419b99cee7e31b.exe)
+
+running 25 tests
+test extra_dispatch::tests::create_row_selection_still_yields_defined_context_for_command_noop ... ok
+test extra_dispatch::tests::empty_selection_still_yields_defined_context_for_command_noop ... ok
+test extra_dispatch::tests::matching_extra_snapshots_exportable_quickfix_rows ... ok
+test extra_dispatch::tests::matching_extra_resolves_command_close_and_selected_context ... ok
+test tests::empty_query_with_result_limit_truncates ... ok
+test tests::contiguous_substring_beats_split_path_match ... ok
+test tests::custom_search_text_matches_hidden_path_segments ... ok
+test tests::divider_visible_with_empty_query_and_hidden_when_filtering ... ok
+test tests::capped_match_set_does_not_require_cloning_losing_row_previews ... ok
+test tests::empty_query_returns_all_items_in_sorted_order ... ok
+test extra_dispatch::tests::non_extra_chord_falls_through_for_shared_popup_bindings ... ok
+test tests::fringe_metadata_survives_matching ... ok
+test tests::fuzzy_query_prefers_prefix_and_contiguous_matches ... ok
+test tests::matched_positions_follow_search_text_characters ... ok
+test tests::query_change_resets_selection_to_first_match ... ok
+test tests::select_next_walks_retained_matches ... ok
+test tests::selection_skips_divider_rows ... ok
+test tests::selection_wraps_across_match_list ... ok
+test tests::set_item_preview_updates_selected_match_without_filling_other_rows ... ok
+test tests::set_items_preserves_selected_id_when_still_matched ... ok
+test tests::result_limit_caps_large_match_sets ... ok
+test tests::source_order_preserves_input_order ... ok
+test tests::source_order_result_limit_truncates_without_reordering ... ok
+test tests::whitespace_query_matches_multiple_terms ... ok
+test tests::whitespace_query_requires_all_terms ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-plugin-api/327f67951fce3233\out\editor_plugin_api-327f67951fce3233.exe)
+
+running 17 tests
+test tests::vim_action_context_carries_typed_spec ... ok
+test tests::plugin_buffer_sections_can_declare_nested_layout_tree ... ok
+test tests::oil_key_action_hook_details_round_trip ... ok
+test tests::picker_provider_spec_accepts_extra_keybinds ... ok
+test tests::plugin_key_binding_can_target_multiple_commands ... ok
+test abi::tests::abi_debug_adapter_spec_round_trips_install_recipe ... ok
+test abi::tests::abi_language_server_spec_round_trips_activation_markers ... ok
+test tests::statusline_span_encoding_round_trips_themed_and_plain_runs ... ok
+test tests::vim_edit_action_hook_details_round_trip ... ok
+test abi::tests::abi_language_server_spec_round_trips_default_enabled_flag ... ok
+test tests::plugin_package_constructor_preserves_metadata_and_registrations ... ok
+test abi::tests::abi_language_server_spec_round_trips_install_recipe ... ok
+test tests::modeline_encoding_round_trips_alignment_parts_and_backgrounds ... ok
+test abi::tests::abi_language_configuration_round_trips_path_matchers ... ok
+test abi::tests::abi_language_server_spec_round_trips_workspace_configuration ... ok
+test abi::tests::abi_language_server_spec_round_trips_path_matchers ... ok
+test treesitter::tests::ancestor_contexts_skip_sql_and_toml ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-plugin-host/36d553e1652c94ca\out\editor_plugin_host-36d553e1652c94ca.exe)
+
+running 10 tests
+test tests::bootstrap_uses_the_selected_abi_strategy ... ok
+test tests::auto_loaded_packages_filters_manual_packages_out ... ok
+test tests::reload_user_packages_replaces_commands_without_duplicates ... ok
+test tests::clear_package_registrations_removes_hook_bindings_and_declarations ... ok
+test tests::file_open_hook_filters_still_match_legacy_extension_details ... ok
+test tests::emitted_hook_actions_include_active_window_pane_and_buffer ... ok
+test tests::file_open_hook_filters_match_exact_basenames ... ok
+test tests::host_registers_self_contained_manual_package_commands ... ok
+test tests::file_open_hook_filters_match_globs ... ok
+test tests::host_loads_auto_packages_into_runtime ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-render/f8729f2aa83f3a55\out\editor_render-f8729f2aa83f3a55.exe)
+
+running 13 tests
+test split_layout::tests::gap_is_inserted_between_siblings ... ok
+test tests::centered_rect_places_content_in_middle ... ok
+test split_layout::tests::weighted_columns_make_left_pane_smaller ... ok
+test tests::horizontal_golden_ratio_grows_the_second_active_pane ... ok
+test tests::font_match_sort_key_prefers_regular_faces_for_family_requests ... ok
+test tests::font_search_roots_include_platform_locations ... ok
+test split_layout::tests::nested_dashboard_tree_places_sidebar_and_editor_output ... ok
+test tests::horizontal_split_returns_two_stacked_rects ... ok
+test tests::font_metadata_matching_accepts_family_names ... ok
+test tests::vertical_golden_ratio_grows_the_first_active_pane ... ok
+test tests::vertical_golden_ratio_grows_the_second_active_pane ... ok
+test tests::vertical_split_returns_two_side_by_side_rects ... ok
+test tests::horizontal_golden_ratio_grows_the_first_active_pane ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\idle_wait.rs (target\debug\build\editor-sdl/818bc7bc53cfb7cf\out\idle_wait-818bc7bc53cfb7cf.exe)
+
+running 7 tests
+test idle_wait_timeout_caps_far_deadlines ... ok
+test idle_wait_timeout_polls_when_fps_overlay_is_on ... ok
+test idle_wait_timeout_is_cap_when_no_deadlines ... ok
+test idle_wait_timeout_is_zero_for_past_deadline ... ok
+test idle_wait_timeout_equals_next_deadline_when_idle ... ok
+test idle_wait_timeout_polls_while_interacting ... ok
+test idle_wait_timeout_uses_earliest_deadline ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-syntax/c52981ad8856bf23\out\editor_syntax-c52981ad8856bf23.exe)
+
+running 78 tests
+test rainbow_paren::tests::depth_tokens_cycle_at_max_depth ... ok
+test tests::bundled_html_highlights_query_compiles ... ok
+test tests::bundled_optional_query_asset_ignores_stale_installed_query ... ok
+test tests::bundled_query_asset_ignores_stale_installed_query ... ok
+test tests::extra_highlight_query_can_supply_missing_bundled_query ... ok
+test tests::bundled_query_resolution_flattens_inherited_queries ... ok
+test tests::ancestor_contexts_parse_session_matches_cold_query_after_edits ... ok
+test rainbow_paren::tests::mismatched_closing_delimiter_uses_mismatched_token ... ok
+test tests::ancestor_contexts_include_named_nodes_up_to_the_root ... ok
+test rainbow_paren::tests::buffer_apply_matches_contiguous_text_apply ... ok
+test tests::grammar_configuration_uses_flat_install_root_paths ... ok
+test tests::grammar_backed_language_reports_missing_install ... ok
+test rainbow_paren::tests::unmatched_closing_paren_uses_unmatched_token ... ok
+test tests::finalize_language_install_removes_compiler_sidecars ... ok
+test rainbow_paren::tests::duplicate_bracket_captures_at_same_byte_share_depth ... ok
+test rainbow_paren::tests::disabled_rainbow_leaves_bracket_tokens_unchanged ... ok
+test rainbow_paren::tests::nested_parens_receive_increasing_depth_tokens ... ok
+test tests::extra_injections_query_compiles_for_static_language ... ok
+test tests::highlight_directive_predicate_does_not_filter_matches ... ok
+test tests::highlight_contains_predicate_filters_by_text_content ... ok
+test tests::highlight_has_ancestor_predicate_matches_nested_nodes ... ok
+test tests::highlight_not_kind_eq_predicate_filters_captures ... ok
+test tests::highlight_has_parent_predicate_checks_immediate_parent ... ok
+test tests::highlight_kind_eq_predicate_keeps_matching_captures ... ok
+test tests::highlight_not_lua_match_predicate_filters_matching_text ... ok
+test tests::highlight_not_has_ancestor_predicate_filters_nested_nodes ... ok
+test tests::bundled_folds_query_compiles_for_rust ... ok
+test tests::highlight_skips_internal_and_meta_captures ... ok
+test tests::highlight_unknown_predicate_does_not_filter_matches ... ok
+test tests::bundled_locals_query_compiles_for_rust ... ok
+test tests::extra_folds_query_compiles_for_static_language ... ok
+test tests::install_plan_reports_missing_grammar_sources_before_compile ... ok
+test tests::lua_pattern_matches_anchored_literal ... ok
+test tests::lua_pattern_matches_escaped_parens ... ok
+test tests::installed_grammar_language_ids_only_returns_installed_grammar_languages ... ok
+test tests::install_plan_requests_generate_when_parser_is_missing ... ok
+test tests::lua_pattern_matches_percent_a_class ... ok
+test tests::lua_pattern_matches_percent_d_class ... ok
+test tests::extra_locals_query_compiles_for_static_language ... ok
+test tests::lua_pattern_matches_percent_l_class ... ok
+test tests::lua_pattern_matches_uppercase_class ... ok
+test tests::lua_pattern_matches_percent_u_class ... ok
+test tests::lua_pattern_matches_uppercase_identifier_pattern ... ok
+test tests::install_plan_compile_command_uses_windows_msvc_for_c_scanner ... ok
+test tests::install_plan_compile_command_prefers_cpp_scanner ... ok
+test tests::not_has_parent_checks_only_immediate_parent ... ok
+test tests::not_has_parent_rejects_when_immediate_parent_matches ... ok
+test tests::query_accessors_return_unknown_language_error_for_unregistered_id ... ok
+test tests::not_lua_match_integration_uppercase_class ... ok
+test tests::prepare_install_root_does_not_copy_queries_and_removes_legacy_query_dir ... ok
+test tests::registry_prefers_exact_filenames_and_globs_over_extensions ... ok
+test tests::registry_prefers_filename_globs_over_extension_matches ... ok
+test tests::query_asset_root_prefers_workspace_source_over_staged_target_copy ... ok
+test tests::registry_resolves_languages_by_extension_and_path ... ok
+test tests::query_capture_property_value_returns_set_property ... ok
+test tests::registry_resolves_languages_by_filename_and_glob ... ok
+test tests::query_compiler_accepts_vim_case_insensitive_regex_prefix ... ok
+test tests::bundled_injections_query_compiles_for_rust ... ok
+test tests::additional_highlight_languages_merge_spans ... ok
+test tests::incremental_parse_session_matches_cold_highlight_after_edits ... ok
+test tests::highlight_spans_reuse_interned_capture_and_theme_tokens ... ok
+test tests::missing_extra_query_returns_none ... ok
+test tests::windows_msvc_target_triple_matches_current_architecture ... ok
+test tests::preload_language_loads_static_language_without_parsing ... ok
+test tests::indent_queries_compute_nested_and_branch_indentation ... ok
+test tests::indent_queries_reuse_parse_sessions_after_edits ... ok
+test tests::rust_highlighting_produces_theme_tokens ... ok
+test tests::unknown_injection_language_is_ignored_without_failing_host_highlighting ... ok
+test tests::incremental_windowed_session_matches_cold_highlight_after_edits ... ok
+test tests::whole_buffer_self_injection_is_ignored ... ok
+test tests::visible_spans_filters_to_line_window ... ok
+test tests::highlight_window_limits_highlight_spans_to_requested_lines ... ok
+test tests::windowed_session_does_not_duplicate_spans_that_straddle_the_old_window ... ok
+test tests::injected_highlighting_merges_nested_language_and_additional_spans ... ok
+test tests::windowed_session_clips_spans_when_window_shrinks_at_same_revision ... ok
+test tests::windowed_session_merges_spans_when_window_shifts_at_same_revision ... ok
+test tests::windowed_session_reuses_spans_when_window_expands_at_same_revision ... ok
+test rainbow_paren::tests::rainbow_apply_on_large_buffer_stays_within_scroll_budget ... ok
+
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.81s
+
+     Running tests\corpus_inventory.rs (target\debug\build\editor-syntax/04d00635e9032188\out\corpus_inventory-04d00635e9032188.exe)
+
+running 4 tests
+test corpus_query_asset_root_contains_expected_languages ... ok
+test corpus_set_directives_do_not_use_capture_values ... ok
+test corpus_predicate_operator_inventory_is_stable ... ok
+test corpus_set_key_inventory_is_stable ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+     Running tests\registered_queries.rs (target\debug\build\editor-syntax/e73ac09dbb4a2229\out\registered_queries-e73ac09dbb4a2229.exe)
+
+running 11 tests
+test markdown_and_inline_merged_highlight_compiles ... ok
+test markdown_fenced_code_blocks_use_injected_language_highlighting ... ok
+test markdown_inline_bundled_highlights_query_compiles ... ok
+test razor_bundled_highlights_query_compiles ... ok
+test zig_flat_grammar_uses_bundled_queries ... ok
+test rust_bundled_highlights_query_compiles ... ok
+test rust_bundled_highlights_windowed_returns_bounded_spans ... ok
+test rust_bundled_indents_query_compiles_and_produces_indent ... ok
+test typescript_blank_line_before_closing_object_dedents_to_sibling_indent ... ok
+test typescript_blank_line_after_outer_object_opener_uses_sibling_indent ... ok
+test csharp_flat_grammar_uses_bundled_queries ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running unittests src\lib.rs (target\debug\build\editor-terminal/5279c895d1c80c00\out\editor_terminal-5279c895d1c80c00.exe)
+
+running 9 tests
+test tests::terminal_key_sequences_match_common_terminal_controls ... ok
+test normal_nav_tests::terminal_normal_mode_paragraph_motion_moves_across_blank_lines ... ok
+test tests::terminal_render_snapshot_preserves_wide_character_widths ... ok
+test tests::terminal_render_snapshot_tracks_visible_cursor ... ok
+test tests::terminal_render_snapshot_strips_tab_and_control_tofu_from_git_status_style_output ... ok
+test normal_nav_tests::terminal_normal_mode_gg_jumps_to_top_of_scrollback ... ok
+test normal_nav_tests::terminal_normal_mode_moves_cursor_before_scrolling_with_scrolloff ... ok
+test tests::live_terminal_session_spawns_and_terminates ... ok
+test tests::terminal_session_captures_transcript_lines ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src\lib.rs (target\debug\build\editor-theme/386531b59051fccc\out\editor_theme-386531b59051fccc.exe)
+
+running 3 tests
+test tests::registry_resolves_option_values ... ok
+test tests::registry_resolves_token_styles ... ok
+test tests::registry_resolves_tokens_from_active_theme ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\lib.rs (target\debug\build\editor-tool-install/6894881cde8e98f8\out\editor_tool_install-6894881cde8e98f8.exe)
+
+running 7 tests
+test shim::tests::windows_shim_invokes_quoted_target ... ok
+test paths::tests::path_with_install_bins_appends_once ... ok
+test recipe::tests::github_release_builds_latest_download_url ... ok
+test shim::tests::shim_path_adds_cmd_on_windows ... ok
+test plan::tests::dotnet_prerelease_passes_flag ... ok
+test plan::tests::npm_recipe_uses_prefix ... ok
+test locate::tests::missing_program_is_missing ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src\lib.rs (target\debug\build\editor-ui/1a32aa08ba66670d\out\editor_ui-1a32aa08ba66670d.exe)
+
+running 8 tests
+test chrome::tests::overlay_card_shadow_and_accent_emit_expected_command_count ... ok
+test chrome::tests::overlay_card_without_shadow_matches_border_inner_fill ... ok
+test chrome::tests::panel_frame_with_border_paints_ring_then_inset ... ok
+test text::tests::truncate_start_appends_ellipsis ... ok
+test chrome::tests::scrollbar_is_noop_when_nothing_to_scroll ... ok
+test text::tests::truncate_end_keeps_tail ... ok
+test text::tests::truncate_is_identity_when_text_fits ... ok
+test chrome::tests::panel_frame_without_border_is_single_fill ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\build\volt/9508a62a22a48c78\out\volt-9508a62a22a48c78.exe)
+
+running 13 tests
+test process_supervisor::tests::parse_request_ignores_normal_launch_args ... ok
+test process_supervisor::tests::parse_request_accepts_background_targets ... ok
+test tests::parse_launch_options_accepts_fps_overlay ... ok
+test tests::parse_launch_options_accepts_profile_alias ... ok
+test tests::user_library_candidates_prefer_env_then_executable_directory ... ok
+test tests::parse_launch_options_defaults_to_shell_demo ... ok
+test tests::parse_launch_options_rejects_multiple_modes ... ok
+test tests::builtin_user_library_validation_accepts_grammar_backed_syntax_languages ... ok
+test standalone_user_manifest::tests::standalone_user_path_replacements_target_vendor_siblings ... ok
+test tests::runtime_loaded_user_library_validation_accepts_grammar_backed_syntax_languages ... ok
+test standalone_user_manifest::tests::standalone_user_vendor_crates_include_transitive_workspace_dependencies ... ok
+test tests::dynamic_user_library_can_wrap_exported_module ... ok
+test standalone_user::tests::setup_standalone_user_repository_writes_gitignore_and_initializes_git ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running unittests lib.rs (target\debug\build\volt-user/ba9b96ae9c23b474\out\user-ba9b96ae9c23b474.exe)
+
+running 295 tests
+test build_output::tests::user_library_filename_matches_platform_conventions ... ok
+test autocomplete::tests::lsp_kind_icon_maps_core_symbols ... ok
+test browser::tests::input_hint_includes_current_url_when_present ... ok
+test browser::tests::buffer_lines_include_current_url_when_present ... ok
+test acp::tests::picker_items_preserve_slash_command_labels ... ok
+test acp::tests::picker_items_mark_current_models ... ok
+test calculator::tests::calculator_autocomplete_provider_scopes_manual_items_to_calculator_buffers ... ok
+test acp::tests::package_exports_dock_navigation_commands ... ok
+test browser::tests::package_exports_browser_open_command ... ok
+test acp::tests::package_exports_dock_toggle_command ... ok
+test build_output::tests::distributed_user_library_paths_points_from_out_dir_to_root_library ... ok
+test autocomplete::tests::package_exports_commands_and_insert_keybindings ... ok
+test acp::tests::package_binds_j_and_k_in_acp_dock_scope ... ok
+test autocomplete::tests::providers_have_unique_ids_and_keep_calculator_scoping ... ok
+test calculator::tests::calculator_buffer_sections_start_with_single_output_row ... ok
+test calculator::tests::calculator_evaluate_command_emits_generic_plugin_evaluate_hook ... ok
+test calculator::tests::calculator_hover_provider_exports_function_and_constant_topics ... ok
+test calculator::tests::calculator_package_binds_ctrl_c_ctrl_c ... ok
+test calculator::tests::calculator_package_binds_ctrl_tab_to_switch_panes ... ok
+test calculator::tests::calculator_package_declares_its_buffer_through_package_metadata ... ok
+test calculator::tests::calculator_package_exports_open_and_evaluate_commands ... ok
+test calculator::tests::calculator_package_has_no_hook_declarations ... ok
+test calculator::tests::calculator_switch_pane_command_emits_generic_switch_hook ... ok
+test calculator::tests::evaluator_handles_blank_lines ... ok
+test calculator::tests::evaluator_handles_arithmetic ... ok
+test calculator::tests::evaluator_handles_comments ... ok
+test calculator::tests::evaluator_handles_literals ... ok
+test calculator::tests::evaluator_handles_pi_constant ... ok
+test calculator::tests::evaluator_handles_power ... ok
+test calculator::tests::evaluator_handles_sqrt ... ok
+test calculator::tests::evaluator_handles_sqrt_of_sum_of_two_vars ... ok
+test calculator::tests::evaluator_handles_variables ... ok
+test calculator::tests::evaluator_reports_undefined_variable ... ok
+test calculator::tests::evaluator_reports_unknown_function ... ok
+test calculator::tests::evaluator_returns_no_expressions_for_empty_input ... ok
+test calculator::tests::initial_buffer_lines_only_seed_input_examples ... ok
+test commandline::tests::command_line_commands_have_unique_names ... ok
+test compile::tests::compile_command_emits_run_command_hook ... ok
+test compile::tests::compile_package_exports_compile_and_recompile_commands ... ok
+test commandline::tests::command_line_exports_commands_when_enabled ... ok
+test compile::tests::compile_package_exports_global_keybindings ... ok
+test compile::tests::parse_error_location_handles_path_line_col ... ok
+test compile::tests::parse_error_location_handles_path_line_only ... ok
+test compile::tests::parse_error_location_handles_rust_arrow_prefix ... ok
+test compile::tests::parse_error_location_returns_none_for_plain_text ... ok
+test compile::tests::recompile_command_emits_rerun_command_hook ... ok
+test compile::tests::reload_user_library_command_emits_reload_hook ... ok
+test dap::tests::debug_adapters_attach_typed_install_recipes ... ok
+test dap::tests::adapter_preferences_match_language_defaults ... ok
+test dap::tests::locals_buffer_declares_locals_and_expressions_sections ... ok
+test dap::tests::package_exports_polish_commands ... ok
+test dap::tests::package_exports_debug_layout_buffers ... ok
+test dap::tests::package_exports_workspace_and_dap_mode_keybindings ... ok
+test dap::tests::package_exports_start_family_commands ... ok
+test dap::tests::package_exports_stepping_and_restart_commands ... ok
+test db::tests::browser_items_shape_table_rows_from_user_config ... ok
+test db::tests::dashboard_buffer_declares_nested_layout_and_execute_chord ... ok
+test db::tests::connect_buffer_binds_enter_to_submit_command ... ok
+test db::tests::package_exports_required_commands ... ok
+test db::tests::query_buffer_exports_execute_chord ... ok
+test git::tests::commit_buffer_template_shows_initial_commit_without_head ... ok
+test git::tests::commit_buffer_template_matches_git_commit_message_format ... ok
+test db::tests::results_buffer_disables_line_wrap_by_default ... ok
+test git::tests::section_titles_include_expected_icons ... ok
+test git::tests::stashes_display_compact_indices ... ok
+test git::tests::status_entries_and_untracked_items_omit_status_words ... ok
+test config::tests::load_uses_defaults_when_files_are_missing ... ok
+test git::tests::status_header_section_uses_magit_style_labels ... ok
+test git::tests::status_sections_hide_recent_commits_when_tracking_lists_have_entries ... ok
+test git::tests::status_sections_include_pull_command_when_upstream_exists ... ok
+test git::tests::status_sections_render_change_sections_as_top_level_headers ... ok
+test git::tests::status_sections_show_recent_commits_once_without_upstream ... ok
+test git::tests::status_sections_show_recent_commits_when_tracking_lists_are_empty ... ok
+test git::tests::git_status_keymaps_export_prefix_starters_and_commands ... ok
+test hover::tests::package_exports_hover_commands_and_keybindings ... ok
+test hover::tests::providers_have_unique_ids_and_keep_calculator_scoping ... ok
+test image::tests::package_exports_image_commands ... ok
+test image::tests::package_exports_image_keybindings ... ok
+test lang::bash::tests::bash_package_auto_attaches_all_extensions ... ok
+test lang::bash::tests::bash_package_metadata ... ok
+test lang::bash::tests::bash_package_registers_formatter ... ok
+test lang::clojure::tests::clojure_package_auto_attaches_all_extensions ... ok
+test lang::bash::tests::bash_syntax_language_metadata ... ok
+test lang::clojure::tests::clojure_package_metadata ... ok
+test lang::clojure::tests::clojure_package_no_formatter ... ok
+test lang::clojure::tests::clojure_syntax_language_metadata ... ok
+test lang::cmake::tests::cmake_package_auto_attaches_cmakelists ... ok
+test lang::cmake::tests::cmake_package_auto_attaches_extension ... ok
+test lang::cmake::tests::cmake_package_metadata ... ok
+test lang::cmake::tests::cmake_package_no_formatter ... ok
+test lang::cmake::tests::cmake_syntax_language_metadata ... ok
+test lang::diff::tests::diff_syntax_language_metadata ... ok
+test lang::diff::tests::diff_syntax_language_preserves_diff_capture_theme_tokens ... ok
+test lang::elixir::tests::elixir_package_auto_attaches_all_extensions ... ok
+test lang::elixir::tests::elixir_package_metadata ... ok
+test lang::elixir::tests::elixir_package_registers_formatter ... ok
+test lang::elixir::tests::elixir_syntax_language_metadata ... ok
+test lang::graphql::tests::graphql_package_auto_attaches_all_extensions ... ok
+test lang::graphql::tests::graphql_package_metadata ... ok
+test lang::graphql::tests::graphql_package_registers_formatter ... ok
+test lang::graphql::tests::graphql_syntax_language_metadata ... ok
+test lang::hcl::tests::hcl_package_auto_attaches_all_extensions ... ok
+test lang::hcl::tests::hcl_package_metadata ... ok
+test lang::hcl::tests::hcl_package_no_formatter ... ok
+test lang::hcl::tests::hcl_syntax_language_metadata ... ok
+test lang::html::tests::package_registers_expected_html_bindings_and_formatter ... ok
+test lang::java::tests::java_package_auto_attaches_all_extensions ... ok
+test lang::java::tests::java_package_metadata ... ok
+test lang::java::tests::java_package_registers_formatter ... ok
+test lang::java::tests::java_syntax_language_metadata ... ok
+test lang::kotlin::tests::kotlin_package_auto_attaches_all_extensions ... ok
+test lang::kotlin::tests::kotlin_package_metadata ... ok
+test config::tests::config_source_files_include_master_and_children ... ok
+test lang::kotlin::tests::kotlin_package_registers_formatter ... ok
+test lang::kotlin::tests::kotlin_syntax_language_metadata ... ok
+test lang::latex::tests::latex_package_auto_attaches_all_extensions ... ok
+test lang::latex::tests::latex_package_metadata ... ok
+test lang::latex::tests::latex_package_registers_formatter ... ok
+test lang::latex::tests::latex_syntax_language_metadata ... ok
+test lang::lua::tests::lua_package_auto_attaches_all_extensions ... ok
+test lang::lua::tests::lua_package_metadata ... ok
+test lang::lua::tests::lua_package_registers_formatter ... ok
+test lang::lua::tests::lua_syntax_language_metadata ... ok
+test lang::make::tests::package_auto_attaches_make_paths_without_formatter ... ok
+test lang::make::tests::syntax_language_matches_makefile_basenames ... ok
+test config::tests::config_root_prefers_workspace_user_directory ... ok
+test lang::markdown::tests::package_auto_attaches_markdown_extensions_and_formatter ... ok
+test lang::markdown::tests::pretty_config_ships_consistent_icon_map ... ok
+test lang::markdown::tests::syntax_languages_register_markdown_grammars ... ok
+test lang::nix::tests::nix_package_metadata ... ok
+test lang::nix::tests::nix_package_auto_attaches_all_extensions ... ok
+test lang::nix::tests::nix_package_registers_formatter ... ok
+test lang::nix::tests::nix_syntax_language_metadata ... ok
+test lang::perl::tests::perl_package_auto_attaches_all_extensions ... ok
+test lang::perl::tests::perl_package_metadata ... ok
+test lang::perl::tests::perl_package_registers_formatter ... ok
+test lang::perl::tests::perl_syntax_language_metadata ... ok
+test lang::php::tests::php_package_auto_attaches_all_extensions ... ok
+test lang::php::tests::php_package_metadata ... ok
+test lang::php::tests::php_package_registers_no_formatter ... ok
+test lang::php::tests::php_syntax_language_metadata ... ok
+test lang::proto::tests::proto_package_auto_attaches_all_extensions ... ok
+test lang::proto::tests::proto_package_metadata ... ok
+test lang::proto::tests::proto_package_registers_formatter ... ok
+test lang::proto::tests::proto_syntax_language_metadata ... ok
+test config::tests::load_reads_referenced_child_files ... ok
+test lang::r::tests::r_package_auto_attaches_all_extensions ... ok
+test lang::r::tests::r_package_has_no_formatter ... ok
+test lang::r::tests::r_package_metadata ... ok
+test lang::r::tests::r_syntax_language_metadata ... ok
+test lang::ruby::tests::ruby_package_auto_attaches_all_extensions ... ok
+test lang::ruby::tests::ruby_package_has_no_formatter ... ok
+test lang::ruby::tests::ruby_package_metadata ... ok
+test lang::ruby::tests::ruby_syntax_language_metadata ... ok
+test lang::scala::tests::scala_package_auto_attaches_all_extensions ... ok
+test lang::scala::tests::scala_package_metadata ... ok
+test lang::scala::tests::scala_package_registers_formatter ... ok
+test lang::scala::tests::scala_syntax_language_metadata ... ok
+test lang::solidity::tests::solidity_package_auto_attaches_all_extensions ... ok
+test lang::solidity::tests::solidity_package_metadata ... ok
+test lang::solidity::tests::solidity_package_registers_formatter ... ok
+test lang::solidity::tests::solidity_syntax_language_metadata ... ok
+test lang::sql::tests::sql_syntax_language_metadata ... ok
+test lang::swift::tests::swift_package_auto_attaches_all_extensions ... ok
+test lang::swift::tests::swift_package_metadata ... ok
+test lang::swift::tests::swift_package_registers_formatter ... ok
+test lang::swift::tests::swift_syntax_language_metadata ... ok
+test lang::toml::tests::package_auto_attaches_toml_and_registers_formatter ... ok
+test lang::toml::tests::syntax_language_registers_toml_grammar ... ok
+test lang::vim::tests::vim_package_auto_attaches_all_extensions ... ok
+test lang::vim::tests::vim_package_has_no_formatter ... ok
+test lang::vim::tests::vim_package_metadata ... ok
+test lang::vim::tests::vim_syntax_language_metadata ... ok
+test lang::xml::tests::xml_package_auto_attaches_all_extensions ... ok
+test lang::xml::tests::xml_package_metadata ... ok
+test lang::xml::tests::xml_package_registers_formatter ... ok
+test lang::xml::tests::xml_syntax_language_metadata ... ok
+test lang::yaml::tests::package_auto_attaches_for_yaml_extensions ... ok
+test lang::yaml::tests::syntax_language_registers_yaml_grammar ... ok
+test lang::zig::tests::syntax_language_registers_zig_grammar ... ok
+test modeline::tests::compose_includes_filetype_and_modified_icon ... ok
+test modeline::tests::compose_includes_git_multipart_segment ... ok
+test lsp::tests::package_exports_generic_lsp_commands_and_code_action_binding ... ok
+test modeline::tests::compose_includes_macro_recording_register ... ok
+test modeline::tests::compose_joins_default_left_and_right_segments ... ok
+test modeline::tests::compose_places_position_and_lsp_on_the_right ... ok
+test modeline::tests::compose_skips_empty_optional_segments ... ok
+test modeline::tests::mode_tokens_map_all_vim_modes_including_multicursor ... ok
+test multicursor::tests::package_exports_normal_mode_bindings_for_multicursor_commands ... ok
+test oil::tests::icon_prefixes_are_stripped_for_editing ... ok
+test oil::tests::package_binds_git_worktree_command ... ok
+test oil::tests::package_exports_oil_actions_as_commands ... ok
+test oil::tests::special_directories_get_folder_icons ... ok
+test oil::tests::rust_files_get_rust_icon_labels ... ok
+test pane::tests::package_exports_split_close_and_switch_commands ... ok
+test pdf::tests::package_exports_pdf_buffer_keybindings ... ok
+test lsp::tests::language_servers_attach_typed_install_recipes ... ok
+test lsp::tests::sqls_server_uses_sqls_workspace_configuration_section ... ok
+test lsp::tests::csharp_workspace_configuration_remains_well_formed_when_present ... ok
+test pdf::tests::package_exports_pdf_commands ... ok
+test picker::tests::layout_exposes_window_fractions ... ok
+test picker::tests::buffer_picker_shows_file_name_first_and_keeps_path_search ... ok
+test lsp::tests::tailwind_server_requires_project_markers_and_maps_web_language_ids ... ok
+test lsp::tests::language_servers_have_unique_ids_and_nonempty_programs ... ok
+test picker::tests::package_binds_popup_navigation_on_popup_minor_mode ... ok
+test picker::tests::package_does_not_bind_ctrl_q_quickfix_as_popup_default ... ok
+test lsp::tests::roslyn_language_server_is_manual_alternative_for_csharp_and_razor ... ok
+test picker::tests::workspace_search_provider_declares_ctrl_q_quickfix_extra ... ok
+test picker::tests::workspace_dashboard_provider_declares_ctrl_d_worktree_remove_extra ... ok
+test lsp::tests::auto_start_bindings_match_registered_server_path_matchers ... ok
+test rainbow_parens::tests::package_exports_toggle_command_and_binding ... ok
+test show_paren::tests::package_exports_toggle_command_and_binding ... ok
+test terminal::tests::package_exports_terminal_commands_and_binding ... ok
+test tests::every_installed_grammar_highlight_query_compiles ... ok
+test tests::recompile_installed_tree_sitter_grammars ... ok
+test tests::tsx_highlight_query_compiles ... ok
+test tests::rich_markdown_and_gitcommit_captures_preserve_exact_theme_tokens ... ok
+test tests::user_library_exports_calculator_manual_providers ... ok
+test tests::user_library_contains_unique_packages_with_behavior ... ok
+test tests::user_library_exports_language_registrations ... ok
+test tests::user_library_exports_picker_providers ... ok
+test tests::user_library_exports_lsp_and_dap_registrations ... ok
+test acp::tests::clients_include_logo_paths ... ok
+test tests::user_library_keybindings_do_not_conflict ... ok
+test keymap::tests::config_defaults_ambiguous_prefix_timeout_to_250ms ... ok
+test ligatures::tests::config_exposes_current_ligature_setting ... ok
+test pane::tests::config_exposes_current_golden_ratio_setting ... ok
+test picker::tests::truncate_strategy_defaults_to_auto ... ok
+test tests::user_library_derives_plugin_buffer_behavior_from_package_metadata ... ok
+test rainbow_parens::tests::config_defaults_to_enabled ... ok
+test show_paren::tests::config_defaults_to_enabled ... ok
+test tests::user_library_packages_exclude_tree_sitter_context_renderers ... ok
+test terminal::tests::terminal_shell_configuration_is_non_empty ... ok
+test theme::tests::parse_theme_accepts_pallet_section_alias ... ok
+test theme::tests::parse_theme_accepts_inline_hex_token_colors ... ok
+test oil::tests::help_lines_reflect_current_keybindings ... ok
+test theme::tests::parse_theme_rejects_unsupported_token_style_suffixes ... ok
+test theme::tests::parse_theme_accepts_token_style_suffixes ... ok
+test theme::tests::parse_theme_applies_shared_options_and_languages ... ok
+test theme::tests::parse_theme_resolves_palette_references_in_tokens_and_options ... ok
+test theme::tests::parse_theme_specific_options_override_shared_values ... ok
+test treesitter::tests::package_exports_recompile_installed_command ... ok
+test theme::tests::list_theme_files_excludes_shared_theme_config ... ok
+test treesittercontext_ghosttext::tests::build_ghost_text_lines_keeps_current_line_for_block_end_contexts ... ok
+test treesittercontext_ghosttext::tests::build_ghost_text_lines_includes_loop_contexts ... ok
+test treesittercontext_ghosttext::tests::build_ghost_text_lines_skips_current_line_for_single_line_contexts ... ok
+test treesittercontext_ghosttext::tests::control_flow_contexts_use_distinct_icons ... ok
+test treesittercontext_ghosttext::tests::extract_control_flow_header_finds_embedded_keywords ... ok
+test treesittercontext_ghosttext::tests::extract_signature_drops_modifiers_and_return_types ... ok
+test treesittercontext_ghosttext::tests::build_ghost_text_lines_prefers_inner_context_on_shared_closing_line ... ok
+test treesittercontext_ghosttext::tests::build_ghost_text_lines_skips_current_line_for_non_block_multiline_contexts ... ok
+test treesittercontext_headerline::tests::build_headerline_lines_skips_contexts_visible_in_viewport ... ok
+test treesittercontext_headerline::tests::db_buffer_headerline_labels_sql_query_buffers ... ok
+test treesittercontext_ghosttext::tests::summarize_context_handles_loops_and_conditionals ... ok
+test treesittercontext_headerline::tests::build_headerline_lines_orders_contexts_outermost_first ... ok
+test treesittercontext_headerline::tests::summarize_context_handles_unknown_named_nodes ... ok
+test tests::user_library_exports_acp_clients_by_id_consistently ... ok
+test vim::tests::package_exports_alt_x_for_command_line ... ok
+test vim::tests::package_exports_canonical_paging_bindings ... ok
+test vim::tests::package_exports_g_prefix_aliases_for_format_and_case ... ok
+test vim::tests::package_exports_command_line_alias_commands ... ok
+test oil::tests::default_oil_keybindings_map_to_actions ... ok
+test vim::tests::package_exports_mark_list_bindings ... ok
+test vim::tests::package_exports_quickfix_bindings ... ok
+test vim::tests::package_exports_marked_workspace_slot_jump_bindings_and_drops_ctrl_e_scroll ... ok
+test vim::tests::package_exports_lsp_navigation_bindings ... ok
+test vim::tests::package_exports_vim_edit_actions_as_typed_details ... ok
+test workspace::tests::package_exports_clone_command ... ok
+test workspace::tests::package_exports_cycle_project_workspace_commands ... ok
+test workspace::tests::package_exports_format_command ... ok
+test workspace::tests::package_exports_mark_list_commands ... ok
+test vim::tests::package_exports_visual_put_bindings ... ok
+test vim::tests::package_exports_workspace_cycle_bindings ... ok
+test workspace::tests::package_exports_worktree_remove_command ... ok
+test workspace::tests::package_exports_marked_workspace_slot_jump_commands ... ok
+test workspace::tests::workspace_file_picker_items_report_no_project_root ... ok
+test theme::tests::themes_dir_prefers_workspace_source_over_staged_target_copy ... ok
+test workspace_dock::tests::config_defaults_to_left_undocked ... ok
+test workspace_dock::tests::package_binds_j_and_k_in_workspace_dock_scope ... ok
+test workspace_dock::tests::package_exports_dock_navigation_commands ... ok
+test workspace_dock::tests::package_exports_toggle_command ... ok
+test rainbow_parens::tests::rainbow_config_load_stays_cheap_for_frame_budget ... ok
+test workspace::tests::workspace_project_picker_items_keep_candidates_while_rescan_runs ... ok
+test workspace::tests::workspace_project_picker_items_show_scanning_row_when_cache_empty ... ok
+test workspace::tests::workspace_project_picker_items_sort_open_workspace_first ... ok
+test workspace::tests::workspace_switch_picker_items_list_open_workspaces_then_projects ... ok
+test tests::user_library_themes_cover_extended_capture_families ... ok
+test tests::user_library_themes_cover_core_editor_ui_tokens ... ok
+test tests::user_library_themes_cover_rainbow_paren_tokens ... ok
+test tests::user_library_exports_themes ... ok
+test theme::tests::bundled_themes_define_defaults_for_all_compiled_languages ... ok
+test tests::user_library_themes_cover_registered_highlight_query_tokens ... ok
+test theme::tests::bundled_themes_use_pallet_sections_and_token_references ... ok
+test tests::exported_user_library_module_matches_static_library ... ok
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/deep/nested.rs', LF will be replaced by CRLF the next time Git touches it
+test workspace::tests::workspace_file_picker_items_list_paths_without_previews ... ok
+
+test result: ok. 295 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running unittests src\main.rs (target\debug\build\xtask/42205a9cd6c63a43\out\xtask-42205a9cd6c63a43.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_buffer
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_dap
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_db
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_fs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_git
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_icons
+
+running 1 test
+test crates\editor-icons\src\..\nerd_font_symbols\mod.rs - nerd_font_symbols (line 4) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+all doctests ran in 0.45s; merged doctests compilation took 0.41s
+   Doc-tests editor_issues
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_jobs
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_lsp
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_markdown
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_path
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_picker
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_plugin_api
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_plugin_host
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_render
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_syntax
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_terminal
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_theme
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_tool_install
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests editor_ui
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests user
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

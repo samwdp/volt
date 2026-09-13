@@ -1,0 +1,3 @@
+# User Source Tree and Plugin SDK boundary
+
+Release builds ship a User Source Tree beside the binary so end users can rebuild the User Library (edit Builtin Plugins, add Plugin Packages, pull crates.io deps) without the full Volt repository. Staging copies user sources, vendors the Plugin SDK’s Volt path crates, and rewrites manifests into a standalone Cargo workspace by inlining inherited package fields (including table-form `workspace = true`). Builtin Plugin modules author only against the Plugin SDK; the User Library manifest path-depends on that SDK plus crates.io, not on other Volt crates directly. The SDK crate itself may depend on core Volt crates. Offline/airgapped registry vendoring is not required.
