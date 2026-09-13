@@ -206,7 +206,11 @@ impl ShellState {
             .services_mut()
             .insert(Mutex::new(TerminalBufferState::default()));
         runtime.services_mut().insert(FormatterRegistry::default());
-        runtime.services_mut().insert(Mutex::new(JobManager::new()));
+        let process_registry = Arc::new(Mutex::new(editor_jobs::ProcessRegistry::new()));
+        runtime
+            .services_mut()
+            .insert(Arc::clone(&process_registry));
+        runtime.services_mut().insert(Mutex::new(JobManager::with_registry(process_registry)));
         let mut theme_registry = ThemeRegistry::new();
         theme_registry
             .register_all(user_library.themes())

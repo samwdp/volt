@@ -12,6 +12,7 @@ use std::{
 };
 
 use editor_buffer::{TextPoint, TextRange};
+use editor_jobs::{OwnedProcessId, ProcessRegistry, WorkspaceId};
 use lsp_types::{
     ClientInfo, CompletionParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
@@ -22,11 +23,12 @@ use lsp_types::{
     WorkspaceFolder,
     notification::{
         DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
-        Initialized, Notification,
+        Exit, Initialized, Notification,
     },
     request::{
         CodeActionRequest, Completion, Formatting, GotoDefinition, GotoImplementation,
-        HoverRequest, Initialize, RangeFormatting, References, Request, SignatureHelpRequest,
+        HoverRequest, Initialize, RangeFormatting, References, Request, Shutdown,
+        SignatureHelpRequest,
     },
 };
 use serde::Serialize;
@@ -39,7 +41,10 @@ use super::types::*;
 pub(crate) struct LspSessionHandle {
     pub(crate) key: SessionKey,
     pub(crate) session: LanguageServerSession,
-    pub(crate) child: Mutex<Child>,
+    /// Inert/memory test children only. Live Process Launch sessions leave this empty.
+    pub(crate) child: Option<Mutex<Child>>,
+    pub(crate) owned_process_id: Option<OwnedProcessId>,
+    pub(crate) process_registry: Option<Arc<Mutex<ProcessRegistry>>>,
     pub(crate) writer: Arc<Mutex<ChildStdin>>,
     pub(crate) pending: PendingResponseMap,
     pub(crate) diagnostics: DiagnosticsByPath,
@@ -74,7 +79,17 @@ impl Drop for LspSessionHandle {
             &self.key.server_id,
             "terminating language server process",
         );
-        if let Ok(mut child) = self.child.lock() {
+        self.disconnected.store(true, Ordering::Release);
+        if let (Some(id), Some(registry)) =
+            (self.owned_process_id.take(), self.process_registry.take())
+            && let Ok(mut registry) = registry.lock()
+        {
+            let _ = registry.teardown_process(id, Duration::from_millis(200));
+            return;
+        }
+        if let Some(child) = self.child.as_ref()
+            && let Ok(mut child) = child.lock()
+        {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -87,6 +102,8 @@ impl LspSessionHandle {
         runtime_override: Option<Value>,
         initialization_options_override: Option<Value>,
         shared: LspSessionSharedState,
+        process_registry: Arc<Mutex<ProcessRegistry>>,
+        workspace_id: Option<WorkspaceId>,
     ) -> Result<Arc<Self>, LspClientError> {
         let LspSessionSharedState {
             transport_log,
@@ -100,27 +117,21 @@ impl LspSessionHandle {
         let launch_args = launch.args().to_vec();
         let launch_cwd = launch.cwd().cloned();
         let launch_env = launch.env().to_vec();
-        let mut child = spawn_lsp_command(
-            &launch_program,
-            &launch_args,
-            launch_cwd.as_deref(),
-            &launch_env,
+        let (owned_process_id, stdin, stdout, pid) = launch_lsp_owned_process(
+            &process_registry,
+            LspLaunchRequest {
+                program: &launch_program,
+                args: &launch_args,
+                cwd: launch_cwd.as_deref(),
+                env: &launch_env,
+                server_id: session.server_id(),
+                root: session.root().map(|path| path.as_path()),
+                workspace_id,
+            },
         )
         .map_err(|error| {
             LspClientError::Protocol(format!(
                 "failed to start language server `{}`: {error}",
-                session.server_id()
-            ))
-        })?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            LspClientError::Protocol(format!(
-                "language server `{}` is missing stdin pipe",
-                session.server_id()
-            ))
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            LspClientError::Protocol(format!(
-                "language server `{}` is missing stdout pipe",
                 session.server_id()
             ))
         })?;
@@ -138,11 +149,12 @@ impl LspSessionHandle {
             initialization_options_override.as_ref(),
         );
         let disconnected = Arc::new(AtomicBool::new(false));
-        let pid = child.id();
         let handle = Arc::new(Self {
             key,
             session,
-            child: Mutex::new(child),
+            child: None,
+            owned_process_id: Some(owned_process_id),
+            process_registry: Some(process_registry),
             writer: Arc::clone(&writer),
             pending: Arc::clone(&pending),
             diagnostics: Arc::clone(&diagnostics),
@@ -209,6 +221,37 @@ impl LspSessionHandle {
             ),
         );
         Ok(handle)
+    }
+
+    pub(crate) fn attach_workspace_tag(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<(), LspClientError> {
+        let Some(id) = self.owned_process_id else {
+            return Ok(());
+        };
+        let Some(registry) = &self.process_registry else {
+            return Ok(());
+        };
+        let mut registry = registry
+            .lock()
+            .map_err(|_| LspClientError::Protocol("process registry mutex poisoned".to_owned()))?;
+        registry
+            .tag_workspace(id, workspace_id)
+            .map_err(|error| LspClientError::Protocol(error.to_string()))
+    }
+
+    pub(crate) fn protocol_shutdown(&self) {
+        if self.disconnected.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.request_typed::<Shutdown>(());
+        let _ = self.notify_typed::<Exit>(());
+        self.disconnected.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn owned_process_id(&self) -> Option<OwnedProcessId> {
+        self.owned_process_id
     }
 
     pub(crate) fn server_id(&self) -> &str {

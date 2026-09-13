@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,7 +13,10 @@ use std::{
 };
 
 use editor_buffer::{TextPoint, TextRange};
-use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
+use editor_jobs::{
+    OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry, ProcessSupervisionMode,
+    WorkspaceId, language_server_share_key,
+};
 use lsp_types::{
     ClientCapabilities, CodeActionContext, CodeActionParams, CodeActionTriggerKind,
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity, Documentation,
@@ -1004,6 +1007,7 @@ impl From<std::io::Error> for LspClientError {
 #[derive(Debug, Clone)]
 pub struct LspClientManager {
     pub(crate) registry: LanguageServerRegistry,
+    pub(crate) process_registry: Arc<Mutex<ProcessRegistry>>,
     pub(crate) state: Arc<Mutex<LspClientState>>,
     pub(crate) transport_log: TransportLog,
     pub(crate) notifications: NotificationLog,
@@ -1313,89 +1317,118 @@ pub(crate) fn configure_lsp_command(_command: &mut Command) {
     }
 }
 
-pub(crate) fn spawn_lsp_command(
+pub(crate) struct LspLaunchRequest<'a> {
+    pub(crate) program: &'a str,
+    pub(crate) args: &'a [String],
+    pub(crate) cwd: Option<&'a Path>,
+    pub(crate) env: &'a [(String, String)],
+    pub(crate) server_id: &'a str,
+    pub(crate) root: Option<&'a Path>,
+    pub(crate) workspace_id: Option<WorkspaceId>,
+}
+
+pub(crate) fn launch_lsp_owned_process(
+    registry: &Arc<Mutex<ProcessRegistry>>,
+    request: LspLaunchRequest<'_>,
+) -> Result<(OwnedProcessId, ChildStdin, ChildStdout, u32), String> {
+    let share_key = language_server_share_key(request.server_id, request.root);
+    let mut attempts = Vec::new();
+    attempts.push((request.program.to_owned(), request.env.to_vec()));
+
+    #[cfg(windows)]
+    {
+        for candidate in windows_launch_program_candidates(request.program) {
+            attempts.push((candidate, request.env.to_vec()));
+        }
+        if let Some(fnm_env) = windows_fnm_environment(request.cwd, request.env) {
+            for candidate in windows_fnm_launch_program_candidates(request.program, &fnm_env) {
+                let mut merged = request.env.to_vec();
+                merged.extend(fnm_env.iter().cloned());
+                attempts.push((candidate, merged));
+            }
+        }
+        if let Some(nvm_env) = windows_nvm_environment(request.cwd, request.env) {
+            for candidate in windows_nvm_launch_program_candidates(request.program, &nvm_env) {
+                let mut merged = request.env.to_vec();
+                merged.extend(nvm_env.iter().cloned());
+                attempts.push((candidate, merged));
+            }
+        }
+    }
+
+    let mut last_error = None;
+    for (candidate, attempt_env) in attempts {
+        match launch_lsp_attempt(
+            registry,
+            &candidate,
+            request.args,
+            request.cwd,
+            &attempt_env,
+            share_key.clone(),
+            request.workspace_id,
+        ) {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "failed to launch language server".to_owned()))
+}
+
+fn launch_lsp_attempt(
+    registry: &Arc<Mutex<ProcessRegistry>>,
     program: &str,
     args: &[String],
     cwd: Option<&Path>,
     env: &[(String, String)],
-) -> std::io::Result<Child> {
-    #[cfg(not(windows))]
-    let spawn_result = build_lsp_command(program, args, cwd, env, None).spawn();
-
-    #[cfg(windows)]
-    let mut spawn_result = build_lsp_command(program, args, cwd, env, None).spawn();
-    #[cfg(windows)]
-    {
-        let should_retry = matches!(
-            &spawn_result,
-            Err(error) if windows_should_retry_spawn_error(error)
-        );
-        if should_retry {
-            for candidate in windows_launch_program_candidates(program) {
-                spawn_result = build_lsp_command(&candidate, args, cwd, env, None).spawn();
-                match &spawn_result {
-                    Ok(_) => break,
-                    Err(error) if windows_should_retry_spawn_error(error) => {}
-                    Err(_) => break,
-                }
-            }
-        }
-        let should_retry_with_fnm = matches!(
-            &spawn_result,
-            Err(error) if windows_should_retry_spawn_error(error)
-        );
-        if should_retry_with_fnm && let Some(fnm_env) = windows_fnm_environment(cwd, env) {
-            for candidate in windows_fnm_launch_program_candidates(program, &fnm_env) {
-                spawn_result =
-                    build_lsp_command(&candidate, args, cwd, env, Some(&fnm_env)).spawn();
-                match &spawn_result {
-                    Ok(_) => break,
-                    Err(error) if windows_should_retry_spawn_error(error) => {}
-                    Err(_) => break,
-                }
-            }
-        }
-        let should_retry_with_nvm = matches!(
-            &spawn_result,
-            Err(error) if windows_should_retry_spawn_error(error)
-        );
-        if should_retry_with_nvm && let Some(nvm_env) = windows_nvm_environment(cwd, env) {
-            for candidate in windows_nvm_launch_program_candidates(program, &nvm_env) {
-                spawn_result =
-                    build_lsp_command(&candidate, args, cwd, env, Some(&nvm_env)).spawn();
-                match &spawn_result {
-                    Ok(_) => break,
-                    Err(error) if windows_should_retry_spawn_error(error) => {}
-                    Err(_) => break,
-                }
-            }
-        }
+    share_key: editor_jobs::ShareKey,
+    workspace_id: Option<WorkspaceId>,
+) -> Result<(OwnedProcessId, ChildStdin, ChildStdout, u32), String> {
+    let mut env = env.to_vec();
+    editor_tool_install::merge_effective_path(&mut env);
+    let mut spec = ProcessLaunchSpec::new(program, args.to_vec())
+        .with_stdio(ProcessLaunchStdio::Protocol)
+        .with_mode(ProcessSupervisionMode::Background)
+        .with_share_key(share_key);
+    if let Some(workspace_id) = workspace_id {
+        spec = spec.with_workspace(workspace_id);
     }
-    spawn_result
+    if let Some(cwd) = cwd {
+        spec = spec.with_current_dir(cwd);
+    }
+    spec.env = env;
+
+    let mut registry = registry
+        .lock()
+        .map_err(|_| "process registry mutex poisoned".to_owned())?;
+    let mut launched = registry.launch(spec).map_err(|error| error.to_string())?;
+    let stdin = launched
+        .stdin
+        .take()
+        .ok_or_else(|| "language server is missing stdin pipe".to_owned())?;
+    let stdout = launched
+        .stdout
+        .take()
+        .ok_or_else(|| "language server is missing stdout pipe".to_owned())?;
+    let pid = registry
+        .root_pid(launched.id)
+        .ok_or_else(|| "language server owned process missing root pid".to_owned())?;
+    Ok((launched.id, stdin, stdout, pid))
 }
 
+#[cfg(all(windows, test))]
 pub(crate) fn build_lsp_command(
     program: &str,
     args: &[String],
     cwd: Option<&Path>,
     env: &[(String, String)],
-    #[cfg(windows)] runtime_env: Option<&[(String, String)]>,
-    #[cfg(not(windows))] _runtime_env: Option<&[(String, String)]>,
+    runtime_env: Option<&[(String, String)]>,
 ) -> Command {
-    let (program, args) = supervised_command_if_resolved(
-        program,
-        args,
-        env,
-        #[cfg(windows)]
-        runtime_env,
-        #[cfg(not(windows))]
-        None,
-        ProcessSupervisionMode::Background,
-    );
-    let mut command = Command::new(&program);
+    let mut command = Command::new(program);
     configure_lsp_command(&mut command);
     command
-        .args(&args)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -1404,14 +1437,11 @@ pub(crate) fn build_lsp_command(
     }
     let mut env = env.to_vec();
     editor_tool_install::merge_effective_path(&mut env);
-    #[cfg(windows)]
     if let Some(runtime_env) = runtime_env {
         apply_windows_runtime_environment(&mut command, &env, runtime_env);
     } else {
         apply_command_environment(&mut command, &env);
     }
-    #[cfg(not(windows))]
-    apply_command_environment(&mut command, &env);
     command
 }
 
@@ -1437,7 +1467,7 @@ pub(crate) fn windows_launch_program_candidates(program: &str) -> Vec<String> {
     candidates
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) fn windows_should_retry_spawn_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(193)
 }
@@ -1630,7 +1660,7 @@ pub(crate) fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String,
     (!vars.is_empty()).then_some(vars)
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) fn apply_windows_runtime_environment(
     command: &mut Command,
     env: &[(String, String)],

@@ -1415,7 +1415,9 @@ fn test_session_handle_in_workspace(
     Arc::new(LspSessionHandle {
         key: SessionKey::new(server_id, session.root().map(PathBuf::as_path)),
         session,
-        child: Mutex::new(child),
+        child: Some(Mutex::new(child)),
+        owned_process_id: None,
+        process_registry: None,
         writer: Arc::new(Mutex::new(writer)),
         pending: Arc::new(Mutex::new(BTreeMap::new())),
         diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),

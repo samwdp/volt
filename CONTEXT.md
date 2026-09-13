@@ -74,6 +74,28 @@ _Avoid_: delete workspace (when meaning disk remove), worktree delete (as the sp
 A chord→command binding attached to one open picker instance (copied from its provider declaration), layered above the shared picker-plugin Popup bindings. Firing an extra always closes the picker after snapshotting the needed row/list context into the command invocation. Used for picker-specific actions such as Quickfix export or Worktree Remove.
 _Avoid_: popup keymap (when meaning per-picker extras), secondary action (as the spoken product name)
 
+### User extension
+
+**User Library**:
+The shared library Volt loads at startup (`user.dll` / `libuser.so` / `libuser.dylib`). It holds compiled customization: Builtin Plugins, themes, languages, and related exports the host consumes over the plugin ABI.
+_Avoid_: user package (when meaning this library), volt-user (crate name as spoken product term), plugin host (the loader side)
+
+**User Source Tree**:
+The staged copy of User Library sources shipped with a release build (under the profile dir as `user/`) so that library can be rebuilt and replaced without the full Volt repository.
+_Avoid_: user package (when meaning these sources), release user folder (as the spoken term), plugin project (vague)
+
+**Plugin Package**:
+One extension unit declared as `PluginPackage` metadata (commands, hooks, buffers, keybindings, and related exports). Lives as a module under the User Library sources (for example `user/calculator.rs`).
+_Avoid_: user package (as the umbrella term), crate, plugin host package
+
+**Builtin Plugin**:
+A Plugin Package that ships inside the User Library / User Source Tree. Users may edit and rebuild it; it is not a separate install.
+_Avoid_: core package (when meaning these modules), built-in crate
+
+**Plugin SDK**:
+The stable API crate inside the User Library sources (`user/sdk`, package name `editor-plugin-api`) that Plugin Packages use to talk to Volt fundamentals (buffers, sections, hooks, and related types). Host loads the User Library over the ABI; Builtin Plugin modules under the User Library sources author against this SDK only and do not import other Volt crates directly. The SDK crate itself may depend on those Volt crates.
+_Avoid_: editor-core (as the authoring API), plugin host (loader), user package API
+
 ### Issues
 
 **Issue**:
@@ -145,6 +167,30 @@ _Avoid_: completed_at, resolved_at
 **External Command**:
 A process the editor spawns outside its own address space (for example git or a build tool), distinct from an internal editor command id.
 _Avoid_: job (as the spoken product term), shell command (as the umbrella), subprocess (as the spoken product term)
+
+**Owned Process**:
+A process-tree root Volt started and must terminate as a unit (Windows Job Object or Unix process group), not merely a single PID.
+_Avoid_: Job (except one-shot `editor-jobs` work), Session (protocol/PTY facade), stray process
+
+**Process Registry**:
+The app-wide index of Owned Processes, each with an `OwnedProcessId` and zero or more Workspace tags (shared ownership via Share Key refcount).
+_Avoid_: JobManager (ID minting / one-shot runners only), dictionary-of-workspaces (as the primary key)
+
+**Share Key**:
+An identity used when one Owned Process serves multiple Workspaces (for example a language server for one on-disk root); the process dies when the last Workspace tag is removed or the application quits.
+_Avoid_: SessionKey (LSP implementation detail unless elevated later)
+
+**Process Launch**:
+The sole allowed way Volt starts an Owned Process; every OS spawn goes through it into the Process Registry.
+_Avoid_: ad-hoc Command::spawn in feature code, best-effort registration
+
+**Workspace Close**:
+Teardown for one Workspace: graceful-then-force against Owned Processes tagged with that Workspace (and shared ones whose last tag was removed).
+_Avoid_: application quit
+
+**Application Quit**:
+Teardown for the whole app: one global graceful-then-force against the entire Process Registry (not a loop of Workspace Closes).
+_Avoid_: Workspace Close
 
 **Command Stream**:
 Live stdout/stderr of an External Command written into a popup buffer while the process runs. Default presentation for user-facing long, network, or progress External Commands.

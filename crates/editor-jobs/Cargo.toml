@@ -14,9 +14,17 @@ workspace = true
 workspace = true
 
 [dependencies]
+command-group = "5.0.1"
+
+[target.'cfg(unix)'.dependencies.rustix]
+version = "1.1.4"
+features = ["process"]
 
 [lib]
 path = "src/lib.rs"
 name = "editor_jobs"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

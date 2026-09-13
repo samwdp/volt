@@ -6,7 +6,7 @@ use std::{
     mem,
     net::TcpStream,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{ChildStdin, ChildStdout},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -19,6 +19,10 @@ use dap_types::{
     EvaluateArguments, EvaluateArgumentsContext, ScopesArguments, StackTraceArguments,
     VariablesArguments,
     requests::{Evaluate, Request as DapRequest, Scopes, StackTrace, Variables},
+};
+use editor_jobs::{
+    OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry, ProcessSupervisionMode,
+    WorkspaceId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -35,9 +39,6 @@ pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) const TCP_CONNECT_RETRY: Duration = Duration::from_millis(50);
-
-#[cfg(windows)]
-pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Errors produced by the DAP client host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -735,42 +736,45 @@ pub(crate) fn wait_for_initialized(
     }
 }
 
-pub(crate) type TransportEnds = (Box<dyn Write + Send>, Box<dyn Read + Send>, Option<Child>);
+pub(crate) type OwnedTransportProcess = (OwnedProcessId, Arc<Mutex<ProcessRegistry>>);
+
+pub(crate) type TransportEnds = (
+    Box<dyn Write + Send>,
+    Box<dyn Read + Send>,
+    Option<OwnedTransportProcess>,
+);
 
 pub(crate) fn connect_transport(
     adapter: &DebugAdapterSpec,
     transport: &DebugAdapterTransport,
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: u64,
 ) -> Result<TransportEnds, DapClientError> {
     match transport {
         DebugAdapterTransport::Stdio => {
-            let mut child = spawn_adapter_command(adapter)?;
-            let stdin = child.stdin.take().ok_or_else(|| {
-                DapClientError::Protocol(format!(
-                    "debug adapter `{}` is missing stdin pipe",
-                    adapter.id()
-                ))
-            })?;
-            let stdout = child.stdout.take().ok_or_else(|| {
-                DapClientError::Protocol(format!(
-                    "debug adapter `{}` is missing stdout pipe",
-                    adapter.id()
-                ))
-            })?;
-            Ok((Box::new(stdin), Box::new(stdout), Some(child)))
+            let (owned_id, stdin, stdout) =
+                launch_dap_protocol_process(process_registry, adapter, workspace_id)?;
+            Ok((
+                Box::new(stdin),
+                Box::new(stdout),
+                Some((owned_id, Arc::clone(process_registry))),
+            ))
         }
         DebugAdapterTransport::Tcp { host, port } => {
             // Empty program means connect-only (adapter already listening), used by tests
             // and remote adapters.
-            let child = if adapter.program().is_empty() {
+            let owned = if adapter.program().is_empty() {
                 None
             } else {
-                Some(spawn_adapter_command(adapter)?)
+                let owned_id =
+                    launch_dap_detached_process(process_registry, adapter, workspace_id)?;
+                Some((owned_id, Arc::clone(process_registry)))
             };
-            let stream = connect_tcp(host, *port, child.is_some())?;
+            let stream = connect_tcp(host, *port, owned.is_some())?;
             let reader = stream
                 .try_clone()
                 .map_err(|error| DapClientError::Io(error.to_string()))?;
-            Ok((Box::new(stream), Box::new(reader), child))
+            Ok((Box::new(stream), Box::new(reader), owned))
         }
     }
 }
@@ -811,36 +815,70 @@ pub(crate) fn connect_tcp(
     )))
 }
 
-pub(crate) fn configure_adapter_command(_command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-
-        _command.creation_flags(CREATE_NO_WINDOW);
-    }
+pub(crate) fn launch_dap_protocol_process(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    adapter: &DebugAdapterSpec,
+    workspace_id: u64,
+) -> Result<(OwnedProcessId, ChildStdin, ChildStdout), DapClientError> {
+    let mut launched = launch_dap_spec(
+        process_registry,
+        adapter,
+        workspace_id,
+        ProcessLaunchStdio::Protocol,
+    )?;
+    let stdin = launched.stdin.take().ok_or_else(|| {
+        DapClientError::Protocol(format!(
+            "debug adapter `{}` is missing stdin pipe",
+            adapter.id()
+        ))
+    })?;
+    let stdout = launched.stdout.take().ok_or_else(|| {
+        DapClientError::Protocol(format!(
+            "debug adapter `{}` is missing stdout pipe",
+            adapter.id()
+        ))
+    })?;
+    Ok((launched.id, stdin, stdout))
 }
 
-pub(crate) fn spawn_adapter_command(adapter: &DebugAdapterSpec) -> Result<Child, DapClientError> {
-    let mut command = Command::new(adapter.program());
-    configure_adapter_command(&mut command);
-    command
-        .args(adapter.args())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+pub(crate) fn launch_dap_detached_process(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    adapter: &DebugAdapterSpec,
+    workspace_id: u64,
+) -> Result<OwnedProcessId, DapClientError> {
+    let launched = launch_dap_spec(
+        process_registry,
+        adapter,
+        workspace_id,
+        ProcessLaunchStdio::Null,
+    )?;
+    Ok(launched.id)
+}
+
+fn launch_dap_spec(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    adapter: &DebugAdapterSpec,
+    workspace_id: u64,
+    stdio: ProcessLaunchStdio,
+) -> Result<editor_jobs::LaunchedProcess, DapClientError> {
     let mut env = Vec::new();
     editor_tool_install::merge_effective_path(&mut env);
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    match command.spawn() {
-        Ok(child) => Ok(child),
-        Err(error) => Err(DapClientError::AdapterMissing {
+    let mut spec = ProcessLaunchSpec::new(adapter.program(), adapter.args().to_vec())
+        .with_stdio(stdio)
+        .with_mode(ProcessSupervisionMode::Background)
+        .with_workspace(WorkspaceId::from_raw(workspace_id));
+    spec.env = env;
+
+    let mut registry = process_registry
+        .lock()
+        .map_err(|_| DapClientError::LockPoisoned)?;
+    registry
+        .launch(spec)
+        .map_err(|error| DapClientError::AdapterMissing {
             adapter_id: adapter.id().to_owned(),
             program: adapter.program().to_owned(),
             detail: error.to_string(),
-        }),
-    }
+        })
 }
 
 pub(crate) struct DapReaderSession {

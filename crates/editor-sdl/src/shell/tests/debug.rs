@@ -782,10 +782,14 @@ fn dap_start_opens_adapter_picker_ordered_by_preference() -> Result<(), String> 
                 .with_preference(100),
         )
         .map_err(|e| e.to_string())?;
+    let process_registry = shared_process_registry(&state.runtime)?;
     state
         .runtime
         .services_mut()
-        .insert(Arc::new(DapClientManager::new(registry)));
+        .insert(Arc::new(DapClientManager::with_process_registry(
+            registry,
+            process_registry,
+        )));
 
     start_dap_for_active_workspace(&mut state.runtime, None)?;
     let picker = shell_ui(&state.runtime)?

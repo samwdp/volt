@@ -35,12 +35,17 @@ pub(crate) fn git_command_output(
     label: &str,
     args: &[&str],
 ) -> Result<String, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     let spec = JobSpec::command(
         label,
         "git",
         args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
     )
-    .with_cwd(root.to_path_buf());
+    .with_cwd(root.to_path_buf())
+    .with_workspace(editor_jobs::WorkspaceId::from_raw(workspace_id.get()));
     let manager = runtime
         .services()
         .get::<Mutex<JobManager>>()

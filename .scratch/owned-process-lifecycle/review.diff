@@ -1,0 +1,154 @@
+diff --git a/CONTEXT.md b/CONTEXT.md
+index 95fa897..37c1ba3 100644
+--- a/CONTEXT.md
++++ b/CONTEXT.md
+@@ -146,6 +146,30 @@ _Avoid_: completed_at, resolved_at
+ A process the editor spawns outside its own address space (for example git or a build tool), distinct from an internal editor command id.
+ _Avoid_: job (as the spoken product term), shell command (as the umbrella), subprocess (as the spoken product term)
+ 
++**Owned Process**:
++A process-tree root Volt started and must terminate as a unit (Windows Job Object or Unix process group), not merely a single PID.
++_Avoid_: Job (except one-shot `editor-jobs` work), Session (protocol/PTY facade), stray process
++
++**Process Registry**:
++The app-wide index of Owned Processes, each with an `OwnedProcessId` and zero or more Workspace tags (shared ownership via Share Key refcount).
++_Avoid_: JobManager (ID minting / one-shot runners only), dictionary-of-workspaces (as the primary key)
++
++**Share Key**:
++An identity used when one Owned Process serves multiple Workspaces (for example a language server for one on-disk root); the process dies when the last Workspace tag is removed or the application quits.
++_Avoid_: SessionKey (LSP implementation detail unless elevated later)
++
++**Process Launch**:
++The sole allowed way Volt starts an Owned Process; every OS spawn goes through it into the Process Registry.
++_Avoid_: ad-hoc Command::spawn in feature code, best-effort registration
++
++**Workspace Close**:
++Teardown for one Workspace: graceful-then-force against Owned Processes tagged with that Workspace (and shared ones whose last tag was removed).
++_Avoid_: application quit
++
++**Application Quit**:
++Teardown for the whole app: one global graceful-then-force against the entire Process Registry (not a loop of Workspace Closes).
++_Avoid_: Workspace Close
++
+ **Command Stream**:
+ Live stdout/stderr of an External Command written into a popup buffer while the process runs. Default presentation for user-facing long, network, or progress External Commands.
+ _Avoid_: terminal session (when meaning this popup), log buffer, streamed job
+diff --git a/Cargo.lock b/Cargo.lock
+index 018628b..0cef8cd 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -678,6 +678,16 @@ dependencies = [
+  "memchr",
+ ]
+ 
++[[package]]
++name = "command-group"
++version = "5.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a68fa787550392a9d58f44c21a3022cfb3ea3e2458b7f85d3b399d0ceeccf409"
++dependencies = [
++ "nix",
++ "winapi",
++]
++
+ [[package]]
+ name = "concurrent-queue"
+ version = "2.5.0"
+@@ -1208,6 +1218,10 @@ version = "0.1.0"
+ [[package]]
+ name = "editor-jobs"
+ version = "0.1.0"
++dependencies = [
++ "command-group",
++ "rustix",
++]
+ 
+ [[package]]
+ name = "editor-lsp"
+@@ -2846,6 +2860,17 @@ version = "1.0.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
+ 
++[[package]]
++name = "nix"
++version = "0.27.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
++dependencies = [
++ "bitflags 2.13.0",
++ "cfg-if",
++ "libc",
++]
++
+ [[package]]
+ name = "nodrop"
+ version = "0.1.14"
+diff --git a/crates/editor-jobs/Cargo.toml b/crates/editor-jobs/Cargo.toml
+index dd78a4f..5d020e2 100644
+--- a/crates/editor-jobs/Cargo.toml
++++ b/crates/editor-jobs/Cargo.toml
+@@ -14,9 +14,17 @@ workspace = true
+ workspace = true
+ 
+ [dependencies]
++command-group = "5.0.1"
++
++[target.'cfg(unix)'.dependencies.rustix]
++version = "1.1.4"
++features = ["process"]
+ 
+ [lib]
+ path = "src/lib.rs"
+ name = "editor_jobs"
+ required-features = []
+ crate-type = ["lib"]
++
++[lints]
++workspace = true
+diff --git a/crates/editor-jobs/src/lib.rs b/crates/editor-jobs/src/lib.rs
+index 771a10f..10e87ed 100644
+--- a/crates/editor-jobs/src/lib.rs
++++ b/crates/editor-jobs/src/lib.rs
+@@ -13,7 +13,7 @@ use std::{
+ 
+ /// Human-readable summary of this crate's responsibility.
+ pub const ROLE: &str =
+-    "Asynchronous job scheduling, process supervision, and compilation task coordination.";
++    "Asynchronous job scheduling, process supervision, Owned Process registry/launch, and compilation task coordination.";
+ 
+ /// Returns the responsibility summary for this crate.
+ pub const fn role() -> &'static str {
+@@ -38,7 +38,7 @@ pub const PROCESS_SUPERVISOR_EXE_ENV: &str = "VOLT_PROCESS_SUPERVISOR_EXE";
+ /// Hidden flag used to run the Volt executable in child-process supervision mode.
+ pub const PROCESS_SUPERVISOR_FLAG: &str = "--process-supervisor";
+ 
+-const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
++pub(crate) const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
+ 
+ /// Controls how the supervised child should be launched on the current platform.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -144,7 +144,7 @@ pub fn supervised_command(
+     )
+ }
+ 
+-fn default_process_supervisor_executable() -> Option<PathBuf> {
++pub(crate) fn default_process_supervisor_executable() -> Option<PathBuf> {
+     let current_exe = env::current_exe().ok()?;
+     let stem = current_exe.file_stem()?.to_str()?;
+     (stem == "volt").then_some(current_exe)
+@@ -883,5 +883,15 @@ fn explicit_windows_env_value<'a>(env: &'a [(String, String)], key: &str) -> Opt
+         .find_map(|(entry_key, value)| entry_key.eq_ignore_ascii_case(key).then_some(value))
+ }
+ 
++mod process_registry;
++
++pub use process_registry::{
++    OwnedProcessId, ProcessLaunchSpec, ProcessRegistry, ProcessRegistryError, ShareKey,
++    WorkspaceId, discover_volt_supervisor_exe, owned_process_pid_alive, synthetic_sleep_command,
++};
++
+ #[cfg(test)]
+ mod tests;
++
++#[cfg(test)]
++mod process_registry_tests;

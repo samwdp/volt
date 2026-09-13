@@ -1,0 +1,1527 @@
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-lsp\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+37 ~ crate-type = ["lib"]
+38 + [lints]
+39 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+37 ~ crate-type = ["lib"]
+38 + [lints]
+   |
+warning: `editor-lsp` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-buffer\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+25 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+   |
+warning: `editor-buffer` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-syntax\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+63 ~ harness = false
+64 + [lints]
+65 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+63 ~ harness = false
+64 + [lints]
+   |
+warning: `editor-syntax` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-render\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+25 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+   |
+warning: `editor-render` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-tool-install\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+26 ~ crate-type = ["lib"]
+27 + [lints]
+28 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+26 ~ crate-type = ["lib"]
+27 + [lints]
+   |
+warning: `editor-tool-install` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-terminal\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+28 ~ crate-type = ["lib"]
+29 + [lints]
+30 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+28 ~ crate-type = ["lib"]
+29 + [lints]
+   |
+warning: `editor-terminal` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-theme\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-theme` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-picker\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-picker` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-path\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+20 ~ crate-type = ["lib"]
+21 + [lints]
+22 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+20 ~ crate-type = ["lib"]
+21 + [lints]
+   |
+warning: `editor-path` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-icons\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+25 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+23 ~ crate-type = ["lib"]
+24 + [lints]
+   |
+warning: `editor-icons` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\volt\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+94 ~ required-features = []
+95 + [lints]
+96 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+94 ~ required-features = []
+95 + [lints]
+   |
+warning: `volt` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-git\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-git` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-db\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+72 ~ crate-type = ["lib"]
+73 + [lints]
+74 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+72 ~ crate-type = ["lib"]
+73 + [lints]
+   |
+warning: `editor-db` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-issues\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-issues` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-core\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ crate-type = ["lib"]
+23 + [lints]
+   |
+warning: `editor-core` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> user\sdk\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+51 ~ crate-type = ["lib"]
+52 + [lints]
+53 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+51 ~ crate-type = ["lib"]
+52 + [lints]
+   |
+warning: `editor-plugin-api` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> xtask\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+22 ~ required-features = []
+23 + [lints]
+24 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+22 ~ required-features = []
+23 + [lints]
+   |
+warning: `xtask` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-dap\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+31 ~ crate-type = ["lib"]
+32 + [lints]
+33 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+31 ~ crate-type = ["lib"]
+32 + [lints]
+   |
+warning: `editor-dap` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+   --> crates\editor-sdl\Cargo.toml
+    = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+    |
+159 ~ crate-type = ["lib"]
+160 + [lints]
+161 + workspace = true
+    |
+help: to clarify your intent to not inherit, add:
+    |
+159 ~ crate-type = ["lib"]
+160 + [lints]
+    |
+warning: `editor-sdl` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-plugin-host\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+29 ~ crate-type = ["lib"]
+30 + [lints]
+31 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+29 ~ crate-type = ["lib"]
+30 + [lints]
+   |
+warning: `editor-plugin-host` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\editor-fs\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+27 ~ crate-type = ["lib"]
+28 + [lints]
+29 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+27 ~ crate-type = ["lib"]
+28 + [lints]
+   |
+warning: `editor-fs` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> user\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+57 ~ crate-type = ["cdylib", "rlib"]
+58 + [lints]
+59 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+57 ~ crate-type = ["cdylib", "rlib"]
+58 + [lints]
+   |
+warning: `volt-user` (manifest) generated 1 warning
+   Compiling winapi v0.3.9
+   Compiling editor-syntax v0.1.0 (P:\volt\crates\editor-syntax)
+   Compiling editor-markdown v0.1.0 (P:\volt\crates\editor-markdown)
+   Compiling command-group v5.0.1
+   Compiling libloading v0.7.4
+   Compiling editor-jobs v0.1.0 (P:\volt\crates\editor-jobs)
+   Compiling abi_stable v0.11.3
+   Compiling editor-tool-install v0.1.0 (P:\volt\crates\editor-tool-install)
+   Compiling editor-terminal v0.1.0 (P:\volt\crates\editor-terminal)
+   Compiling editor-dap v0.1.0 (P:\volt\crates\editor-dap)
+   Compiling editor-lsp v0.1.0 (P:\volt\crates\editor-lsp)
+   Compiling editor-plugin-api v0.1.0 (P:\volt\user\sdk)
+   Compiling editor-plugin-host v0.1.0 (P:\volt\crates\editor-plugin-host)
+   Compiling editor-db v0.1.0 (P:\volt\crates\editor-db)
+   Compiling volt-user v0.1.0 (P:\volt\user)
+   Compiling editor-sdl v0.1.0 (P:\volt\crates\editor-sdl)
+warning: linker stdout: LINK : warning LNK4098: defaultlib 'MSVCRTD' conflicts with use of other libs; use /NODEFAULTLIB:library
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `editor-sdl` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 04s
+     Running unittests src\lib.rs (target\debug\build\editor-sdl/f07b4e4922b5bcb5\out\editor_sdl-f07b4e4922b5bcb5.exe)
+
+running 790 tests
+test browser_host::tests::browser_additional_args_from_env_is_empty_without_flags ... ok
+test browser_host::tests::browser_drag_drop_handler_preserves_default_webview_behavior ... ok
+test browser_host::tests::browser_additional_args_from_env_appends_custom_args ... ok
+test browser_host::tests::browser_additional_args_from_env_appends_web_security_bypass ... ok
+test browser_host::tests::browser_host_starts_without_a_live_web_context ... ok
+test browser_host::tests::browser_navigation_retry_is_required_for_new_targets ... ok
+test browser_host::tests::browser_host_ipc_event_ignores_unknown_messages ... ok
+test browser_host::tests::browser_host_ipc_event_routes_open_devtools_requests ... ok
+test browser_host::tests::browser_navigation_retry_stops_after_target_url_is_reported ... ok
+test browser_host::tests::browser_host_ipc_event_routes_focus_parent_requests ... ok
+test browser_host::tests::browser_navigation_retry_waits_for_retry_interval ... ok
+test browser_host::tests::browser_user_agent_header_is_valid ... ok
+test browser_host::tests::empty_browser_sync_plan_does_not_need_web_context ... ok
+test browser_host::tests::optional_non_empty_text_trims_blank_values ... ok
+test browser_host::tests::wry_rect_preserves_physical_pixel_bounds ... ok
+test shell::acp::tests::acp_file_mention_at_cursor_requires_token_start ... ok
+test shell::acp::tests::acp_session_buffer_name_wraps_title ... ok
+test shell::acp::tests::acp_leading_slash_command_name_reads_first_token ... ok
+test shell::acp::tests::acp_slash_completion_query_requires_leading_single_token_command ... ok
+test shell::acp::tests::active_command_input_hint_uses_unstructured_command_metadata ... ok
+test shell::acp::tests::coalesce_acp_events_merges_adjacent_agent_text_chunks ... ok
+test shell::acp::tests::compose_acp_prompt_blocks_embeds_pasted_images ... ok
+test shell::acp::tests::compose_acp_prompt_blocks_splits_file_mentions_into_resource_links ... ok
+test shell::acp::tests::drain_acp_event_batch_limits_per_frame_work ... ok
+test shell::acp::tests::drain_events_shows_incremental_plan_progress_across_frames ... ok
+test shell::acp::tests::merge_acp_slash_commands_puts_universal_clear_first_and_dedupes_agent_clear ... ok
+test shell::acp::tests::merge_node_manager_environment_keeps_manager_path_first ... ok
+test shell::acp::tests::connected_event_for_closed_buffer_disconnects_orphaned_session ... ok
+test shell::acp::tests::close_buffer_disconnects_sessions_and_clears_reuse_state ... ok
+test shell::acp::tests::parse_windows_cmd_environment_reads_fnm_env_output ... ok
+test shell::acp::tests::parse_windows_nvm_helpers_read_current_root_and_settings ... ok
+test shell::acp::tests::permission_prompt_lines_show_locations_and_choices ... ok
+test shell::acp::tests::open_permission_request_reorders_queue_for_requested_picker ... ok
+test shell::acp::tests::buffer_lookup_is_scoped_to_workspace ... ok
+test shell::acp::tests::pending_slash_completion_trigger_rejects_multiline_input ... ok
+test shell::acp::tests::session_finished_marks_plan_entries_completed ... ok
+test shell::acp::tests::split_acp_events_for_render_defers_later_plan_transitions ... ok
+test shell::acp::tests::windows_nvm_environment_prepends_current_node_path ... ok
+test shell::autocomplete_tokens::tests::incremental_token_counts_apply_burst_of_inserts ... ok
+test shell::autocomplete_tokens::tests::incremental_token_counts_drop_deleted_identifier ... ok
+test shell::acp::tests::session_load_replay_keeps_history_and_names_buffer ... ok
+test shell::autocomplete_tokens::tests::tiny_file_incremental_counts_match_full_rescan ... ok
+test shell::autocomplete_tokens::tests::token_counts_match_rescan_after_reload ... ok
+test shell::autocomplete_tokens::tests::token_counts_rebuild_when_edit_chain_missing ... ok
+test shell::autocomplete_tokens::tests::token_counts_reuse_map_for_same_revision ... ok
+test shell::acp::tests::session_list_picker_preserves_source_order ... ok
+test shell::browser::tests::browser_buffer_display_name_marks_loading_state ... ok
+test shell::browser::tests::browser_buffer_display_name_prefers_title ... ok
+test shell::browser::tests::browser_display_url_prefers_requested_navigation ... ok
+test shell::browser::tests::path_to_file_url_encodes_spaces ... ok
+test shell::clipboard::tests::clipboard_image_from_path_text_ignores_plain_text ... ok
+test shell::clipboard::tests::normalize_clipboard_image_prefers_sniffed_png_mime ... ok
+test shell::clipboard::tests::sniff_image_mime_recognizes_png_magic ... ok
+test shell::acp::tests::permission_requests_queue_and_advance_after_resolution ... FAILED
+test shell::clipboard::tests::clipboard_image_from_path_loads_named_png ... ok
+test shell::command_stream::tests::detects_cargo_toml ... ok
+test shell::command_stream::tests::detects_csproj ... ok
+test shell::command_stream::tests::cargo_toml_wins_over_other_markers ... ok
+test shell::autocomplete_tokens::tests::incremental_token_counts_match_rescan_after_one_insert ... ok
+test shell::command_stream::tests::detects_makefile ... ok
+test shell::command_stream::tests::missing_dir_returns_empty_string ... ok
+test shell::command_stream::tests::detects_package_json ... ok
+test shell::command_stream::tests::nushell_command_eval_uses_login_flag ... ok
+test shell::command_stream::tests::windows_shell_command_eval_flags_unchanged ... ok
+test shell::compile_reload_tests::detects_explicit_volt_user_build_commands ... ok
+test shell::command_stream::tests::empty_dir_returns_empty_string ... ok
+test shell::command_stream::tests::detects_sln ... ok
+test shell::compile_reload_tests::ignores_non_user_or_non_cargo_commands ... ok
+test shell::dap::tests::locals_line_kind_skips_header_and_placeholder ... ok
+test shell::dap::tests::extract_watch_expressions_reads_lines_after_header ... ok
+test shell::dap::tests::locals_section_always_keeps_watch_header ... ok
+test shell::db::tests::browser_header_and_table_lines_use_distinct_tokens ... ok
+test shell::dap::tests::watch_header_and_draft_use_watch_tokens ... ok
+test shell::db::tests::results_table_row_colors_header_and_numeric_cells ... ok
+test shell::directory::directory_line_tests::oil_theme_tokens_follow_entry_kind ... ok
+test shell::directory::directory_line_tests::deleting_parent_navigation_line_does_not_delete_parent_directory ... ok
+test shell::directory::directory_line_tests::parent_navigation_line_is_ignored_when_creating_entries ... ok
+test shell::directory::directory_line_tests::parse_directory_line_strips_directory_icons ... FAILED
+test shell::directory::directory_line_tests::parse_directory_line_strips_file_icons ... FAILED
+test shell::directory::directory_line_tests::parse_directory_line_strips_repeated_icons ... FAILED
+test shell::directory::directory_line_tests::repeated_icons_do_not_turn_existing_entries_into_renames ... FAILED
+test shell::directory::directory_line_tests::trailing_slash_added_line_creates_directory ... ok
+test shell::git::tests::git_fringe_snapshot_from_texts_ignores_crlf_only_difference ... ok
+test shell::git::tests::git_fringe_snapshot_from_texts_is_empty_when_identical ... ok
+test shell::directory::directory_line_tests::create_dir_action_creates_empty_directory ... ok
+test shell::git::tests::git_fringe_snapshot_from_texts_marks_all_lines_added_without_head ... ok
+test shell::git::tests::git_fringe_snapshot_from_texts_marks_inserted_line_added ... ok
+test shell::git::tests::git_fringe_snapshot_from_texts_marks_modified_middle_line ... ok
+test shell::git::tests::git_fringe_snapshot_from_texts_marks_removed_on_adjacent_line ... ok
+test shell::git::tests::git_head_blob_cache_reuses_text_for_same_head ... ok
+test shell::directory::directory_line_tests::copy_directory_yank_entries_copies_files_and_directories ... ok
+test shell::git::tests::git_push_remote_name_prefers_branch_push_remote_for_slashy_branch_names ... ok
+test shell::git::tests::git_fringe_snapshot_ignores_crlf_only_difference ... ok
+test shell::git::tests::git_summary_changed_tracks_head_updates ... ok
+test shell::git::tests::git_summary_refresh_due_until_interval_or_stale ... ok
+test shell::git::tests::git_fringe_snapshot_is_empty_when_buffer_matches_head ... ok
+test shell::git::tests::git_summary_snapshot_non_git_root_is_none ... ok
+test shell::git::tests::git_worktree_list_parser_normalizes_windows_drive_paths ... ok
+test shell::git::tests::myers_diff_ops_match_lcs_for_middle_replace ... ok
+test shell::git::tests::parse_git_fringe_diff_marks_modified_hunk ... ok
+test shell::git::tests::parse_git_numstat_sums_changed_lines ... ok
+test shell::git::tests::status_output_upstream_reads_short_branch_tracking_ref ... ok
+test shell::idle::tests::idle_wait_timeout_equals_next_deadline_when_idle ... ok
+test shell::idle::tests::idle_wait_timeout_polls_while_interacting_or_showing_fps ... ok
+test shell::idle::tests::ping_without_sdl_attach_is_noop ... ok
+test shell::lsp_diagnostic_scope_tests::lsp_diagnostic_scope_keeps_active_workspace_buffers_without_root ... ok
+test shell::lsp_diagnostic_scope_tests::lsp_diagnostic_scope_matches_active_workspace_root ... ok
+test shell::picker::tests::command_picker_overlay_uses_finite_result_limit ... ok
+test shell::picker::tests::picker_preview_is_opt_in ... ok
+test shell::picker::tests::picker_preview_layout_splits_preview_to_the_right ... ok
+test shell::picker::tests::provider_extra_keybinds_copy_onto_open_picker_instance ... ok
+test shell::picker::tests::static_picker_keeps_all_matches_for_large_lists ... ok
+test shell::picker::tests::static_user_picker_provider_builds_executable_entries ... ok
+test shell::picker::tests::workspace_files_overlay_caps_matches_without_dropping_source_items ... ok
+test shell::render::render_rounded_rect_tests::rounded_corner_coverage_has_multi_pixel_fringe ... ok
+test shell::render::render_rounded_rect_tests::rounded_corner_coverage_is_symmetric_across_axes ... ok
+test shell::tests::acp_protocol::acp_agent_markdown_uses_shared_pipeline_pretty ... ok
+test shell::git::tests::git_read_log_oneline_optional_returns_empty_for_unknown_revision ... ok
+test shell::git::tests::git_push_remote_name_uses_upstream_branch_remote_for_local_tracking_worktree_branch ... ok
+test shell::tests::acp_protocol::acp_dock_layout_shrinks_content_on_the_right ... ok
+test shell::tests::acp_protocol::acp_dock_entries_list_active_workspace_buffers ... ok
+test shell::tests::acp_protocol::acp_escape_from_insert_keeps_input_cursor_position ... ok
+test shell::tests::acp_protocol::acp_dock_focus_j_k_cycle_buffers ... ok
+test shell::tests::acp_protocol::acp_dock_toggle_shows_and_hides ... ok
+test shell::tests::acp_protocol::acp_multiline_text_lines_strip_carriage_returns ... ok
+test shell::tests::acp_protocol::acp_nonleading_double_slash_does_not_open_slash_picker ... ok
+test shell::tests::acp_protocol::acp_output_scroll_reaches_wrapped_tail ... ok
+test shell::tests::acp_protocol::acp_output_speaker_roles_and_tool_chip ... ok
+test shell::tests::acp_protocol::acp_output_wraps_long_tool_tokens_within_bubble_width ... ok
+test shell::tests::acp_protocol::acp_paste_code_with_inline_double_slash_comments_closes_slash_picker ... ok
+test shell::tests::acp_protocol::acp_paste_image_inserts_mention_token_and_stores_bytes ... ok
+test shell::tests::acp_protocol::acp_plan_entries_normalize_completed_prefix_when_later_step_is_active ... ok
+test shell::tests::acp_protocol::acp_plan_entries_normalize_completed_prefix_without_active_step ... ok
+test shell::tests::acp_protocol::acp_plan_entries_populate_static_plan_pane ... FAILED
+test shell::tests::acp_protocol::acp_plan_height_caps_wrapped_content_at_ten_rows ... ok
+test shell::tests::acp_protocol::acp_rendered_text_segments_break_long_tokens_before_future_whitespace ... ok
+test shell::tests::acp_protocol::acp_rendered_text_segments_skip_whitespace_only_rows_after_hard_break ... ok
+test shell::tests::acp_protocol::acp_scroll_output_to_end_reaches_last_rendered_line ... ok
+test shell::tests::acp_protocol::acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane ... FAILED
+test shell::tests::acp_protocol::acp_tool_call_updates_replace_existing_output_item ... ok
+test shell::tests::acp_protocol::acp_tool_diff_renders_added_and_removed_lines ... ok
+test shell::tests::acp_protocol::acp_wrapped_text_uses_full_width_on_continuation_rows ... ok
+test shell::tests::acp_protocol::paste_text_into_active_input_buffer_updates_acp_input ... ok
+test shell::tests::acp_protocol::render_acp_block_cursor_inverts_glyph_in_input_and_output ... ok
+test shell::tests::acp_protocol::render_acp_buffer_with_tall_multiline_input_keeps_footer_on_screen ... ok
+test shell::tests::acp_protocol::render_acp_diff_expands_tab_indentation_to_spaces ... ok
+test shell::tests::acp_protocol::render_acp_footer_draws_client_logo_before_text ... ok
+test shell::tests::acp_protocol::render_acp_headers_use_rounded_caps ... ok
+test shell::tests::acp_protocol::render_acp_input_cursor_uses_rounded_rect_in_normal_mode ... ok
+test shell::tests::acp_protocol::render_acp_output_header_shows_live_when_tool_in_progress ... ok
+test shell::tests::acp_protocol::render_acp_sections_apply_window_opacity_to_panel_chrome ... ok
+test shell::tests::acp_protocol::acp_logo_dest_rect_normalizes_native_svg_size ... ok
+test shell::tests::acp_protocol::sync_active_viewport_matches_acp_footer_visible_rows ... FAILED
+test shell::tests::browser_ui::browser_buffer_submit_tracks_requested_navigation ... ok
+test shell::git::tests::git_summary_snapshot_branch_matches_rev_parse_without_three_spawns_on_retry ... ok
+test shell::tests::browser_ui::browser_devtools_shortcut_requested_recognizes_f12_and_ctrl_shift_i ... ok
+test shell::tests::browser_ui::browser_devtools_shortcut_requested_rejects_other_modifiers ... ok
+test shell::tests::browser_ui::browser_host_focus_parent_event_returns_to_normal_mode ... ok
+test shell::tests::browser_ui::browser_escape_from_insert_keeps_input_cursor_position ... ok
+test shell::tests::browser_ui::browser_host_open_devtools_event_is_ignored_without_a_live_webview ... ok
+test shell::tests::browser_ui::browser_input_layout_uses_symmetric_vertical_padding ... ok
+test shell::tests::browser_ui::browser_host_new_window_event_routes_into_browser_popup ... ok
+test shell::tests::browser_ui::browser_insert_mode_ctrl_enter_binding_submits_current_url ... ok
+test shell::tests::browser_ui::browser_location_updates_rename_buffer_with_current_url ... ok
+test shell::tests::browser_ui::browser_insert_mode_enter_binding_submits_current_url ... ok
+test shell::tests::browser_ui::browser_open_buffer_command_opens_split_with_file_url ... ok
+test shell::tests::browser_ui::browser_open_buffer_command_uses_existing_split_pane ... ok
+test shell::tests::browser_ui::browser_normal_mode_i_binding_focuses_input_without_inserting_text ... ok
+test shell::tests::browser_ui::browser_page_load_event_accepts_redirect_after_location_sync ... ok
+test shell::tests::browser_ui::browser_page_load_event_commits_current_url_and_clears_loading ... ok
+test shell::tests::browser_ui::browser_page_load_event_does_not_clobber_a_newer_requested_navigation ... ok
+test shell::tests::browser_ui::browser_surface_hit_testing_excludes_prompt_footer ... ok
+test shell::tests::browser_ui::browser_popup_command_focuses_the_popup_surface ... ok
+test shell::tests::browser_ui::browser_sync_plan_hides_surfaces_while_picker_is_visible ... ok
+test shell::tests::browser_ui::browser_url_command_opens_split_browser_with_detected_url ... ok
+test shell::tests::browser_ui::browser_viewport_rect_stays_above_prompt_footer ... ok
+test shell::tests::browser_ui::detect_browser_url_uses_cursor_hit_or_single_line_url ... ok
+test shell::tests::browser_ui::paste_text_into_active_input_buffer_updates_browser_input ... ok
+test shell::tests::browser_ui::render_browser_input_cursor_uses_rounded_rect_in_normal_mode ... ok
+test shell::tests::browser_ui::render_browser_selected_section_applies_window_opacity ... ok
+test shell::tests::browser_ui::render_browser_selected_section_keeps_focus_border_when_translucent ... ok
+test shell::tests::browser_ui::shell_start_does_not_construct_browser_web_context ... ok
+test shell::tests::browser_ui::sync_active_browser_buffer_enters_insert_mode ... ok
+test shell::tests::acp_protocol::acp_logo_assets_resolve_and_rasterize ... ok
+test shell::tests::compile_reload::dap_install_server_opens_recipe_picker ... ok
+test shell::tests::compile_reload::install_picker_label_prefixes_status_icon ... ok
+test shell::tests::browser_ui::browser_sync_plan_excludes_pdf_buffers ... ok
+test shell::tests::compile_reload::lsp_install_unknown_id_returns_error ... ok
+test shell::tests::compile_reload::lsp_install_server_opens_recipe_picker ... ok
+test shell::tests::compile_reload::workspace_compile_escape_does_not_store_command ... ok
+test shell::tests::compile_reload::workspace_compile_prefills_with_detected_command_for_cargo_toml ... ok
+test shell::tests::compile_reload::workspace_compile_prefills_with_detected_command_for_csproj ... ok
+test shell::tests::compile_reload::workspace_compile_prefills_with_detected_command_for_makefile ... ok
+test shell::tests::compile_reload::workspace_compile_prefills_with_detected_command_for_package_json ... ok
+test shell::tests::compile_reload::workspace_compile_prefills_with_detected_command_for_sln ... ok
+test shell::tests::compile_reload::workspace_compile_prefills_with_empty_command_for_empty_directory ... ok
+test shell::tests::compile_reload::workspace_compile_confirm_reuses_existing_streamed_popup ... ok
+test shell::tests::compile_reload::workspace_compile_prefills_with_stored_command_over_detected ... ok
+test shell::tests::compile_reload::workspace_recompile_uses_workspace_scoped_stored_command ... ok
+test shell::tests::compile_reload::workspace_recompile_with_stored_command_does_not_open_input_prompt ... ok
+test shell::tests::compile_reload::workspace_recompile_without_stored_command_falls_back_to_compile_prompt ... ok
+test shell::tests::database::db_connect_enter_submits_pasted_connection_string ... ok
+test shell::tests::database::db_dashboard_layout_places_sidebar_left_and_editor_output_right ... ok
+test shell::tests::database::db_dashboard_execute_replaces_output_and_concatenates_multiple_queries ... ok
+test shell::tests::database::db_dashboard_opens_and_writes_files_through_editor_section ... ok
+test shell::tests::database::db_multiview_disables_golden_ratio_and_narrows_left_sidebar ... ok
+test shell::tests::database::db_multiview_toggle_restores_golden_ratio ... ok
+test shell::tests::database::db_table_preview_buffer_exposes_hidden_sqls_path_without_file_open_hooks ... ok
+test shell::tests::debug::dap_default_workspace_skips_deep_inference ... ok
+test shell::tests::acp_protocol::render_shell_state_keeps_pane_fills_out_of_acp_dock ... ok
+test shell::tests::compile_reload::dap_heuristic_compile_opens_confirm_picker ... ok
+test shell::tests::debug::dap_mode_function_keys_continue_and_step ... FAILED
+test shell::tests::debug::dap_locals_and_watches_expand_structured_variables ... ok
+test shell::tests::debug::dap_locals_insert_watch_expression_evaluates_while_stopped ... ok
+test shell::tests::debug::dap_continue_to_exit_tears_down_debug_layout ... ok
+test shell::tests::debug::dap_start_opens_adapter_picker_ordered_by_preference ... ok
+test shell::tests::debug::dap_start_installs_debug_layout_and_stop_restores ... ok
+test shell::tests::debug::dap_start_last_replays_prior_configuration ... ok
+test shell::tests::debug::dap_start_lists_project_configurations_in_picker ... ok
+test shell::tests::debug::debug_layout_blocks_user_splits ... ok
+test shell::tests::debug::dap_start_saves_dirty_workspace_files_before_launch ... ok
+test shell::tests::debug::debug_layout_installs_three_panes_and_disables_golden_ratio ... ok
+test shell::tests::debug::debug_layout_teardown_restores_golden_ratio ... ok
+test shell::tests::draw_text::draw_buffer_text_expands_tabs_to_spaces ... ok
+test shell::tests::draw_text::draw_buffer_text_keeps_cursor_line_as_one_text_run ... ok
+test shell::tests::draw_text::draw_buffer_text_keeps_git_status_segments_aligned_with_icon_prefix ... ok
+test shell::tests::draw_text::draw_buffer_text_omits_byte_order_mark_from_scene_text ... ok
+test shell::tests::draw_text::draw_buffer_text_omits_variation_selectors_from_scene_text ... ok
+test shell::tests::draw_text::draw_buffer_text_renders_escape_controls_as_caret_notation ... ok
+test shell::tests::draw_text::draw_buffer_text_skips_lines_that_only_contain_byte_order_marks ... ok
+test shell::tests::draw_text::draw_text_replaces_control_characters_instead_of_raster_tofu ... ok
+test shell::tests::font_atlas::ascii_ligature_byte_ranges_isolate_inline_operator_in_mixed_text ... ok
+test shell::tests::font_atlas::emoji_raster_font_rasterizes_simple_emoji ... ok
+test shell::tests::font_atlas::ligature_shape_cache_stores_layout_results ... ok
+test shell::tests::font_atlas::ligature_shape_cache_stores_negative_results ... ok
+test shell::tests::font_atlas::ligature_shaping_accepts_same_length_contextual_substitutions ... ok
+test shell::tests::font_atlas::ligature_shaping_collapses_material_icon_label_when_enabled ... ok
+test shell::tests::font_atlas::ligature_shaping_is_disabled_by_user_toggle ... ok
+test shell::tests::debug::dap_stopped_jumps_to_source_refreshes_locals_and_steps ... ok
+test shell::tests::font_atlas::material_icons_rasterize_from_nfm_with_fontdue ... ok
+test shell::tests::font_atlas::preferred_primary_font_hinting_matches_transparent_window_policy ... ok
+test shell::tests::font_atlas::same_length_inline_ligatures_stay_layout_safe_on_cell_grid ... ok
+test shell::tests::font_atlas::scaled_font_size_uses_window_display_scale ... ok
+test shell::tests::font_atlas::split_primary_text_by_ligature_ranges_keeps_whole_line_surrounding_text_on_primary_path ... ok
+test shell::tests::font_atlas::split_primary_text_by_ligature_ranges_respects_preexisting_color_boundaries ... ok
+test shell::tests::font_atlas::styled_primary_font_path_prefers_real_style_files ... ok
+test shell::tests::font_atlas::load_font_set_normalizes_icon_raster_sizes_to_primary_line_height ... ok
+test shell::tests::git_status::acp_at_symbol_opens_git_file_picker_and_return_inserts_mention ... ok
+test shell::tests::git_status::debug_fringe_is_one_cell_when_idle_and_two_when_live ... ok
+test shell::tests::debug::dap_watches_eval_repl_switch_and_breakpoint_extras ... ok
+test shell::tests::git_status::git_editor_confirm_preserves_crlf_line_endings ... ok
+test shell::tests::git_status::git_editor_confirm_writes_file_and_signals_stub ... ok
+test shell::tests::git_status::git_line_is_untracked_uses_section_metadata ... ok
+test shell::tests::git_status::buffer_save_does_not_synchronously_refresh_git_status_buffers ... ok
+test shell::tests::debug::debug_layout_hides_on_workspace_switch_and_rebuilds_on_return ... ok
+test shell::tests::git_status::git_refresh_is_deferred_while_typing ... ok
+test shell::tests::git_status::git_status_buffer_supports_first_commit_on_fresh_repo ... ok
+test shell::tests::git_status::git_status_command_name_maps_sequences_to_picker_commands ... ok
+test shell::tests::git_status::git_status_commit_message_spans_use_command_token_with_icon_prefix ... ok
+test shell::tests::git_status::git_pull_upstream_streams_into_popup_buffer ... FAILED
+test shell::tests::git_status::fetch_git_prune_is_silent_command_without_popup ... ok
+test shell::tests::git_status::git_status_ctrl_v_visual_s_stages_selected_items ... FAILED
+test shell::tests::git_status::git_status_entry_spans_skip_leading_icons ... ok
+test shell::tests::git_status::git_status_ctrl_v_visual_u_unstages_selected_items ... FAILED
+test shell::tests::git_status::git_status_header_spans_skip_leading_icons ... ok
+test shell::tests::git_status::git_status_merge_header_spans_keep_tracking_counts ... ok
+test shell::tests::git_status::git_status_sequence_commands_are_registered ... FAILED
+test shell::tests::git_status::git_status_ctrl_v_visual_x_deletes_selected_items ... FAILED
+test shell::tests::git_status::git_status_shift_v_visual_s_stages_selected_items ... FAILED
+test shell::tests::git_status::git_status_focus_refresh_reuses_recent_snapshot ... ok
+test shell::tests::git_status::git_status_stash_spans_handle_compact_stash_names ... ok
+test shell::tests::git_status::git_status_shift_v_visual_u_unstages_selected_items ... FAILED
+test shell::tests::git_status::git_status_shift_v_visual_x_deletes_selected_items ... FAILED
+test shell::tests::git_status::git_status_tab_on_header_still_toggles_section ... ok
+test shell::tests::git_status::git_status_uppercase_f_starts_pull_prefix ... FAILED
+test shell::tests::git_status::git_push_upstream_streams_into_popup_buffer_and_refreshes_status ... ok
+test shell::tests::git_status::git_status_tab_on_staged_file_opens_diff_buffer ... ok
+test shell::tests::git_status::normalize_git_output_path_converts_git_for_windows_drive_roots ... ok
+test shell::tests::git_status::git_status_tab_on_unstaged_file_opens_diff_buffer ... ok
+test shell::tests::git_status::git_status_visual_s_stages_selected_items ... FAILED
+test shell::tests::git_status::git_status_visual_u_unstages_selected_items ... FAILED
+test shell::tests::git_status::undo_tree_picker_entries_use_fringe_indent_and_diff_preview ... ok
+test shell::tests::git_status::toggle_breakpoint_without_session_shows_idle_fringe_marker ... ok
+test shell::tests::git_status::workspace_dashboard_ctrl_d_on_worktree_runs_remove_ux ... ok
+test shell::tests::git_status::worktree_remove_closes_matching_workspaces_streams_and_closes_on_success ... ok
+test shell::tests::git_status::worktree_remove_create_affordance_one_shot_is_silent_noop ... ok
+test shell::tests::git_status::worktree_remove_missing_one_shot_is_silent_noop ... ok
+test shell::tests::git_status::oil_git_worktree_new_branch_prompts_for_name_then_directory ... ok
+test shell::tests::git_status::worktree_remove_prunes_when_porcelain_marks_entry_prunable ... ok
+test shell::tests::git_status::oil_git_worktree_command_opens_branch_picker ... ok
+test shell::tests::git_status::worktree_remove_uses_porcelain_raw_path_not_normalized_windows_path ... ok
+test shell::tests::hover_ui::focused_hover_ctrl_scroll_motions_are_bounded ... ok
+test shell::tests::hover_ui::focused_hover_gg_and_g_scroll_to_expected_bounds ... ok
+test shell::tests::hover_ui::focused_hover_text_motions_scroll_without_moving_buffer_cursor ... ok
+test shell::tests::hover_ui::format_current_line_indent_uses_inherited_tsx_queries ... ok
+test shell::tests::hover_ui::hover_diagnostic_provider_fragments_preserve_fenced_code_blocks ... ok
+test shell::tests::hover_ui::hover_registry_includes_signature_help_provider ... FAILED
+test shell::tests::hover_ui::hover_signature_request_point_prefers_callee_over_enclosing_macro ... ok
+test shell::tests::hover_ui::hover_signature_request_point_preserves_argument_cursor_context ... ok
+test shell::tests::hover_ui::hover_test_provider_lines_include_theme_and_treesitter_tokens ... ok
+test shell::tests::hover_ui::insert_mode_closing_brace_does_not_reindent_inline_block ... ok
+test shell::tests::hover_ui::insert_mode_enter_in_tsx_uses_two_space_indent_query ... ok
+test shell::tests::hover_ui::vim_open_line_below_in_tsx_uses_inherited_indent_queries ... ok
+test shell::tests::hover_ui::visual_indent_shifts_selected_lines_right ... ok
+test shell::tests::idle_pacing::frame_pacing_is_deferred_while_typing ... ok
+test shell::tests::idle_pacing::frame_pacing_remaining_clamps_to_120fps_budget ... ok
+test shell::tests::idle_pacing::idle_wait_timeout_caps_and_skips_when_interacting ... ok
+test shell::tests::idle_pacing::idle_wait_timeout_equals_next_deadline_when_idle ... ok
+test shell::tests::idle_pacing::insert_mode_text_input_activates_typing_budget ... ok
+test shell::tests::idle_pacing::normal_mode_text_input_does_not_activate_typing_budget ... ok
+test shell::tests::idle_pacing::secondary_refresh_is_deferred_while_typing ... ok
+test shell::tests::idle_pacing::sync_visible_buffer_layouts_reuses_headerline_snapshot_while_typing ... ok
+test shell::tests::idle_pacing::typing_event_batches_yield_once_budget_is_exhausted ... ok
+test shell::tests::git_status::worktree_remove_failure_notifies_and_keeps_buffer_after_closing_workspaces ... ok
+test shell::tests::input_shortcuts::acp_dock_ctrl_h_exits_focus_back_to_panes ... ok
+test shell::tests::input_shortcuts::acp_dock_ctrl_l_enters_focus_when_open ... ok
+test shell::tests::input_shortcuts::acp_input_field_cw_enters_insert_mode ... FAILED
+test shell::tests::input_shortcuts::acp_input_field_dd_deletes_current_line ... ok
+test shell::tests::input_shortcuts::acp_input_field_dw_deletes_motion_range ... ok
+test shell::tests::input_shortcuts::acp_input_field_o_and_o_open_new_lines ... ok
+test shell::tests::input_shortcuts::acp_input_field_yy_and_p_work_linewise ... ok
+test shell::tests::git_status::worktree_remove_prunable_checkout_streams_prune_and_clears_registration ... ok
+test shell::tests::input_shortcuts::input_field_paste_shortcut_requested_recognizes_ctrl_shift_v_only ... ok
+test shell::tests::input_shortcuts::calculator_ctrl_tab_switches_sections_without_changing_workspace_pane ... FAILED
+test shell::tests::input_shortcuts::keydown_chord_maps_ctrl_tab ... ok
+test shell::tests::input_shortcuts::overlay_paste_shortcut_requested_accepts_ctrl_v_and_ctrl_shift_v ... ok
+test shell::tests::input_shortcuts::input_prompt_ctrl_v_pastes_clipboard_text ... ok
+test shell::tests::input_shortcuts::ctrl_enter_variants_match_manual_lsp_code_action_command ... FAILED
+test shell::tests::git_status::worktree_remove_second_invocation_opens_distinct_streamed_buffer ... ok
+test shell::tests::input_shortcuts::workspace_dock_ctrl_h_enters_focus_from_panes_when_left_docked ... ok
+test shell::tests::input_shortcuts::workspace_dock_ctrl_l_enters_focus_when_right_docked ... ok
+test shell::tests::input_shortcuts::workspace_dock_ctrl_l_exits_focus_back_to_panes_when_left_docked ... ok
+test shell::tests::keys::keydown_chord_maps_alt_x ... ok
+test shell::tests::keys::keydown_chord_maps_enter_variants ... ok
+test shell::tests::keys::keydown_chord_maps_image_zoom_controls ... ok
+test shell::tests::keys::keydown_chord_maps_shifted_letter_and_function_key_modifiers ... ok
+test shell::tests::keys::keydown_chord_maps_shifted_printable_aliases ... ok
+test shell::tests::keys::repeated_keydown_events_move_the_cursor ... ok
+test shell::tests::line_wrap::delete_forward_newline_updates_wrap_cache_prefix_rows ... ok
+test shell::tests::line_wrap::draw_line_ghost_text_for_segment_skips_non_terminal_wrap_segments ... ok
+test shell::tests::line_wrap::ensure_visible_builds_wrap_cache_for_large_buffers ... ok
+test shell::tests::line_wrap::input_field_wrap_keeps_words_intact ... ok
+test shell::tests::line_wrap::insert_newline_updates_wrap_cache_prefix_rows ... ok
+test shell::tests::line_wrap::join_lines_updates_wrap_cache_prefix_rows ... ok
+test shell::tests::line_wrap::newline_insert_does_not_create_wrap_cache ... ok
+test shell::tests::line_wrap::open_line_below_updates_wrap_cache_prefix_rows ... ok
+test shell::tests::line_wrap::replace_mode_newline_updates_wrap_cache_prefix_rows ... ok
+test shell::tests::line_wrap::same_line_replace_keeps_wrap_cache_prefix_rows ... ok
+test shell::tests::line_wrap::single_line_insert_updates_wrap_cache_prefix_rows ... ok
+test shell::tests::line_wrap::undo_newline_wrap_cache_matches_cold_rebuild ... ok
+test shell::tests::line_wrap::wrap_columns_shrink_when_debug_fringe_widens ... ok
+test shell::tests::line_wrap::wrap_line_segments_keeps_unbroken_words_together ... ok
+test shell::tests::markdown_paint::hover_tab_shortcut_beats_markdown_table_navigation_and_allows_scroll ... ok
+test shell::tests::markdown_paint::markdown_pretty_paint_plan_cursor_anti_conceal_uses_source ... ok
+test shell::tests::markdown_paint::markdown_pretty_paint_plan_forced_language_caches ... ok
+test shell::tests::markdown_paint::markdown_pretty_paint_plan_kill_switch_skips ... ok
+test shell::tests::markdown_paint::markdown_pretty_paint_plan_rebuilds_after_edit ... ok
+test shell::tests::markdown_paint::markdown_pretty_paint_plan_reuses_plan_for_same_revision ... ok
+test shell::tests::markdown_paint::markdown_pretty_paint_plan_toggle_off_is_raw ... ok
+test shell::tests::markdown_paint::markdown_pretty_paint_plan_visual_anti_conceal_then_restores ... ok
+test shell::tests::markdown_paint::markdown_table_detection_requires_markdown_and_a_delimiter_row ... ok
+test shell::tests::markdown_paint::markdown_table_enter_inserts_a_new_row ... ok
+test shell::tests::markdown_paint::markdown_table_insert_tab_adds_a_column_across_the_table ... ok
+test shell::tests::markdown_paint::markdown_table_normal_tab_moves_between_columns ... ok
+test shell::tests::markdown_paint::markdown_table_preserves_insert_mode_spaces ... ok
+test shell::tests::markdown_paint::markdown_table_typing_auto_aligns_and_bootstraps_delimiter_rows ... ok
+test shell::tests::markdown_paint::sync_visible_buffer_layouts_counts_markdown_pretty_image_rows_for_scrolloff ... ok
+test shell::tests::misc::accept_autocomplete_avoids_double_dot_when_lsp_insert_includes_trigger ... ok
+test shell::tests::misc::accept_autocomplete_uses_lsp_text_edit_range_covering_trigger ... ok
+test shell::tests::misc::apply_pending_lsp_state_clears_diagnostics_after_session_disconnect ... ok
+test shell::tests::misc::apply_pending_lsp_state_does_nothing_without_lsp_enabled_buffers ... ok
+test shell::tests::misc::apply_pending_lsp_state_refreshes_attached_server_label_when_session_set_changes ... ok
+test shell::tests::misc::apply_pending_lsp_state_refreshes_only_paths_whose_diagnostics_changed ... ok
+test shell::tests::input_shortcuts::workspace_dashboard_ctrl_d_on_create_row_is_silent_noop ... ok
+test shell::tests::misc::apply_pending_lsp_state_skips_log_snapshot_until_revision_moves ... ok
+test shell::tests::misc::autocomplete_entries_are_not_limited_by_visible_result_limit ... ok
+test shell::tests::misc::autocomplete_insert_identifier_appears_and_delete_drops_last_occurrence ... ok
+test shell::tests::misc::autocomplete_or_group_uses_first_provider_with_results ... ok
+test shell::tests::misc::autocomplete_query_allows_empty_member_access_after_dot_and_arrow ... ok
+test shell::tests::misc::autocomplete_worker_reuses_token_map_for_same_revision ... ok
+test shell::tests::misc::apply_pending_lsp_state_skips_diagnostic_lookups_when_generation_unchanged ... ok
+test shell::tests::misc::buffer_save_command_uses_shell_focused_buffer_when_runtime_focus_is_stale ... FAILED
+test shell::tests::misc::buffer_save_command_writes_edited_file_buffer_to_disk ... ok
+test shell::tests::misc::buffer_save_hook_prefers_explicit_event_buffer_over_shell_focus ... ok
+test shell::tests::misc::buffer_save_preserves_crlf_line_endings ... ok
+test shell::tests::misc::completion_token_at_cursor_supports_trailing_token_edge ... ok
+test shell::tests::misc::buffer_save_still_writes_when_format_on_save_fails ... ok
+test shell::tests::misc::composite_alpha_bitmap_preserves_straight_alpha_for_overlaps ... ok
+test shell::tests::misc::diagnostic_line_spans_cache_multiline_ranges_by_line ... ok
+test shell::tests::misc::diagnostic_underlines_clip_to_wrapped_segment_and_draw_errors_last ... ok
+test shell::tests::misc::draw_diagnostic_undercurl_emits_single_scene_command ... ok
+test shell::tests::misc::draw_line_ghost_text_for_segment_draws_after_the_last_visible_column ... ok
+test shell::tests::misc::ensure_visible_scrolloff_keeps_cursor_off_bottom_edge ... ok
+test shell::tests::misc::ensure_visible_scrolloff_keeps_cursor_off_top_edge ... ok
+test shell::tests::misc::errors_buffer_updates_stay_in_the_background ... ok
+test shell::tests::misc::file_open_detail_returns_basenames_for_extension_and_extensionless_files ... ok
+test shell::tests::input_shortcuts::workspace_dashboard_provider_extras_copy_ctrl_d_onto_instance ... ok
+test shell::tests::misc::find_workspace_by_root_matches_normalized_path_identity ... ok
+test shell::tests::misc::format_style_whole_buffer_replace_preserves_crlf_on_save ... ok
+test shell::tests::misc::image_zoom_controls_adjust_zoom_multiplier ... ok
+test shell::tests::misc::inactive_split_render_reads_saved_buffer_input_mode ... ok
+test shell::tests::misc::insert_mode_enter_splits_brace_pair_into_indented_line ... ok
+test shell::tests::misc::hidden_window_startup_smoke_supports_window_effects ... ok
+test shell::tests::misc::insert_mode_is_buffer_local_across_buffer_switches ... ok
+test shell::tests::misc::insert_mode_is_buffer_local_across_split_focus_changes ... FAILED
+test shell::tests::misc::insert_mode_tab_inserts_spaces_using_language_theme_options ... ok
+test shell::tests::misc::line_char_map_cursor_anchor_skips_variation_selectors ... ok
+test shell::tests::misc::line_char_map_renders_escape_as_caret_notation ... ok
+test shell::tests::misc::line_char_map_treats_byte_order_marks_as_zero_width ... ok
+test shell::tests::misc::line_char_map_treats_emoji_as_double_width ... ok
+test shell::tests::misc::line_char_map_treats_variation_selectors_as_zero_width ... ok
+test shell::tests::misc::line_color_segments_prefers_rainbow_paren_token_for_equal_width_spans ... ok
+test shell::tests::misc::load_pdf_buffer_state_rejects_missing_and_invalid_files ... ok
+test shell::tests::misc::lsp_log_buffer_lines_only_include_entries_for_requested_server ... ok
+test shell::tests::misc::lsp_log_buffer_name_includes_server_name ... ok
+test shell::tests::misc::lsp_log_buffers_stay_in_the_background_until_explicitly_focused ... ok
+test shell::tests::misc::lsp_restart_with_no_live_sessions_returns_error_without_picker ... ok
+test shell::tests::misc::insert_mode_enter_splits_bracket_pair_into_indented_line ... ok
+test shell::tests::misc::mark_list_load_canonicalizes_existing_roots_and_keeps_missing_as_written ... ok
+test shell::tests::misc::monospace_text_width_ignores_variation_selectors ... FAILED
+test shell::tests::misc::mouse_double_click_selects_the_whole_line ... ok
+test shell::tests::misc::mouse_wheel_scrolls_the_buffer_under_the_pointer ... ok
+test shell::tests::misc::lsp_stop_with_no_live_sessions_returns_error_without_picker ... ok
+test shell::tests::misc::normalize_completion_replacement_strips_duplicate_member_access_trigger ... ok
+test shell::tests::misc::normalized_raster_pixel_size_matches_target_line_height ... ok
+test shell::tests::misc::non_table_normal_tab_still_cycles_panes ... FAILED
+test shell::tests::misc::open_workspace_file_honors_markdown_pdf_mode ... ok
+test shell::tests::misc::open_workspace_file_routes_png_to_image_buffer ... ok
+test shell::tests::misc::pane_close_hook_closes_the_focused_split ... FAILED
+test shell::tests::input_shortcuts::workspace_dashboard_ctrl_d_second_remove_while_first_runs ... ok
+test shell::tests::misc::open_workspace_file_routes_pdf_to_native_buffer ... ok
+test shell::tests::misc::pdf_helpers_parse_paths_state_and_render_lines ... ok
+test shell::tests::misc::preload_languages_returns_without_waiting_for_worker_done ... ok
+test shell::tests::misc::preload_languages_still_completes_on_worker ... ok
+test shell::tests::misc::primary_text_run_cache_stores_split_results ... ok
+test shell::tests::misc::rebuild_theme_registry_preserves_active_theme_when_still_present ... ok
+test shell::tests::misc::render_buffer_headerline_divider_sits_below_last_headerline_row ... ok
+test shell::tests::misc::render_buffer_headerline_keeps_cursor_below_sticky_row ... ok
+test shell::tests::misc::render_buffer_headerline_only_activates_once_scope_header_leaves_viewport ... ok
+test shell::tests::misc::render_buffer_headerline_reserves_rows_above_buffer_body ... ok
+test shell::tests::misc::render_buffer_headerline_truncates_preserving_tail_scope ... ok
+test shell::tests::misc::render_buffer_multicursor_draws_one_cursor_per_range ... ok
+test shell::tests::misc::render_buffer_uses_theme_commandline_background_token ... ok
+test shell::tests::misc::render_image_buffer_body_draws_centered_clipped_image ... ok
+test shell::tests::misc::pdf_buffers_reload_when_backing_file_changes ... ok
+test shell::tests::misc::pdf_buffers_support_navigation_editing_and_save ... ok
+test shell::tests::misc::compose_emoji_surface_rasterizes_simple_emoji ... ok
+test shell::tests::misc::replace_mode_tab_inserts_make_tabs_using_language_theme_options ... ok
+test shell::tests::misc::restore_saved_theme_selection_activates_saved_theme ... ok
+test shell::tests::misc::restore_saved_theme_selection_clears_unknown_theme ... ok
+test shell::tests::misc::same_buffer_split_keeps_independent_cursor_and_scroll ... ok
+test shell::tests::misc::saved_theme_selection_round_trips ... ok
+test shell::tests::misc::scroll_by_uses_content_viewport_rows_after_layout_sync ... ok
+test shell::tests::misc::scroll_by_uses_wrapped_max_for_line_wrap ... ok
+test shell::tests::misc::split_runtime_pane_switches_focus_to_the_new_pane ... ok
+test shell::tests::misc::strip_zero_width_display_characters_removes_byte_order_marks ... ok
+test shell::tests::misc::strip_zero_width_display_characters_removes_variation_selectors ... ok
+test shell::tests::misc::svg_image_buffers_toggle_between_rendered_and_source_modes ... ok
+test shell::tests::misc::switch_split_hook_reverses_pane_order_and_preserves_the_active_pane ... FAILED
+test shell::tests::misc::sync_active_viewport_uses_active_pane_height_for_horizontal_splits ... FAILED
+test shell::tests::misc::sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff ... FAILED
+test shell::tests::misc::sync_visible_buffer_layouts_use_split_width_for_vertical_splits ... ok
+test shell::tests::misc::text_texture_cache_keys_keep_same_text_separate_per_color ... ok
+test shell::tests::misc::theme_runtime_settings_resolve_window_effects_from_theme_options ... ok
+test shell::tests::misc::theme_source_fingerprint_from_dir_changes_when_global_toml_changes ... ok
+test shell::tests::misc::undo_tree_root_cursor_tracks_last_root_cursor_across_undo_redo ... ok
+test shell::tests::misc::undo_tree_select_restores_latest_root_cursor_without_changing_child_cursor ... ok
+test shell::tests::misc::user_config_source_fingerprint_changes_when_child_yaml_changes ... ok
+test shell::tests::misc::visible_headerline_lines_keeps_innermost_contexts_when_space_is_limited ... ok
+test shell::tests::misc::visible_headerline_lines_reserves_at_least_one_buffer_row ... ok
+test shell::tests::misc::workspace_cycle_skips_non_default_workspace_without_project_root ... ok
+test shell::tests::misc::workspace_dashboard_command_opens_picker ... ok
+test shell::tests::misc::render_shell_state_applies_window_opacity_only_to_backgrounds ... ok
+test shell::tests::misc::render_primary_text_surface_preserves_straight_alpha_edge_colors ... ok
+test shell::tests::misc::workspace_dock_config_defaults_left_undocked ... ok
+test shell::tests::misc::workspace_dock_docked_stays_visible_across_toggle ... ok
+test shell::tests::misc::workspace_dock_click_switches_workspace ... ok
+test shell::tests::misc::workspace_dock_entries_include_default_workspace ... ok
+test shell::tests::misc::workspace_dock_layout_shrinks_content_for_left_dock ... ok
+test shell::tests::misc::workspace_dock_h_j_cycles_workspaces_when_focused ... ok
+test shell::tests::misc::workspace_dock_toggle_shows_and_hides_when_not_docked ... ok
+test shell::tests::misc::workspace_mark_and_unmark_commands_persist_active_project_root ... ok
+test shell::tests::misc::workspace_mark_on_default_workspace_notifies_without_mutating_list ... ok
+test shell::tests::misc::workspace_mark_refreshes_clean_open_mark_list_buffer ... ok
+test shell::tests::misc::workspace_marked_slot_jump_switches_open_opens_closed_and_handles_empty_missing ... ok
+test shell::tests::misc::workspace_marks_opens_real_file_and_save_reloads_normalized_list ... ok
+test shell::tests::misc::workspace_save_command_uses_shell_active_workspace_when_runtime_workspace_is_stale ... FAILED
+test shell::tests::misc::workspace_save_command_writes_all_dirty_workspace_files ... ok
+test shell::tests::misc::render_shell_state_uses_theme_background_for_active_pane ... ok
+test shell::tests::misc::write_test_pdf_creates_extractable_pages ... ok
+test shell::tests::misc::zero_width_display_characters_include_joiners ... ok
+test shell::tests::oil_buffer::directory_view_state_uses_user_oil_defaults ... ok
+test shell::tests::oil_buffer::oil_action_commands_are_registered_and_execute ... ok
+test shell::tests::misc::workspace_save_hook_prefers_explicit_event_workspace_over_shell_focus ... ok
+test shell::tests::oil_buffer::oil_cycle_sort_does_not_reread_listing ... ok
+test shell::tests::oil_buffer::oil_insert_creates_directory_file_and_nested_paths_on_normal ... ok
+test shell::tests::oil_buffer::oil_insert_patches_listing_without_rereading_siblings ... ok
+test shell::tests::oil_buffer::oil_normal_mode_dd_applies_delete_immediately ... ok
+test shell::tests::oil_buffer::oil_normal_mode_yy_p_copies_file_immediately ... ok
+test shell::tests::oil_buffer::oil_open_parent_at_drive_root_opens_drive_list ... ok
+test shell::tests::oil_buffer::oil_open_directory_is_scoped_per_workspace ... ok
+test shell::tests::oil_buffer::oil_open_parent_command_uses_parent_root ... ok
+test shell::tests::oil_buffer::oil_rename_moves_cursor_to_new_entry_not_substring_sibling ... ok
+test shell::tests::oil_buffer::oil_root_change_rereads_the_new_directory ... ok
+test shell::tests::misc::workspace_dashboard_enter_still_switches_and_creates ... ok
+test shell::tests::oil_buffer::oil_toggle_hidden_filters_cached_entries_without_reread ... ok
+test shell::tests::oil_buffer::workspace_clone_mode_opens_oil_with_pending_clone ... ok
+test shell::tests::picker_ui::acp_slash_picker_backspace_can_delete_leading_slash ... ok
+test shell::tests::picker_ui::acp_slash_picker_text_input_updates_acp_input ... FAILED
+test shell::tests::oil_buffer::workspace_clone_opens_url_prompt_then_mode_picker ... ok
+test shell::tests::picker_ui::lsp_session_lifecycle_picker_labels_sessions_and_wires_stop_action ... ok
+test shell::tests::picker_ui::paste_text_into_active_input_buffer_closes_acp_picker_for_multiline_text ... ok
+test shell::tests::picker_ui::f7_keydown_opens_keybinding_picker_from_user_binding ... ok
+test shell::tests::picker_ui::picker_extra_keybind_snapshots_context_closes_and_runs_command ... ok
+test shell::tests::oil_buffer::workspace_clone_refuses_existing_destination ... ok
+test shell::tests::picker_ui::truncate_picker_label_auto_falls_back_to_start_ellipsis ... FAILED
+test shell::tests::picker_ui::truncate_picker_label_file_name_with_parent ... ok
+test shell::tests::picker_ui::truncate_picker_label_middle_ellipsis_preserves_both_ends ... FAILED
+test shell::tests::picker_ui::truncate_picker_label_shrink_all_includes_stem ... ok
+test shell::tests::picker_ui::truncate_picker_label_shrink_directories_preserves_filename ... ok
+test shell::tests::picker_ui::truncate_picker_label_start_ellipsis_preserves_tail ... ok
+test shell::tests::picker_ui::truncate_text_to_width_uses_cell_budget ... ok
+test shell::tests::picker_ui::picker_open_file_location_save_clears_dirty_state_and_closes_cleanly ... ok
+test shell::tests::picker_ui::picker_open_file_save_clears_dirty_state_and_closes_cleanly ... ok
+test shell::tests::popup::calculator_switch_pane_command_targets_workspace_buffer_when_popup_has_focus ... ok
+test shell::tests::popup::closing_streamed_command_popup_kills_worker ... ok
+test shell::tests::popup::ctrl_q_with_non_quickfix_picker_does_not_quit ... ok
+test shell::tests::picker_ui::workspace_dashboard_command_opens_fallback_picker_outside_git ... ok
+test shell::tests::popup::ctrl_q_without_quickfix_extra_does_not_export_popup_global ... ok
+test shell::tests::popup::ctrl_q_with_workspace_search_picker_exports_quickfix_instead_of_quitting ... ok
+test shell::tests::popup::picker_extra_keybind_falls_through_for_shared_popup_navigation ... ok
+test shell::tests::popup::quickfix_enter_opens_target_and_moves_focus_back_to_workspace ... ignored, enable once quickfix enter handler lands
+test shell::tests::popup::quickfix_export_from_unsupported_picker_is_noop ... ignored, enable once quickfix export command lands
+test shell::tests::popup::quickfix_next_previous_wraparound_tracks_current_list ... ignored, enable once quickfix next and previous commands land
+test shell::tests::popup::quickfix_picker_export_opens_popup_and_renders_workspace_search_results ... ignored, enable once quickfix picker export command lands
+test shell::tests::popup::popup_buffer_escape_enters_normal_mode ... ok
+test shell::tests::popup::workspace_compile_closing_popup_mid_build_stops_tracking_worker ... ok
+test shell::tests::misc::workspace_dock_render_marks_active_row ... ok
+test shell::tests::render_chrome::command_line_footer_layout_reserves_row_below_statusline ... ok
+test shell::tests::render_chrome::acp_section_layout_orders_output_input_footer_and_statusline ... ok
+test shell::tests::render_chrome::render_buffer_falls_back_to_statusline_theme_tokens_for_text ... ok
+test shell::tests::render_chrome::render_buffer_paints_opaque_modeline_band_when_window_is_transparent ... ok
+test shell::tests::render_chrome::render_buffer_paints_modeline_mode_chip_and_right_aligned_segment ... ok
+test shell::tests::render_chrome::statusline_icon_segments_split_acp_and_lsp_icons ... ok
+test shell::tests::render_chrome::statusline_icon_segments_split_diagnostic_icons ... ok
+test shell::tests::render_chrome::statusline_lsp_diagnostics_counts_errors_and_warnings ... ok
+test shell::tests::render_overlays::apply_pending_lsp_state_toasts_only_when_notification_revision_moves ... ok
+test shell::tests::render_chrome::render_buffer_uses_statusline_foreground_tokens ... ok
+test shell::tests::render_overlays::autocomplete_docs_panel_width_tracks_content_and_clamps_to_pane ... ok
+test shell::tests::render_overlays::block_cursor_text_overlay_positions_multibyte_cursor_text ... ok
+test shell::tests::render_overlays::autocomplete_docs_focus_and_scroll_update_overlay_state ... ok
+test shell::tests::render_overlays::context_overlay_cache_requires_matching_buffer_identity ... ok
+test shell::tests::render_overlays::context_overlay_cache_reuses_stale_snapshot_while_typing ... ok
+test shell::tests::render_overlays::browser_sync_plan_avoids_notification_overlays ... ok
+test shell::tests::render_overlays::copilot_auth_notification_shows_device_code_and_stays_active ... ok
+test shell::tests::render_overlays::context_overlay_snapshot_reuses_same_arc_when_key_matches ... ok
+test shell::tests::popup::leave_open_keeps_popup_buffer_after_process_exits ... ok
+test shell::tests::render_overlays::file_reload_notifications_wait_for_dirty_buffers_to_become_clean ... ok
+test shell::tests::render_overlays::hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle ... FAILED
+test shell::tests::render_overlays::hover_next_command_cycles_open_overlay_without_focus ... ok
+test shell::tests::render_overlays::hover_overlay_width_tracks_content_and_clamps_to_pane ... ok
+test shell::tests::render_overlays::hover_previous_command_wraps_open_overlay_without_focus ... ok
+test shell::tests::render_overlays::hover_tab_shortcut_focuses_open_overlay ... ok
+test shell::tests::render_overlays::input_prompt_overlay_confirm_delivers_text ... ok
+test shell::tests::render_overlays::input_prompt_overlay_enter_with_empty_text_is_noop ... ok
+test shell::tests::render_overlays::input_prompt_overlay_escape_cancels ... ok
+test shell::tests::render_overlays::input_prompt_overlay_prefill_appears_in_text ... ok
+test shell::tests::render_overlays::notification_action_at_point_returns_acp_permission_action ... ok
+test shell::tests::render_overlays::notification_action_at_point_returns_copilot_sign_in_action ... ok
+test shell::tests::render_overlays::notification_center_prioritizes_active_toasts_with_visible_limit ... ok
+test shell::tests::render_overlays::notification_center_updates_entries_and_expires_completed_toasts ... ok
+test shell::tests::render_overlays::render_autocomplete_overlay_uses_opaque_overlay_chrome ... ok
+test shell::tests::render_overlays::render_buffer_draws_command_line_row_without_active_overlay ... ok
+test shell::tests::render_overlays::render_hover_overlay_uses_opaque_overlay_chrome ... FAILED
+test shell::tests::render_overlays::file_reload_notifications_reload_hidden_buffers_without_focus_changes ... FAILED
+test shell::tests::render_overlays::file_reload_notifications_target_only_matching_buffers ... FAILED
+test shell::tests::popup::render_shell_state_uses_theme_background_for_docked_runtime_popup_surface ... ok
+test shell::tests::render_overlays::render_picker_overlay_uses_opaque_overlay_chrome ... ok
+test shell::tests::render_overlays::render_shell_state_applies_window_opacity_to_docked_runtime_popup_surface ... ok
+test shell::tests::render_overlays::render_picker_overlay_uses_picker_text_tokens ... FAILED
+test shell::tests::render_overlays::workspace_compile_opens_input_prompt_overlay ... ok
+test shell::tests::render_overlays::workspace_dock_unread_badge_tracks_other_workspace_notifications ... ok
+test shell::tests::render_plugins::hover_manual_provider_lines_match_current_plugin_token ... ok
+test shell::tests::render_plugins::manual_autocomplete_entries_only_apply_to_matching_plugin_buffers ... ok
+test shell::tests::render_plugins::plugin_sections_can_append_output_lines ... ok
+test shell::tests::render_plugins::plugin_sections_layout_keeps_output_pane_at_bottom_with_single_row_start ... ok
+test shell::tests::render_plugins::plugin_sections_layout_reserves_extra_bottom_padding ... ok
+test shell::tests::render_plugins::plugin_sections_replace_output_lines_in_place ... ok
+test shell::tests::render_plugins::plugin_sections_switching_output_pane_changes_focus_and_read_only_state ... ok
+test shell::tests::render_plugins::render_plugin_sections_active_header_keeps_neutral_background ... ok
+test shell::tests::render_plugins::render_plugin_sections_apply_window_opacity_to_panel_chrome ... ok
+test shell::tests::search::collect_search_output_stops_after_limit ... ok
+test shell::tests::search::parse_grep_workspace_search_line_finds_case_insensitive_column ... ok
+test shell::tests::search::parse_rg_workspace_search_line_extracts_location ... ok
+test shell::tests::search::workspace_search_char_column_handles_utf8_offsets ... ok
+test shell::tests::search::workspace_search_provider_extras_copy_ctrl_q_onto_instance ... ok
+test shell::tests::syntax_highlight::comment_toggle_styles_cover_all_shipped_syntax_languages ... FAILED
+test shell::tests::syntax_highlight::db_query_buffer_receives_sql_highlighting_without_blocking ... FAILED
+test shell::tests::syntax_highlight::diagnostic_underlines_expand_to_cover_narrowest_syntax_token ... ok
+test shell::tests::syntax_highlight::disconnected_syntax_worker_restarts_without_stranding_buffers ... ok
+test shell::tests::syntax_highlight::format_current_line_indent_skips_cold_syntax_parse_for_large_buffers ... ok
+test shell::tests::syntax_highlight::format_current_line_indent_uses_syntax_queries_for_blank_lines ... ok
+test shell::tests::render_overlays::render_shell_state_draws_fps_overlay_when_enabled ... ok
+test shell::tests::syntax_highlight::index_syntax_lines_converts_byte_columns_after_variation_selector ... ok
+test shell::tests::syntax_highlight::index_syntax_lines_preserves_capture_names ... ok
+test shell::tests::syntax_highlight::format_current_line_indent_uses_syntax_queries_for_closing_braces ... ok
+test shell::tests::syntax_highlight::one_line_scroll_marks_visible_syntax_window_dirty ... ok
+test shell::tests::syntax_highlight::line_color_segments_colors_opening_brace_from_rust_highlight_pipeline ... ok
+test shell::tests::syntax_highlight::opened_sql_file_survives_layout_and_syntax_refresh ... ok
+test shell::tests::syntax_highlight::opened_file_receives_tree_sitter_highlighting ... ok
+test shell::tests::syntax_highlight::recompile_installed_tree_sitter_languages_notifies_when_no_grammars_are_installed ... ok
+test shell::tests::syntax_highlight::render_acp_output_draws_visual_selection_highlight ... ok
+test shell::tests::syntax_highlight::opened_toml_file_survives_layout_and_receives_tree_sitter_highlighting ... ok
+test shell::tests::syntax_highlight::render_buffer_draws_show_paren_html_tag_highlight ... ok
+test shell::tests::syntax_highlight::render_buffer_draws_show_paren_match_highlight ... ok
+test shell::tests::syntax_highlight::render_buffer_skips_show_paren_html_tag_highlight_for_csharp ... ok
+test shell::tests::syntax_highlight::render_plugin_sections_draw_visual_selection_highlight ... ok
+test shell::tests::syntax_highlight::render_terminal_buffer_draws_visual_selection_highlight ... ok
+test shell::tests::syntax_highlight::render_markdown_hover_content_highlights_registered_code_fences ... ok
+test shell::tests::syntax_highlight::signature_help_markdown_renders_active_parameter_bold_with_syntax_color ... ok
+test shell::tests::syntax_highlight::stalled_syntax_request_becomes_due_again ... ok
+test shell::tests::syntax_highlight::worker_syntax_window_matches_visible_window ... ok
+test shell::tests::syntax_highlight::syntax_refresh_reuses_shared_worker_across_buffers ... ok
+test shell::tests::terminal_ui::dismissed_popup_toggle_restores_terminal_buffer ... ok
+test shell::tests::terminal_ui::pane_terminal_dimensions_shrink_when_acp_dock_open ... ok
+test shell::tests::syntax_highlight::workspace_dock_highlight_tracks_active_workspace ... ok
+test shell::tests::terminal_ui::popup_terminal_dimensions_match_painted_content_rect ... ok
+test shell::tests::terminal_ui::popup_terminal_enter_falls_through_to_terminal_input ... ok
+test shell::tests::render_overlays::render_shell_state_draws_input_prompt_overlay_text ... ok
+test shell::tests::terminal_ui::popup_terminal_event_context_prefers_popup_buffer_when_focused ... ok
+test shell::tests::terminal_ui::render_terminal_buffer_keeps_terminal_content_opaque_with_window_opacity ... ok
+test shell::tests::terminal_ui::render_terminal_buffer_path_draws_command_line_separator_without_footer_fill ... ok
+test shell::tests::terminal_ui::render_terminal_buffer_prefers_terminal_render_snapshot ... ok
+test shell::tests::terminal_ui::popup_terminal_enter_writes_to_live_session ... ok
+test shell::tests::terminal_ui::render_terminal_buffer_uses_buffer_cursor_in_normal_mode ... ok
+test shell::tests::terminal_ui::terminal_box_drawing_chars_render_as_strokes ... ok
+test shell::tests::terminal_ui::terminal_buffers_are_read_only_without_prompt_input ... ok
+test shell::tests::terminal_ui::terminal_key_for_event_maps_special_keys ... ok
+test shell::tests::terminal_ui::render_terminal_buffer_uses_editor_insert_cursor_style ... ok
+test shell::tests::terminal_ui::terminal_mode_insert_hook_allows_reentering_insert_for_terminals ... ok
+test shell::tests::terminal_ui::terminal_normal_motion_maps_vim_navigation ... ok
+test shell::tests::terminal_ui::terminal_placeholder_lines_describe_shell_launch_not_vertical_slice ... ok
+test shell::tests::terminal_ui::popup_terminal_escape_enters_normal_mode ... ok
+test shell::tests::terminal_ui::terminal_mode_normal_hook_uses_live_terminal_cursor_position ... ok
+test shell::tests::terminal_ui::terminal_popup_mode_normal_hook_uses_live_terminal_cursor_position ... ok
+test shell::tests::terminal_ui::terminal_popup_bootstraps_session_and_enters_insert_mode ... ok
+test shell::tests::text_layout::block_cursor_text_overlay_uses_visible_glyph_for_variation_selector ... ok
+test shell::tests::text_layout::build_cached_text_layout_returns_empty_layout_when_no_glyphs ... ok
+test shell::tests::text_layout::build_cached_text_layout_tracks_bounds_for_nominal_glyphs ... ok
+test shell::tests::terminal_ui::terminal_put_shortcuts_paste_yanks_in_normal_mode ... ok
+test shell::tests::terminal_ui::terminal_popup_command_focuses_the_popup_surface ... ok
+test shell::tests::text_layout::contextual_ligature_raster_size_keeps_changed_glyphs_at_base_size ... ok
+test shell::tests::render_overlays::render_shell_state_uses_opaque_overlay_chrome_for_notification_surface ... ok
+test shell::tests::text_layout::font_role_prefers_icon_font_for_private_use_glyphs_without_symbol_hint ... ok
+test shell::tests::text_layout::font_role_prefers_icon_font_for_symbol_like_prompt_glyphs ... ok
+test shell::tests::text_layout::font_role_uses_emoji_when_emoji_font_has_glyph ... ok
+test shell::tests::text_layout::codicon_glyphs_fit_inside_one_editor_cell ... ok
+test shell::tests::text_layout::contextual_ligature_raster_size_never_upscales_smaller_substitute_glyphs ... ok
+test shell::tests::text_layout::icon_glyph_draw_offset_y_centers_width_fitted_icons_in_primary_line_height ... ok
+test shell::tests::vim::acp_input_field_visual_line_delete_removes_selected_lines ... ok
+test shell::tests::vim::acp_input_field_visual_yank_copies_selected_text ... ok
+test shell::tests::vim::acp_output_visual_anchor_survives_streaming_rebuild ... ok
+test shell::tests::vim::acp_output_visual_row_motion_aligns_with_yank ... ok
+test shell::tests::vim::acp_page_scroll_preserves_wrapped_visual_row_alignment ... ok
+test shell::tests::vim::acp_screen_top_motion_targets_wrapped_visual_row ... ok
+test shell::tests::text_layout::system_symbol_fallback_font_covers_starship_prompt_glyphs ... ok
+test shell::tests::text_layout::icon_glyph_draw_offset_y_uses_icon_line_metrics_when_available ... ok
+test shell::tests::vim::acp_viewport_scroll_does_not_treat_visual_row_as_line_index ... ok
+test shell::tests::vim::acp_visual_selection_uses_output_text_without_prefix ... ok
+test shell::tests::vim::acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer ... FAILED
+test shell::tests::vim::execute_vim_command_line_substitute_defaults_to_current_line ... ok
+test shell::tests::vim::execute_vim_command_line_substitute_supports_numeric_ranges ... ok
+test shell::tests::vim::execute_vim_command_line_split_alias_splits_workspace ... ok
+test shell::tests::vim::execute_vim_command_line_commands_alias_opens_picker ... ok
+test shell::tests::vim::gcc_toggles_current_line_comments ... ok
+test shell::tests::vim::leader_space_o_b_opens_browser_from_normal_mode ... ok
+test shell::tests::vim::mouse_drag_creates_a_character_visual_selection ... ok
+test shell::tests::vim::gcc_toggles_prefix_comment_styles ... ok
+test shell::tests::vim::popup_terminal_focus_restores_its_own_vim_mode ... ok
+test shell::tests::vim::terminal_vim_edit_shortcuts_enter_insert_mode_instead_of_read_only_errors ... ok
+test shell::tests::vim::terminal_visual_line_yank_includes_multiple_lines ... ok
+test shell::tests::vim::oil_visual_line_y_p_copies_multiple_entries_immediately ... ok
+test shell::tests::vim::gcc_toggles_block_comment_styles ... ok
+test shell::tests::vim::vim_command_line_completion_includes_user_aliases ... ok
+test shell::tests::vim::vim_g_prefix_executes_workspace_keybinding ... ok
+test shell::tests::vim::vim_g_prefix_preserves_longer_workspace_sequence ... ok
+test shell::tests::vim::vim_repeat_search_preserves_forward_and_backward_bindings ... ok
+test shell::tests::vim::vim_search_entries_trim_whitespace_from_labels ... ok
+test shell::tests::vim::visual_gc_toggles_region_comments ... ok
+test shell::tests::vim::visual_join_merges_selected_lines ... ok
+test shell::tests::vim::visual_mode_is_buffer_local_across_buffer_switches ... ok
+test shell::tests::vim::visual_move_down_reorders_selected_lines_and_keeps_visual_selection ... ok
+test shell::tests::vim::visual_move_up_reorders_selected_lines_and_reindents ... ok
+test shell::tests::vim::visual_outdent_shifts_selected_lines_left ... ok
+test shell::tests::vim::visual_put_replaces_selection_and_updates_yank ... ok
+test shell::tests::vim::visual_replace_char_replaces_selected_text ... ok
+test shell::tests::workspace_nav::popup_focus_ctrl_n_cycles_popup_buffers_instead_of_marked_workspace ... ok
+test shell::tests::vim::vim_open_line_below_after_typescript_outer_object_opener_uses_sibling_indent ... ok
+test shell::tests::workspace_nav::resolve_default_workspace_root_falls_back_to_executable_user_dir ... ok
+test shell::tests::workspace_nav::resolve_default_workspace_root_prefers_existing_executable_relative_user_dir ... ok
+test shell::tests::workspace_nav::shell_state_uses_default_workspace_root ... ok
+test shell::tests::workspace_nav::popup_focus_j_k_do_not_cycle_workspace_dock ... ok
+test shell::tests::vim::vim_open_line_below_before_typescript_closing_object_dedents_to_sibling_indent ... ok
+test shell::tests::workspace_nav::workspace_dock_focus_j_k_cycle_workspaces ... ok
+test shell::workspace_dock::tests::workspace_dock_non_git_root_has_no_branch ... ok
+test shell::workspace_search::tests::file_context_preview_marks_target_line ... ok
+test shell::workspace_search::tests::lsp_code_action_kind_sorting_prefers_specific_matches_and_stays_stable ... ok
+test shell::workspace_search::tests::lsp_code_action_picker_overlay_preserves_sorted_entry_order ... ok
+test shell::workspace_search::tests::lsp_diagnostics_picker_overlay_orders_errors_first ... ok
+test shell::workspace_search::tests::workspace_search_match_entry_builds_open_file_location_action ... ok
+test shell::workspace_search::tests::workspace_search_status_entry_is_noop ... ok
+warning: in the working copy of 'file.txt', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'file.txt', LF will be replaced by CRLF the next time Git touches it
+test tests::autocomplete_closes_when_no_results_remain ... ok
+test shell::tests::text_layout::compose_ligature_surface_uses_grayscale_glyph_coverage ... ok
+test shell::workspace_dock::tests::workspace_dock_hides_detached_head_label ... ok
+test tests::autocomplete_opens_while_typing_buffer_tokens ... ok
+test tests::ctrl_n_and_ctrl_p_cycle_autocomplete_without_inserting_text ... ok
+test tests::autocomplete_trigger_updates_and_accepts_buffer_tokens ... ok
+test tests::file_buffer_reload_refreshes_clean_open_buffers_after_disk_change ... ok
+test tests::hover_closes_after_cursor_motion ... FAILED
+test tests::file_buffer_reload_waits_for_dirty_buffers_to_become_clean ... ok
+test tests::hover_toggle_previews_and_focus_enters_panel ... FAILED
+test tests::hover_toggle_command_shows_feedback_without_symbol ... FAILED
+test tests::keybinding_picker_lists_runtime_bindings ... FAILED
+test tests::hover_toggle_works_at_token_end ... FAILED
+test tests::lsp_hook_updates_statusline_state ... FAILED
+test tests::picker_bindings_open_and_navigate_results ... FAILED
+test tests::shell_defaults_to_sdl_canvas_backend ... ok
+test tests::ctrl_space_triggers_autocomplete_without_inserting_space ... ok
+test tests::vim_command_line_opens_and_tab_completes_commands ... ok
+test tests::vim_bindings_switch_modes_and_move_words ... ok
+test tests::vim_counts_operators_and_text_objects_work ... ok
+test tests::vim_counted_line_end_and_aliases_work ... ok
+warning: in the working copy of 'file.txt', LF will be replaced by CRLF the next time Git touches it
+test tests::vim_cw_stops_before_trailing_whitespace ... ok
+test tests::vim_delimited_text_objects_work ... ok
+test tests::vim_extended_motions_and_edit_commands_work ... ok
+test tests::vim_linewise_visual_mode_and_anchor_swap_work ... ok
+test tests::vim_multicursor_caw_changes_all_matches ... ok
+test tests::vim_multicursor_cw_changes_all_matches ... ok
+test shell::workspace_dock::tests::workspace_dock_branch_for_two_roots_shares_probe_cache ... ok
+test tests::vim_multicursor_gn_adds_next_exact_match ... ok
+test tests::vim_multicursor_motions_move_linked_cursor_offsets ... ok
+test tests::vim_multicursor_n_and_p_add_matches_while_active ... ok
+test tests::vim_quickref_change_ops_work ... ok
+test tests::vim_quickref_repeat_registers_work ... ok
+test tests::vim_quickref_structure_motions_work ... FAILED
+test tests::vim_quickref_text_objects_work ... FAILED
+test tests::vim_search_picker_selects_match_entries ... ok
+test tests::vim_quickref_word_motions_work ... ok
+test tests::vim_search_prompt_and_repeats_work ... ok
+test tests::vim_search_prompt_matches_case_insensitive ... ok
+test tests::vim_search_prompt_supports_fuzzy_matches ... ok
+test tests::vim_substitute_delete_counts_and_visual_toggles_work ... ok
+test tests::vim_user_bindings_change_inside_quote_text_objects ... ok
+test tests::vim_visual_block_insert_applies_to_all_lines ... ok
+test tests::vim_visual_mode_and_find_repeats_work ... ok
+test tests::vim_visual_text_objects_work ... ok
+test tests::vim_command_line_runs_shell_commands_and_substitutions ... ok
+test tests::vim_word_actions_at_line_end_preserve_newline ... ok
+test tests::vim_word_motions_treat_punctuation_as_words ... ok
+test tests::workspace_delete_picker_hides_default_workspace ... ok
+test tests::vim_yanks_set_flash_selections ... ok
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'README.md', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of '.gitignore', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/AssetFusion.Shared/Model/StaticData/AssetDefinition.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/AssetFusion.Shared/Model/StaticData/ReportDefinition.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/AssetFusion.Shared/Services/Sql/AssetDefinitionService.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/AssetFusion.Shared/Services/Sql/ReportDefinitionService.cs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/AssetFusion.Shared/Services/Sql/VehicleDefinitionService.cs', LF will be replaced by CRLF the next time Git touches it
+test tests::workspace_file_picker_loads_preview_for_selection_only ... ok
+test tests::workspace_file_picker_creates_missing_file ... ok
+test tests::workspace_file_picker_prioritizes_contiguous_file_name_matches ... ok
+test tests::workspace_file_picker_lists_visible_files_and_opens_selection ... ok
+test tests::workspace_helpers_open_switch_and_delete_workspaces ... ok
+test tests::workspace_open_falls_back_to_notes_when_no_root_readme ... FAILED
+test tests::workspace_open_volt_project_timing_probe ... ignored, manual workspace-open timing probe
+test tests::workspace_open_prefers_root_readme_as_first_buffer ... ok
+test tests::workspace_project_picker_late_scan_does_not_reopen_after_close ... ok
+warning: in the working copy of 'src/deep/nested/really-long-name.rs', LF will be replaced by CRLF the next time Git touches it
+test tests::workspace_project_picker_late_scan_does_not_replace_other_picker ... ok
+test window_effects::tests::apply_window_effects_calls_native_transparency_backend_when_requested ... ok
+test window_effects::tests::apply_window_effects_ignores_native_window_opacity_to_keep_text_opaque ... ok
+test window_effects::tests::configure_window_opacity_driver_updates_requested_mode ... ok
+test window_effects::tests::linux_native_window_opacity_targets_x11_and_wayland_only ... ok
+test window_effects::tests::overlay_window_surface_opacity_stays_opaque_when_window_is_transparent ... ok
+test window_effects::tests::sync_window_opacity_falls_back_to_surface_when_native_call_fails ... ok
+test window_effects::tests::sync_window_opacity_uses_native_window_when_supported ... ok
+test window_effects::tests::update_window_effects_clears_native_transparency_when_disabled ... ok
+test window_effects::tests::update_window_effects_switches_transparency_types ... ok
+test window_effects::tests::window_creation_flags_always_request_transparent_surface_for_live_updates ... ok
+test window_effects::tests::window_effect_normalizers_handle_non_finite_values ... ok
+test window_effects::tests::window_effects_default_to_opaque_without_theme_values ... ok
+test window_effects::tests::window_effects_legacy_blur_option_implies_blur_transparency ... ok
+test window_effects::tests::window_effects_resolve_normalized_theme_values ... ok
+test window_effects::tests::window_effects_resolve_transparency_type_from_theme_string ... ok
+test window_effects::tests::window_transparency_parse_accepts_aliases ... ok
+warning: in the working copy of 'src/main.rs', LF will be replaced by CRLF the next time Git touches it
+test tests::workspace_file_picker_searches_and_shows_full_relative_path ... ok
+test tests::workspace_project_picker_refreshes_in_place_and_preserves_query ... ok
+test tests::workspace_open_prewarms_installed_tree_sitter_languages ... ok
+
+failures:
+
+---- shell::acp::tests::permission_requests_queue_and_advance_after_resolution stdout ----
+
+thread 'shell::acp::tests::permission_requests_queue_and_advance_after_resolution' (8884) panicked at crates\editor-sdl\src\shell\acp\tests.rs:720:5:
+assertion `left == right` failed
+  left: None
+ right: Some(AcpPermission { request_id: 1 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- shell::directory::directory_line_tests::parse_directory_line_strips_directory_icons stdout ----
+
+thread 'shell::directory::directory_line_tests::parse_directory_line_strips_directory_icons' (33312) panicked at crates\editor-sdl\src\shell\directory.rs:399:9:
+assertion `left == right` failed
+  left: "\u{e5ff} src/"
+ right: "src/"
+
+---- shell::directory::directory_line_tests::parse_directory_line_strips_file_icons stdout ----
+
+thread 'shell::directory::directory_line_tests::parse_directory_line_strips_file_icons' (78924) panicked at crates\editor-sdl\src\shell\directory.rs:388:9:
+assertion `left == right` failed
+  left: "\u{e6b2} Cargo.toml"
+ right: "Cargo.toml"
+
+---- shell::directory::directory_line_tests::parse_directory_line_strips_repeated_icons stdout ----
+
+thread 'shell::directory::directory_line_tests::parse_directory_line_strips_repeated_icons' (10700) panicked at crates\editor-sdl\src\shell\directory.rs:411:9:
+assertion `left == right` failed
+  left: "\u{e648} \u{e648} \u{e648} \u{e648} Program.cs"
+ right: "Program.cs"
+
+---- shell::directory::directory_line_tests::repeated_icons_do_not_turn_existing_entries_into_renames stdout ----
+
+thread 'shell::directory::directory_line_tests::repeated_icons_do_not_turn_existing_entries_into_renames' (62696) panicked at crates\editor-sdl\src\shell\directory.rs:429:9:
+assertion `left == right` failed
+  left: [Delete { path: "workspace\\DateRange.cs", is_dir: false }, Delete { path: "workspace\\Program.cs", is_dir: false }, CreateFile("workspace\\\u{e648} \u{e648} \u{e648} \u{e648} DateRange.cs"), CreateFile("workspace\\\u{e648} \u{e648} \u{e648} \u{e648} Program.cs"), CreateFile("workspace\\test.razor")]
+ right: [CreateFile("workspace\\test.razor")]
+
+---- shell::tests::acp_protocol::acp_plan_entries_populate_static_plan_pane stdout ----
+
+thread 'shell::tests::acp_protocol::acp_plan_entries_populate_static_plan_pane' (80576) panicked at crates\editor-sdl\src\shell\tests\acp_protocol.rs:486:13:
+assertion `left == right` failed
+  left: Success
+ right: PriorityHigh
+
+---- shell::tests::acp_protocol::acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane stdout ----
+
+thread 'shell::tests::acp_protocol::acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane' (84964) panicked at crates\editor-sdl\src\shell\tests\acp_protocol.rs:456:5:
+assertion `left == right` failed
+  left: Some(Output)
+ right: Some(Input)
+
+---- shell::tests::acp_protocol::sync_active_viewport_matches_acp_footer_visible_rows stdout ----
+
+thread 'shell::tests::acp_protocol::sync_active_viewport_matches_acp_footer_visible_rows' (73684) panicked at crates\editor-sdl\src\shell\tests\acp_protocol.rs:420:5:
+assertion `left == right` failed
+  left: 1
+ right: 19
+
+---- shell::tests::debug::dap_mode_function_keys_continue_and_step stdout ----
+plugin hook subscriber `lsp.auto-start-rust` executed `lsp.start`
+[plugin:lang-rust] lang-rust.attach: Rust language package attached.
+plugin hook subscriber `lang-rust.auto-attach` executed `lang-rust.attach`
+Error: "expected <leader> da"
+
+---- shell::tests::git_status::git_pull_upstream_streams_into_popup_buffer stdout ----
+Error: "git [\"clone\", \"-q\", \"C:\\\\Users\\\\sam\\\\AppData\\\\Local\\\\Temp\\\\volt-shell-tests-git-pull-upstream-popup-remote-60008-1789245106037818200\", \"C:\\\\Users\\\\sam\\\\AppData\\\\Local\\\\Temp\\\\volt-shell-tests-git-pull-upstream-clone-60008-1789245106703190700\"] failed: fatal: multiple updates for ref 'refs/remotes/origin/master' not allowed"
+
+---- shell::tests::git_status::git_status_ctrl_v_visual_s_stages_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.stage-file` was not found"
+
+---- shell::tests::git_status::git_status_ctrl_v_visual_u_unstages_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.unstage-file` was not found"
+
+---- shell::tests::git_status::git_status_sequence_commands_are_registered stdout ----
+
+thread 'shell::tests::git_status::git_status_sequence_commands_are_registered' (28972) panicked at crates\editor-sdl\src\shell\tests\git_status.rs:388:9:
+missing command `git.diff`
+
+---- shell::tests::git_status::git_status_ctrl_v_visual_x_deletes_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.stage-file` was not found"
+
+---- shell::tests::git_status::git_status_shift_v_visual_s_stages_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.stage-file` was not found"
+
+---- shell::tests::git_status::git_status_shift_v_visual_u_unstages_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.unstage-file` was not found"
+
+---- shell::tests::git_status::git_status_shift_v_visual_x_deletes_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.stage-file` was not found"
+
+---- shell::tests::git_status::git_status_uppercase_f_starts_pull_prefix stdout ----
+
+thread 'shell::tests::git_status::git_status_uppercase_f_starts_pull_prefix' (28988) panicked at crates\editor-sdl\src\shell\tests\git_status.rs:372:5:
+assertion failed: handle_git_status_chord(&mut state.runtime, "F")?
+
+---- shell::tests::git_status::git_status_visual_s_stages_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.stage-file` was not found"
+
+---- shell::tests::git_status::git_status_visual_u_unstages_selected_items stdout ----
+Error: "git status line for `alpha.txt` and `git.unstage-file` was not found"
+
+---- shell::tests::hover_ui::hover_registry_includes_signature_help_provider stdout ----
+
+thread 'shell::tests::hover_ui::hover_registry_includes_signature_help_provider' (16012) panicked at crates\editor-sdl\src\shell\tests\hover_ui.rs:7:40:
+index out of bounds: the len is 0 but the index is 0
+
+---- shell::tests::input_shortcuts::acp_input_field_cw_enters_insert_mode stdout ----
+
+thread 'shell::tests::input_shortcuts::acp_input_field_cw_enters_insert_mode' (46084) panicked at crates\editor-sdl\src\shell\tests\input_shortcuts.rs:124:5:
+assertion `left == right` failed
+  left: " beta"
+ right: "beta"
+
+---- shell::tests::input_shortcuts::calculator_ctrl_tab_switches_sections_without_changing_workspace_pane stdout ----
+
+thread 'shell::tests::input_shortcuts::calculator_ctrl_tab_switches_sections_without_changing_workspace_pane' (78760) panicked at crates\editor-sdl\src\shell\tests\input_shortcuts.rs:34:5:
+assertion `left == right` failed
+  left: Some(0)
+ right: Some(1)
+
+---- shell::tests::input_shortcuts::ctrl_enter_variants_match_manual_lsp_code_action_command stdout ----
+plugin hook subscriber `lsp.auto-start-rust` executed `lsp.start`
+[plugin:lang-rust] lang-rust.attach: Rust language package attached.
+plugin hook subscriber `lang-rust.auto-attach` executed `lang-rust.attach`
+plugin hook subscriber `lsp.auto-start-rust` executed `lsp.start`
+[plugin:lang-rust] lang-rust.attach: Rust language package attached.
+plugin hook subscriber `lang-rust.auto-attach` executed `lang-rust.attach`
+Error: "Ctrl+Enter workspace binding is missing"
+
+---- shell::tests::misc::buffer_save_command_uses_shell_focused_buffer_when_runtime_focus_is_stale stdout ----
+
+thread 'shell::tests::misc::buffer_save_command_uses_shell_focused_buffer_when_runtime_focus_is_stale' (48884) panicked at crates\editor-sdl\src\shell\tests\misc.rs:917:5:
+assertion `left == right` failed
+  left: "alpha\n"
+ right: "one\nalpha\n"
+
+---- shell::tests::misc::insert_mode_is_buffer_local_across_split_focus_changes stdout ----
+
+thread 'shell::tests::misc::insert_mode_is_buffer_local_across_split_focus_changes' (17784) panicked at crates\editor-sdl\src\shell\tests\misc.rs:3775:5:
+assertion `left == right` failed
+  left: Some(BufferId(1))
+ right: Some(BufferId(4))
+
+---- shell::tests::misc::monospace_text_width_ignores_variation_selectors stdout ----
+
+thread 'shell::tests::misc::monospace_text_width_ignores_variation_selectors' (63772) panicked at crates\editor-sdl\src\shell\tests\misc.rs:1701:5:
+assertion `left == right` failed
+  left: 16
+ right: 8
+
+---- shell::tests::misc::non_table_normal_tab_still_cycles_panes stdout ----
+
+thread 'shell::tests::misc::non_table_normal_tab_still_cycles_panes' (1628) panicked at crates\editor-sdl\src\shell\tests\misc.rs:3737:5:
+assertion `left == right` failed
+  left: Some(BufferId(1))
+ right: Some(BufferId(4))
+
+---- shell::tests::misc::pane_close_hook_closes_the_focused_split stdout ----
+
+thread 'shell::tests::misc::pane_close_hook_closes_the_focused_split' (78792) panicked at crates\editor-sdl\src\shell\tests\misc.rs:4236:5:
+assertion `left == right` failed
+  left: Some(PaneId(2))
+ right: Some(PaneId(1))
+
+---- shell::tests::misc::switch_split_hook_reverses_pane_order_and_preserves_the_active_pane stdout ----
+
+thread 'shell::tests::misc::switch_split_hook_reverses_pane_order_and_preserves_the_active_pane' (13736) panicked at crates\editor-sdl\src\shell\tests\misc.rs:4259:9:
+assertion `left == right` failed
+  left: 1
+ right: 0
+
+---- shell::tests::misc::sync_active_viewport_uses_active_pane_height_for_horizontal_splits stdout ----
+
+thread 'shell::tests::misc::sync_active_viewport_uses_active_pane_height_for_horizontal_splits' (39772) panicked at crates\editor-sdl\src\shell\tests\misc.rs:2903:5:
+assertion `left == right` failed
+  left: 7
+ right: 5
+
+---- shell::tests::misc::sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff stdout ----
+
+thread 'shell::tests::misc::sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff' (59276) panicked at crates\editor-sdl\src\shell\tests\misc.rs:2299:5:
+assertion `left == right` failed
+  left: 15
+ right: 14
+
+---- shell::tests::misc::workspace_save_command_uses_shell_active_workspace_when_runtime_workspace_is_stale stdout ----
+
+thread 'shell::tests::misc::workspace_save_command_uses_shell_active_workspace_when_runtime_workspace_is_stale' (56020) panicked at crates\editor-sdl\src\shell\tests\misc.rs:1006:5:
+assertion `left == right` failed
+  left: "alpha\n"
+ right: "one\nalpha\n"
+
+---- shell::tests::picker_ui::acp_slash_picker_text_input_updates_acp_input stdout ----
+
+thread 'shell::tests::picker_ui::acp_slash_picker_text_input_updates_acp_input' (69236) panicked at crates\editor-sdl\src\shell\tests\picker_ui.rs:264:5:
+assertion failed: !ui.picker_visible()
+
+---- shell::tests::picker_ui::truncate_picker_label_auto_falls_back_to_start_ellipsis stdout ----
+
+thread 'shell::tests::picker_ui::truncate_picker_label_auto_falls_back_to_start_ellipsis' (16096) panicked at crates\editor-sdl\src\shell\tests\picker_ui.rs:175:5:
+assertion `left == right` failed
+  left: "s/d/d/test.rs"
+ right: "...ir2/test.rs"
+
+---- shell::tests::picker_ui::truncate_picker_label_middle_ellipsis_preserves_both_ends stdout ----
+
+thread 'shell::tests::picker_ui::truncate_picker_label_middle_ellipsis_preserves_both_ends' (74192) panicked at crates\editor-sdl\src\shell\tests\picker_ui.rs:160:5:
+assertion `left == right` failed
+  left: "src/d...est.rs"
+ right: "src...test.rs"
+
+---- shell::tests::render_overlays::hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle stdout ----
+
+thread 'shell::tests::render_overlays::hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle' (78612) panicked at crates\editor-sdl\src\shell\tests\render_overlays.rs:1358:5:
+assertion failed: state.try_runtime_keybinding(Keycode::N,
+            ctrl_mod()).map_err(|error| error.to_string())?
+
+---- shell::tests::render_overlays::render_hover_overlay_uses_opaque_overlay_chrome stdout ----
+
+thread 'shell::tests::render_overlays::render_hover_overlay_uses_opaque_overlay_chrome' (52232) panicked at crates\editor-sdl\src\shell\tests\render_overlays.rs:1013:5:
+assertion failed: scene.iter().any(|command|
+        matches!(command, DrawCommand::FillRoundedRect { color, .. } if *color
+            ==
+            to_render_color(Color::RGBA(header_background.r,
+            header_background.g, header_background.b, 255,))))
+
+---- shell::tests::render_overlays::file_reload_notifications_reload_hidden_buffers_without_focus_changes stdout ----
+
+thread 'shell::tests::render_overlays::file_reload_notifications_reload_hidden_buffers_without_focus_changes' (53948) panicked at crates\editor-sdl\src\shell\tests\render_overlays.rs:75:5:
+assertion failed: wait_for_file_reload_change(&mut state)?
+
+---- shell::tests::render_overlays::file_reload_notifications_target_only_matching_buffers stdout ----
+
+thread 'shell::tests::render_overlays::file_reload_notifications_target_only_matching_buffers' (56240) panicked at crates\editor-sdl\src\shell\tests\render_overlays.rs:31:5:
+assertion failed: wait_for_file_reload_change(&mut state)?
+
+---- shell::tests::render_overlays::render_picker_overlay_uses_picker_text_tokens stdout ----
+
+thread 'shell::tests::render_overlays::render_picker_overlay_uses_picker_text_tokens' (65608) panicked at crates\editor-sdl\src\shell\tests\render_overlays.rs:1270:5:
+unexpected picker text colors: [("Projects", RenderColor { r: 220, g: 224, b: 230, a: 255 }), ("filter", RenderColor { r: 176, g: 182, b: 191, a: 255 }), ("2 / 2 results", RenderColor { r: 138, g: 144, b: 154, a: 255 }), ("alpha", RenderColor { r: 220, g: 224, b: 230, a: 255 }), ("beta", RenderColor { r: 195, g: 199, b: 205, a: 255 })]
+
+---- shell::tests::syntax_highlight::comment_toggle_styles_cover_all_shipped_syntax_languages stdout ----
+
+thread 'shell::tests::syntax_highlight::comment_toggle_styles_cover_all_shipped_syntax_languages' (52296) panicked at crates\editor-sdl\src\shell\tests\syntax_highlight.rs:952:5:
+missing comment styles for: diff, razor
+
+---- shell::tests::syntax_highlight::db_query_buffer_receives_sql_highlighting_without_blocking stdout ----
+
+thread 'shell::tests::syntax_highlight::db_query_buffer_receives_sql_highlighting_without_blocking' (9544) panicked at crates\editor-sdl\src\shell\tests\syntax_highlight.rs:978:5:
+DB query starter SQL should receive keyword highlighting
+
+---- shell::tests::vim::acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer stdout ----
+
+thread 'shell::tests::vim::acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer' (48888) panicked at crates\editor-sdl\src\shell\tests\vim.rs:526:5:
+assertion failed: shell_ui(&state.runtime)?.vim().target == VimTarget::Input
+
+---- tests::hover_closes_after_cursor_motion stdout ----
+
+thread 'tests::hover_closes_after_cursor_motion' (63320) panicked at crates\editor-sdl\src\tests.rs:835:5:
+assertion failed: state.hover_visible()?
+
+---- tests::hover_toggle_previews_and_focus_enters_panel stdout ----
+
+thread 'tests::hover_toggle_previews_and_focus_enters_panel' (24204) panicked at crates\editor-sdl\src\tests.rs:776:5:
+assertion failed: state.hover_visible()?
+
+---- tests::hover_toggle_command_shows_feedback_without_symbol stdout ----
+Error: "command `hover.toggle` is not registered"
+
+---- tests::keybinding_picker_lists_runtime_bindings stdout ----
+
+thread 'tests::keybinding_picker_lists_runtime_bindings' (84632) panicked at crates\editor-sdl\src\tests.rs:1374:5:
+assertion failed: state.try_runtime_keybinding(Keycode::F6, Mod::NOMOD)?
+
+---- tests::hover_toggle_works_at_token_end stdout ----
+
+thread 'tests::hover_toggle_works_at_token_end' (17696) panicked at crates\editor-sdl\src\tests.rs:807:5:
+assertion failed: state.hover_visible()?
+
+---- tests::lsp_hook_updates_statusline_state stdout ----
+Error: "hook `lsp.server-start` is not registered"
+
+---- tests::picker_bindings_open_and_navigate_results stdout ----
+
+thread 'tests::picker_bindings_open_and_navigate_results' (52360) panicked at crates\editor-sdl\src\tests.rs:1346:5:
+assertion failed: state.try_runtime_keybinding(Keycode::F4, Mod::NOMOD)?
+
+---- tests::vim_quickref_structure_motions_work stdout ----
+
+thread 'tests::vim_quickref_structure_motions_work' (41592) panicked at crates\editor-sdl\src\tests.rs:1020:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+
+---- tests::vim_quickref_text_objects_work stdout ----
+Error: Runtime("text object is unavailable at the current cursor")
+
+---- tests::workspace_open_falls_back_to_notes_when_no_root_readme stdout ----
+
+thread 'tests::workspace_open_falls_back_to_notes_when_no_root_readme' (63808) panicked at crates\editor-sdl\src\tests.rs:1477:5:
+assertion `left == right` failed
+  left: "*scratch*"
+ right: "*notes*"
+
+
+failures:
+    shell::acp::tests::permission_requests_queue_and_advance_after_resolution
+    shell::directory::directory_line_tests::parse_directory_line_strips_directory_icons
+    shell::directory::directory_line_tests::parse_directory_line_strips_file_icons
+    shell::directory::directory_line_tests::parse_directory_line_strips_repeated_icons
+    shell::directory::directory_line_tests::repeated_icons_do_not_turn_existing_entries_into_renames
+    shell::tests::acp_protocol::acp_plan_entries_populate_static_plan_pane
+    shell::tests::acp_protocol::acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane
+    shell::tests::acp_protocol::sync_active_viewport_matches_acp_footer_visible_rows
+    shell::tests::debug::dap_mode_function_keys_continue_and_step
+    shell::tests::git_status::git_pull_upstream_streams_into_popup_buffer
+    shell::tests::git_status::git_status_ctrl_v_visual_s_stages_selected_items
+    shell::tests::git_status::git_status_ctrl_v_visual_u_unstages_selected_items
+    shell::tests::git_status::git_status_ctrl_v_visual_x_deletes_selected_items
+    shell::tests::git_status::git_status_sequence_commands_are_registered
+    shell::tests::git_status::git_status_shift_v_visual_s_stages_selected_items
+    shell::tests::git_status::git_status_shift_v_visual_u_unstages_selected_items
+    shell::tests::git_status::git_status_shift_v_visual_x_deletes_selected_items
+    shell::tests::git_status::git_status_uppercase_f_starts_pull_prefix
+    shell::tests::git_status::git_status_visual_s_stages_selected_items
+    shell::tests::git_status::git_status_visual_u_unstages_selected_items
+    shell::tests::hover_ui::hover_registry_includes_signature_help_provider
+    shell::tests::input_shortcuts::acp_input_field_cw_enters_insert_mode
+    shell::tests::input_shortcuts::calculator_ctrl_tab_switches_sections_without_changing_workspace_pane
+    shell::tests::input_shortcuts::ctrl_enter_variants_match_manual_lsp_code_action_command
+    shell::tests::misc::buffer_save_command_uses_shell_focused_buffer_when_runtime_focus_is_stale
+    shell::tests::misc::insert_mode_is_buffer_local_across_split_focus_changes
+    shell::tests::misc::monospace_text_width_ignores_variation_selectors
+    shell::tests::misc::non_table_normal_tab_still_cycles_panes
+    shell::tests::misc::pane_close_hook_closes_the_focused_split
+    shell::tests::misc::switch_split_hook_reverses_pane_order_and_preserves_the_active_pane
+    shell::tests::misc::sync_active_viewport_uses_active_pane_height_for_horizontal_splits
+    shell::tests::misc::sync_visible_buffer_layouts_ignores_headerline_rows_for_scrolloff
+    shell::tests::misc::workspace_save_command_uses_shell_active_workspace_when_runtime_workspace_is_stale
+    shell::tests::picker_ui::acp_slash_picker_text_input_updates_acp_input
+    shell::tests::picker_ui::truncate_picker_label_auto_falls_back_to_start_ellipsis
+    shell::tests::picker_ui::truncate_picker_label_middle_ellipsis_preserves_both_ends
+    shell::tests::render_overlays::file_reload_notifications_reload_hidden_buffers_without_focus_changes
+    shell::tests::render_overlays::file_reload_notifications_target_only_matching_buffers
+    shell::tests::render_overlays::hover_ctrl_n_shortcut_prefers_hover_overlay_over_popup_cycle
+    shell::tests::render_overlays::render_hover_overlay_uses_opaque_overlay_chrome
+    shell::tests::render_overlays::render_picker_overlay_uses_picker_text_tokens
+    shell::tests::syntax_highlight::comment_toggle_styles_cover_all_shipped_syntax_languages
+    shell::tests::syntax_highlight::db_query_buffer_receives_sql_highlighting_without_blocking
+    shell::tests::vim::acp_second_escape_returns_hjkl_and_visual_mode_to_output_buffer
+    tests::hover_closes_after_cursor_motion
+    tests::hover_toggle_command_shows_feedback_without_symbol
+    tests::hover_toggle_previews_and_focus_enters_panel
+    tests::hover_toggle_works_at_token_end
+    tests::keybinding_picker_lists_runtime_bindings
+    tests::lsp_hook_updates_statusline_state
+    tests::picker_bindings_open_and_navigate_results
+    tests::vim_quickref_structure_motions_work
+    tests::vim_quickref_text_objects_work
+    tests::workspace_open_falls_back_to_notes_when_no_root_readme
+
+test result: FAILED. 731 passed; 54 failed; 5 ignored; 0 measured; 0 filtered out; finished in 53.76s
+
+error: test failed, to rerun pass `-p editor-sdl --lib`

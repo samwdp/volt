@@ -123,12 +123,23 @@ impl Client for AcpClient {
         &self,
         args: CreateTerminalRequest,
     ) -> agent_client_protocol::Result<CreateTerminalResponse> {
+        let workspace_id = {
+            let state = self.state.borrow();
+            state
+                .sessions
+                .get(&args.session_id)
+                .map(|session| session.workspace_id)
+        }
+        .ok_or_else(|| Error::resource_not_found(None))?;
         let env = args
             .env
             .iter()
             .map(|variable| (variable.name.clone(), variable.value.clone()))
             .collect::<Vec<_>>();
-        let mut child = spawn_background_command(
+        let process_registry = self.state.borrow().process_registry.clone();
+        let mut launched = launch_owned_background_command(
+            &process_registry,
+            editor_jobs::WorkspaceId::from_raw(workspace_id.get()),
             &args.command,
             &args.args,
             args.cwd.as_deref().map(Path::new),
@@ -136,13 +147,13 @@ impl Client for AcpClient {
             BackgroundCommandPipes::TERMINAL,
         )
         .await
-        .map_err(|error| Error::internal_error().data(error.to_string()))?;
+        .map_err(|error| Error::internal_error().data(error))?;
         let output = Rc::new(RefCell::new(String::new()));
         let exit_status = Rc::new(RefCell::new(None));
-        if let Some(stdout) = child.stdout.take() {
+        if let Some(stdout) = launched.stdout.take() {
             spawn_terminal_reader(output.clone(), stdout);
         }
-        if let Some(stderr) = child.stderr.take() {
+        if let Some(stderr) = launched.stderr.take() {
             spawn_terminal_reader(output.clone(), stderr);
         }
         let terminal_id = TerminalId::new(format!(
@@ -156,7 +167,7 @@ impl Client for AcpClient {
                 output,
                 exit_status,
                 output_limit: args.output_byte_limit,
-                child,
+                owned_process_id: launched.owned_process_id,
             },
         );
         Ok(CreateTerminalResponse::new(terminal_id))
@@ -167,14 +178,15 @@ impl Client for AcpClient {
         args: TerminalOutputRequest,
     ) -> agent_client_protocol::Result<TerminalOutputResponse> {
         let mut state = self.state.borrow_mut();
+        let process_registry = state.process_registry.clone();
         let terminal = state
             .terminals
             .get_mut(&args.terminal_id)
             .ok_or_else(|| Error::resource_not_found(None))?;
         if terminal.exit_status.borrow().is_none()
-            && let Ok(Some(status)) = terminal.child.try_wait()
+            && let Some(code) = try_owned_process_exit(&process_registry, terminal.owned_process_id)
         {
-            let exit = TerminalExitStatus::new().exit_code(status.code().map(|code| code as u32));
+            let exit = TerminalExitStatus::new().exit_code(Some(code as u32));
             *terminal.exit_status.borrow_mut() = Some(exit);
         }
         let output = terminal.output.borrow().clone();
@@ -190,16 +202,16 @@ impl Client for AcpClient {
         &self,
         args: WaitForTerminalExitRequest,
     ) -> agent_client_protocol::Result<WaitForTerminalExitResponse> {
-        let terminal = self.state.borrow_mut().terminals.remove(&args.terminal_id);
-        let Some(mut terminal) = terminal else {
-            return Err(Error::resource_not_found(None));
+        let (terminal, process_registry) = {
+            let mut state = self.state.borrow_mut();
+            let terminal = state
+                .terminals
+                .remove(&args.terminal_id)
+                .ok_or_else(|| Error::resource_not_found(None))?;
+            (terminal, state.process_registry.clone())
         };
-        let status = terminal
-            .child
-            .wait()
-            .await
-            .map_err(|error| Error::internal_error().data(error.to_string()))?;
-        let exit = TerminalExitStatus::new().exit_code(status.code().map(|code| code as u32));
+        let code = wait_owned_process_exit(&process_registry, terminal.owned_process_id).await;
+        let exit = TerminalExitStatus::new().exit_code(code.map(|code| code as u32));
         *terminal.exit_status.borrow_mut() = Some(exit.clone());
         let terminal_id = args.terminal_id.clone();
         self.state
@@ -214,8 +226,9 @@ impl Client for AcpClient {
         args: ReleaseTerminalRequest,
     ) -> agent_client_protocol::Result<ReleaseTerminalResponse> {
         let terminal = self.state.borrow_mut().terminals.remove(&args.terminal_id);
-        if let Some(mut terminal) = terminal {
-            let _ = terminal.child.kill().await;
+        if let Some(terminal) = terminal {
+            let process_registry = self.state.borrow().process_registry.clone();
+            teardown_owned_process(&process_registry, terminal.owned_process_id);
         }
         Ok(ReleaseTerminalResponse::new())
     }
@@ -225,10 +238,11 @@ impl Client for AcpClient {
         args: KillTerminalRequest,
     ) -> agent_client_protocol::Result<KillTerminalResponse> {
         let terminal = self.state.borrow_mut().terminals.remove(&args.terminal_id);
-        let Some(mut terminal) = terminal else {
+        let Some(terminal) = terminal else {
             return Err(Error::resource_not_found(None));
         };
-        let _ = terminal.child.kill().await;
+        let process_registry = self.state.borrow().process_registry.clone();
+        teardown_owned_process(&process_registry, terminal.owned_process_id);
         self.state
             .borrow_mut()
             .terminals

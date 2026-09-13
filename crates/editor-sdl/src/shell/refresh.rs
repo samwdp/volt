@@ -296,11 +296,17 @@ fn schedule_pending_lsp_syncs(
                 {
                     return Ok(None);
                 }
+                let workspace_id = ui
+                    .workspace_views
+                    .iter()
+                    .find(|(_, view)| view.buffer_ids.contains(&buffer.id()))
+                    .map(|(workspace_id, _)| workspace_id.get());
                 Ok(Some(LspSyncWorkerRequest {
                     path: path.clone(),
                     revision,
                     text: buffer.text.snapshot(),
                     root,
+                    workspace_id,
                     lsp_client: lsp_client.clone(),
                     preferred_server_id: None,
                     edits: lsp_edits_since_last_sync(&lsp_client, &path, &buffer.text),

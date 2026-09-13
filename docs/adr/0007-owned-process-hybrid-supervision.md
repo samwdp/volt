@@ -1,0 +1,3 @@
+# Owned process hybrid supervision
+
+Volt must not leave OS child processes alive after Workspace Close, Application Quit, or a hard crash of the UI process. We rejected a registry-only or Drop-only approach (orphans survive crashes) and a supervisor-only or Job-Object-only approach (each misses trees or platforms the other covers). Every Owned Process is therefore both placed in a platform kill-tree (Windows Job Object with kill-on-job-close; Unix process group / parent-death where available) and launched under the existing `volt --process-supervisor` watchdog when applicable, with a single Process Launch API registering tree roots in a global Process Registry.

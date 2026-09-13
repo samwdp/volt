@@ -109,11 +109,11 @@ fn enrich_env_with_node_manager_preserves_explicit_vars_when_manager_missing() {
 
 #[cfg(windows)]
 #[test]
-fn build_job_command_keeps_fnm_path_ahead_of_explicit_path() {
+fn build_job_launch_spec_keeps_fnm_path_ahead_of_explicit_path() {
     let spec = JobSpec::command("node-version", "node", ["--version"])
         .with_env("PATH", "C:\\custom")
         .with_env("NODE_OPTIONS", "--trace-warnings");
-    let command = super::build_job_command(
+    let launch = super::build_job_launch_spec(
         &spec,
         "node",
         Some(&[
@@ -124,14 +124,9 @@ fn build_job_command_keeps_fnm_path_ahead_of_explicit_path() {
             ),
         ]),
     );
-    let vars = command
-        .get_envs()
-        .filter_map(|(key, value)| {
-            Some((
-                key.to_string_lossy().into_owned(),
-                value?.to_string_lossy().into_owned(),
-            ))
-        })
+    let vars = launch
+        .env
+        .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(
         vars.get("PATH").map(String::as_str),
@@ -149,11 +144,11 @@ fn build_job_command_keeps_fnm_path_ahead_of_explicit_path() {
 
 #[cfg(windows)]
 #[test]
-fn build_job_command_keeps_nvm_path_ahead_of_explicit_path() {
+fn build_job_launch_spec_keeps_nvm_path_ahead_of_explicit_path() {
     let spec = JobSpec::command("node-version", "node", ["--version"])
         .with_env("PATH", "C:\\custom")
         .with_env("NODE_OPTIONS", "--trace-warnings");
-    let command = super::build_job_command(
+    let launch = super::build_job_launch_spec(
         &spec,
         "node",
         Some(&[
@@ -167,14 +162,9 @@ fn build_job_command_keeps_nvm_path_ahead_of_explicit_path() {
             ),
         ]),
     );
-    let vars = command
-        .get_envs()
-        .filter_map(|(key, value)| {
-            Some((
-                key.to_string_lossy().into_owned(),
-                value?.to_string_lossy().into_owned(),
-            ))
-        })
+    let vars = launch
+        .env
+        .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(
         vars.get("PATH").map(String::as_str),

@@ -3,8 +3,9 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     thread,
+    time::Duration,
 };
 
 use agent_client_protocol::{Agent, ClientSideConnection};
@@ -17,9 +18,9 @@ use agent_client_protocol::{
     SessionModeState, SessionModelState, SetSessionConfigOptionRequest, SetSessionModeRequest,
     SetSessionModelRequest, StopReason, TerminalExitStatus, TerminalId, ToolCall, ToolCallUpdate,
 };
+use editor_jobs::{OwnedProcessId, ProcessRegistry, WorkspaceId as ProcessWorkspaceId};
 use editor_plugin_api::AcpClient as AcpClientConfig;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
     sync::{mpsc as tokio_mpsc, oneshot},
     task::LocalSet,
 };
@@ -291,6 +292,7 @@ pub(crate) enum AcpCommand {
     Connect {
         config: AcpClientConfig,
         workspace_root: PathBuf,
+        workspace_id: WorkspaceId,
         buffer_id: BufferId,
     },
     Prompt {
@@ -345,9 +347,12 @@ pub(crate) struct AcpRuntime {
 }
 
 impl AcpRuntime {
-    pub(crate) fn new(event_tx: mpsc::Sender<AcpEvent>) -> Result<Self, String> {
+    pub(crate) fn new(
+        event_tx: mpsc::Sender<AcpEvent>,
+        process_registry: Arc<Mutex<ProcessRegistry>>,
+    ) -> Result<Self, String> {
         let (sender, receiver) = tokio_mpsc::unbounded_channel();
-        thread::spawn(move || run_acp_runtime(receiver, event_tx));
+        thread::spawn(move || run_acp_runtime(receiver, event_tx, process_registry));
         Ok(Self { sender })
     }
 
@@ -361,6 +366,7 @@ impl AcpRuntime {
 pub(crate) fn run_acp_runtime(
     receiver: tokio_mpsc::UnboundedReceiver<AcpCommand>,
     event_tx: mpsc::Sender<AcpEvent>,
+    process_registry: Arc<Mutex<ProcessRegistry>>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -370,7 +376,10 @@ pub(crate) fn run_acp_runtime(
         Err(_) => return,
     };
     let local = LocalSet::new();
-    let state = Rc::new(RefCell::new(AcpRuntimeState::new(event_tx)));
+    let state = Rc::new(RefCell::new(AcpRuntimeState::new(
+        event_tx,
+        process_registry,
+    )));
     local.block_on(&runtime, async move {
         acp_runtime_loop(state, receiver).await;
     });
@@ -385,12 +394,19 @@ pub(crate) async fn acp_runtime_loop(
             AcpCommand::Connect {
                 config,
                 workspace_root,
+                workspace_id,
                 buffer_id,
             } => {
                 let state = state.clone();
                 tokio::task::spawn_local(async move {
-                    if let Err(error) =
-                        connect_acp_client(state.clone(), config, workspace_root, buffer_id).await
+                    if let Err(error) = connect_acp_client(
+                        state.clone(),
+                        config,
+                        workspace_root,
+                        workspace_id,
+                        buffer_id,
+                    )
+                    .await
                     {
                         send_client_failure(&state, buffer_id, error);
                     }
@@ -520,6 +536,7 @@ pub(crate) async fn connect_acp_client(
     state: Rc<RefCell<AcpRuntimeState>>,
     config: AcpClientConfig,
     workspace_root: PathBuf,
+    workspace_id: WorkspaceId,
     buffer_id: BufferId,
 ) -> Result<(), String> {
     let cwd = config
@@ -527,7 +544,10 @@ pub(crate) async fn connect_acp_client(
         .as_deref()
         .map(Path::new)
         .unwrap_or(workspace_root.as_path());
-    let mut child = spawn_background_command(
+    let process_registry = state.borrow().process_registry.clone();
+    let launched = launch_owned_background_command(
+        &process_registry,
+        ProcessWorkspaceId::from_raw(workspace_id.get()),
         &config.command,
         &config.args,
         Some(cwd),
@@ -536,20 +556,12 @@ pub(crate) async fn connect_acp_client(
     )
     .await
     .map_err(|error| format!("failed to start ACP client: {error}"))?;
-    let stdin = child
+    let stdin = launched
         .stdin
-        .take()
         .ok_or_else(|| "ACP client stdin unavailable".to_owned())?;
-    let stdout = child
+    let stdout = launched
         .stdout
-        .take()
         .ok_or_else(|| "ACP client stdout unavailable".to_owned())?;
-    if let Some(stderr) = child.stderr.take() {
-        let state = state.clone();
-        tokio::task::spawn_local(async move {
-            drain_stderr(state, buffer_id, stderr).await;
-        });
-    }
 
     let client = Rc::new(AcpClient::new(state.clone()));
     let (connection, io_task) =
@@ -596,7 +608,8 @@ pub(crate) async fn connect_acp_client(
         session_id.clone(),
         AcpSession {
             connection: Rc::new(connection),
-            child,
+            owned_process_id: launched.owned_process_id,
+            workspace_id,
         },
     );
     state.borrow().emit(AcpEvent::Connected {
@@ -789,8 +802,8 @@ pub(crate) async fn disconnect_acp_session(
         let mut state = state.borrow_mut();
         state.sessions.remove(&session_id)
     };
-    if let Some(mut session) = session {
-        let _ = session.child.kill().await;
+    if let Some(session) = session {
+        teardown_owned_process(&state.borrow().process_registry, session.owned_process_id);
     }
     resolve_all_pending_permissions(&state, &session_id);
     state.borrow().emit(AcpEvent::Disconnected {
@@ -913,28 +926,39 @@ pub(crate) fn choose_permission_outcome(
         .unwrap_or(RequestPermissionOutcome::Cancelled)
 }
 
-pub(crate) async fn drain_stderr(
-    state: Rc<RefCell<AcpRuntimeState>>,
-    buffer_id: BufferId,
-    stderr: tokio::process::ChildStderr,
+pub(crate) fn teardown_owned_process(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    owned_process_id: OwnedProcessId,
 ) {
-    let mut reader = BufReader::new(stderr);
-    let mut line = String::new();
+    if let Ok(mut registry) = process_registry.lock() {
+        let _ = registry.teardown_process(owned_process_id, Duration::from_millis(200));
+    }
+}
+
+pub(crate) fn try_owned_process_exit(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    owned_process_id: OwnedProcessId,
+) -> Option<i32> {
+    let mut registry = process_registry.lock().ok()?;
+    let code = registry.exit_code(owned_process_id)?;
+    let _ = registry.reclaim(owned_process_id);
+    Some(code)
+}
+
+pub(crate) async fn wait_owned_process_exit(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    owned_process_id: OwnedProcessId,
+) -> Option<i32> {
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {
-                let message = line.trim_end().to_owned();
-                if !message.is_empty() {
-                    send_client_log(&state, buffer_id, message);
-                }
+        {
+            let mut registry = process_registry.lock().ok()?;
+            if let Some(code) = registry.exit_code(owned_process_id) {
+                let _ = registry.reclaim(owned_process_id);
+                return Some(code);
             }
-            Err(error) => {
-                send_client_log(&state, buffer_id, format!("ACP stderr error: {error}"));
-                break;
-            }
+            registry.root_pid(owned_process_id)?;
         }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -970,6 +994,7 @@ pub(crate) fn send_session_lines(
 }
 
 pub(crate) struct AcpRuntimeState {
+    pub(crate) process_registry: Arc<Mutex<ProcessRegistry>>,
     pub(crate) sessions: HashMap<agent_client_protocol::SessionId, AcpSession>,
     pub(crate) terminals: HashMap<TerminalId, AcpTerminal>,
     pub(crate) pending_permissions: VecDeque<PendingPermission>,
@@ -978,8 +1003,12 @@ pub(crate) struct AcpRuntimeState {
 }
 
 impl AcpRuntimeState {
-    pub(crate) fn new(event_tx: mpsc::Sender<AcpEvent>) -> Self {
+    pub(crate) fn new(
+        event_tx: mpsc::Sender<AcpEvent>,
+        process_registry: Arc<Mutex<ProcessRegistry>>,
+    ) -> Self {
         Self {
+            process_registry,
             sessions: HashMap::new(),
             terminals: HashMap::new(),
             pending_permissions: VecDeque::new(),
@@ -997,7 +1026,8 @@ impl AcpRuntimeState {
 
 pub(crate) struct AcpSession {
     pub(crate) connection: Rc<ClientSideConnection>,
-    pub(crate) child: tokio::process::Child,
+    pub(crate) owned_process_id: OwnedProcessId,
+    pub(crate) workspace_id: WorkspaceId,
 }
 
 pub(crate) struct PendingPermission {
@@ -1011,5 +1041,5 @@ pub(crate) struct AcpTerminal {
     pub(crate) output: Rc<RefCell<String>>,
     pub(crate) exit_status: Rc<RefCell<Option<TerminalExitStatus>>>,
     pub(crate) output_limit: Option<u64>,
-    pub(crate) child: tokio::process::Child,
+    pub(crate) owned_process_id: OwnedProcessId,
 }

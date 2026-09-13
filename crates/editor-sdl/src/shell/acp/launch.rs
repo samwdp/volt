@@ -1,9 +1,13 @@
 use std::{
     env,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
-use editor_jobs::{ProcessSupervisionMode, supervised_command_if_resolved};
+use editor_jobs::{
+    OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry, ProcessSupervisionMode,
+    WorkspaceId as ProcessWorkspaceId,
+};
 use tokio::process::Command;
 
 #[cfg(windows)]
@@ -29,7 +33,7 @@ impl BackgroundCommandPipes {
     pub(crate) const ACP_CLIENT: Self = Self {
         stdin: true,
         stdout: true,
-        stderr: true,
+        stderr: false,
     };
 
     pub(crate) const TERMINAL: Self = Self {
@@ -37,127 +41,166 @@ impl BackgroundCommandPipes {
         stdout: true,
         stderr: true,
     };
+
+    pub(crate) fn to_launch_stdio(self) -> ProcessLaunchStdio {
+        if self.stdin && self.stdout && !self.stderr {
+            ProcessLaunchStdio::Protocol
+        } else if self.stdin || self.stdout || self.stderr {
+            ProcessLaunchStdio::Piped
+        } else {
+            ProcessLaunchStdio::Null
+        }
+    }
 }
 
-pub(crate) async fn spawn_background_command(
+pub(crate) struct OwnedBackgroundLaunch {
+    pub(crate) owned_process_id: OwnedProcessId,
+    pub(crate) stdin: Option<tokio::process::ChildStdin>,
+    pub(crate) stdout: Option<tokio::process::ChildStdout>,
+    pub(crate) stderr: Option<tokio::process::ChildStderr>,
+}
+
+pub(crate) async fn launch_owned_background_command(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: ProcessWorkspaceId,
     program: &str,
     args: &[String],
     cwd: Option<&Path>,
     env: &[(String, String)],
     pipes: BackgroundCommandPipes,
-) -> std::io::Result<tokio::process::Child> {
-    let mut spawn_result = build_background_command(program, args, cwd, env, pipes, None).spawn();
+) -> Result<OwnedBackgroundLaunch, String> {
+    let stdio = pipes.to_launch_stdio();
+    let mut attempts: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    attempts.push((program.to_owned(), env.to_vec()));
 
-    let should_retry = matches!(
-        &spawn_result,
-        Err(error) if background_spawn_should_retry(error)
-    );
-    if should_retry {
-        for candidate in background_command_candidates(program, env, None) {
-            spawn_result =
-                build_background_command(&candidate, args, cwd, env, pipes, None).spawn();
-            match &spawn_result {
-                Ok(_) => break,
-                Err(error) if background_spawn_should_retry(error) => {}
-                Err(_) => break,
+    for candidate in background_command_candidates(program, env, None) {
+        attempts.push((candidate, env.to_vec()));
+    }
+
+    let mut last_error = None;
+    for (candidate, attempt_env) in &attempts {
+        match try_owned_launch(
+            process_registry,
+            workspace_id,
+            candidate,
+            args,
+            cwd,
+            attempt_env,
+            stdio,
+        ) {
+            Ok(launched) => return Ok(launched),
+            Err(error) if owned_launch_should_retry(&error) => {
+                last_error = Some(error);
             }
+            Err(error) => return Err(error),
         }
     }
 
-    let should_retry = matches!(
-        &spawn_result,
-        Err(error) if background_spawn_should_retry(error)
-    );
-    let launch_env = if should_retry {
-        refreshed_launch_environment(cwd).await
-    } else {
-        None
-    };
-    if let Some(launch_env) = launch_env.as_deref() {
-        for candidate in background_command_candidates(program, env, Some(launch_env)) {
-            spawn_result =
-                build_background_command(&candidate, args, cwd, env, pipes, Some(launch_env))
-                    .spawn();
-            match &spawn_result {
-                Ok(_) => break,
-                Err(error) if background_spawn_should_retry(error) => {}
-                Err(_) => break,
+    if let Some(launch_env) = refreshed_launch_environment(cwd).await {
+        for candidate in background_command_candidates(program, env, Some(&launch_env)) {
+            let mut merged = launch_env.clone();
+            merged.extend(env.iter().cloned());
+            match try_owned_launch(
+                process_registry,
+                workspace_id,
+                &candidate,
+                args,
+                cwd,
+                &merged,
+                stdio,
+            ) {
+                Ok(launched) => return Ok(launched),
+                Err(error) if owned_launch_should_retry(&error) => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(error),
             }
         }
-    }
 
-    #[cfg(windows)]
-    {
-        let should_retry_with_node_manager = matches!(
-            &spawn_result,
-            Err(error) if background_spawn_should_retry(error)
-        );
-        if should_retry_with_node_manager
-            && let Some(node_manager_env) =
-                windows_node_manager_environment(cwd, env, launch_env.as_deref()).await
+        #[cfg(windows)]
+        if let Some(node_manager_env) =
+            windows_node_manager_environment(cwd, env, Some(&launch_env)).await
         {
             for candidate in background_command_candidates(program, &[], Some(&node_manager_env)) {
-                spawn_result = build_background_command(
+                match try_owned_launch(
+                    process_registry,
+                    workspace_id,
                     &candidate,
                     args,
                     cwd,
-                    &[],
-                    pipes,
-                    Some(&node_manager_env),
-                )
-                .spawn();
-                match &spawn_result {
-                    Ok(_) => break,
-                    Err(error) if background_spawn_should_retry(error) => {}
-                    Err(_) => break,
+                    &node_manager_env,
+                    stdio,
+                ) {
+                    Ok(launched) => return Ok(launched),
+                    Err(error) if owned_launch_should_retry(&error) => {
+                        last_error = Some(error);
+                    }
+                    Err(error) => return Err(error),
                 }
             }
         }
     }
 
-    spawn_result
+    Err(last_error.unwrap_or_else(|| format!("failed to launch `{program}`")))
 }
 
-pub(crate) fn build_background_command(
+fn try_owned_launch(
+    process_registry: &Arc<Mutex<ProcessRegistry>>,
+    workspace_id: ProcessWorkspaceId,
     program: &str,
     args: &[String],
     cwd: Option<&Path>,
     env: &[(String, String)],
-    pipes: BackgroundCommandPipes,
-    launch_env: Option<&[(String, String)]>,
-) -> Command {
-    let (program, args) = supervised_command_if_resolved(
-        program,
-        args,
-        env,
-        launch_env,
-        ProcessSupervisionMode::Background,
-    );
-    let mut command = Command::new(&program);
-    configure_background_command(&mut command);
-    command.args(&args);
-    apply_background_pipes(&mut command, pipes);
+    stdio: ProcessLaunchStdio,
+) -> Result<OwnedBackgroundLaunch, String> {
+    let mut env = env.to_vec();
+    editor_tool_install::merge_effective_path(&mut env);
+    let mut spec = ProcessLaunchSpec::new(program, args.to_vec())
+        .with_stdio(stdio)
+        .with_mode(ProcessSupervisionMode::Background)
+        .with_workspace(workspace_id);
     if let Some(cwd) = cwd {
-        command.current_dir(cwd);
+        spec = spec.with_current_dir(cwd);
     }
-    if let Some(launch_env) = launch_env {
-        apply_launch_environment(&mut command, env, launch_env);
-    } else {
-        apply_command_environment(&mut command, env);
-    }
-    command
+    spec.env = env;
+
+    let mut registry = process_registry
+        .lock()
+        .map_err(|_| "process registry mutex poisoned".to_owned())?;
+    let mut launched = registry.launch(spec).map_err(|error| error.to_string())?;
+    let stdin = launched
+        .stdin
+        .take()
+        .map(tokio::process::ChildStdin::from_std)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let stdout = launched
+        .stdout
+        .take()
+        .map(tokio::process::ChildStdout::from_std)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let stderr = launched
+        .stderr
+        .take()
+        .map(tokio::process::ChildStderr::from_std)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    Ok(OwnedBackgroundLaunch {
+        owned_process_id: launched.id,
+        stdin,
+        stdout,
+        stderr,
+    })
 }
 
-pub(crate) fn apply_background_pipes(command: &mut Command, pipes: BackgroundCommandPipes) {
-    if pipes.stdin {
-        command.stdin(std::process::Stdio::piped());
-    }
-    if pipes.stdout {
-        command.stdout(std::process::Stdio::piped());
-    }
-    if pipes.stderr {
-        command.stderr(std::process::Stdio::piped());
-    }
+fn owned_launch_should_retry(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("not found")
+        || lower.contains("cannot find")
+        || lower.contains("the system cannot find")
+        || lower.contains("os error 2")
+        || lower.contains("os error 193")
 }
 
 pub(crate) fn apply_command_environment(command: &mut Command, env: &[(String, String)]) {
@@ -310,16 +353,6 @@ pub(crate) fn is_launch_candidate(candidate: &Path) -> bool {
         .metadata()
         .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
-}
-
-#[cfg(windows)]
-pub(crate) fn background_spawn_should_retry(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(193)
-}
-
-#[cfg(not(windows))]
-pub(crate) fn background_spawn_should_retry(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::NotFound
 }
 
 #[cfg(windows)]

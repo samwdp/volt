@@ -426,6 +426,7 @@ fn schedule_immediate_lsp_sync(
         revision: context.revision,
         text: TextBuffer::from_text(&context.text).snapshot(),
         root: context.root.clone(),
+        workspace_id: Some(context.workspace_id.get()),
         lsp_client,
         preferred_server_id: preferred_server_id.map(str::to_owned),
         edits,

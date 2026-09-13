@@ -4,16 +4,27 @@ use std::{
     env,
     error::Error,
     fmt,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
     thread,
     time::{Duration, Instant},
 };
 
+mod process_registry;
+
+pub use process_registry::{
+    LaunchedProcess, OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry,
+    ProcessRegistryError, ShareKey, WorkspaceId, language_server_share_key,
+    owned_process_pid_alive,
+};
+
 /// Human-readable summary of this crate's responsibility.
-pub const ROLE: &str =
-    "Asynchronous job scheduling, process supervision, and compilation task coordination.";
+pub const ROLE: &str = "Asynchronous job scheduling, process supervision, Process Registry / Process Launch, and compilation task coordination.";
 
 /// Returns the responsibility summary for this crate.
 pub const fn role() -> &'static str {
@@ -38,7 +49,7 @@ pub const PROCESS_SUPERVISOR_EXE_ENV: &str = "VOLT_PROCESS_SUPERVISOR_EXE";
 /// Hidden flag used to run the Volt executable in child-process supervision mode.
 pub const PROCESS_SUPERVISOR_FLAG: &str = "--process-supervisor";
 
-const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
+pub(crate) const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
 
 /// Controls how the supervised child should be launched on the current platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +131,19 @@ pub fn supervised_command(
     args: &[String],
     mode: ProcessSupervisionMode,
 ) -> (String, Vec<String>) {
-    let supervisor_exe = env::var_os(PROCESS_SUPERVISOR_EXE_ENV)
-        .map(PathBuf::from)
+    supervised_command_with_exe(None, program, args, mode)
+}
+
+/// Like [`supervised_command`], but prefers an explicit supervisor executable when provided.
+pub fn supervised_command_with_exe(
+    process_supervisor_exe: Option<&Path>,
+    program: &str,
+    args: &[String],
+    mode: ProcessSupervisionMode,
+) -> (String, Vec<String>) {
+    let supervisor_exe = process_supervisor_exe
+        .map(Path::to_path_buf)
+        .or_else(|| env::var_os(PROCESS_SUPERVISOR_EXE_ENV).map(PathBuf::from))
         .or_else(default_process_supervisor_executable);
     let Some(supervisor_exe) = supervisor_exe else {
         return (program.to_owned(), args.to_vec());
@@ -144,7 +166,7 @@ pub fn supervised_command(
     )
 }
 
-fn default_process_supervisor_executable() -> Option<PathBuf> {
+pub(crate) fn default_process_supervisor_executable() -> Option<PathBuf> {
     let current_exe = env::current_exe().ok()?;
     let stem = current_exe.file_stem()?.to_str()?;
     (stem == "volt").then_some(current_exe)
@@ -262,6 +284,7 @@ pub struct JobSpec {
     args: Vec<String>,
     cwd: Option<PathBuf>,
     env: Vec<(String, String)>,
+    workspace_id: Option<crate::WorkspaceId>,
 }
 
 impl JobSpec {
@@ -278,6 +301,7 @@ impl JobSpec {
             args: args.into_iter().map(Into::into).collect(),
             cwd: None,
             env: Vec::new(),
+            workspace_id: None,
         }
     }
 
@@ -317,6 +341,12 @@ impl JobSpec {
         self
     }
 
+    /// Tags the job's Owned Process with a Workspace for Workspace Close teardown.
+    pub fn with_workspace(mut self, workspace_id: crate::WorkspaceId) -> Self {
+        self.workspace_id = Some(workspace_id);
+        self
+    }
+
     /// Returns the human-readable label.
     pub fn label(&self) -> &str {
         &self.label
@@ -345,6 +375,11 @@ impl JobSpec {
     /// Returns the explicit environment overrides.
     pub fn env(&self) -> &[(String, String)] {
         &self.env
+    }
+
+    /// Returns the Workspace tag, if present.
+    pub const fn workspace_id(&self) -> Option<crate::WorkspaceId> {
+        self.workspace_id
     }
 }
 
@@ -412,6 +447,8 @@ impl JobResult {
 pub enum JobError {
     /// Process creation or output capture failed.
     Io(std::io::Error),
+    /// Process Launch / registry ownership failed.
+    Launch(String),
     /// The background worker did not return a result.
     Disconnected,
     /// The background worker panicked.
@@ -422,6 +459,7 @@ impl fmt::Display for JobError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => error.fmt(formatter),
+            Self::Launch(message) => write!(formatter, "job process launch failed: {message}"),
             Self::Disconnected => write!(formatter, "job worker disconnected before returning"),
             Self::WorkerPanicked => write!(formatter, "job worker panicked before returning"),
         }
@@ -433,6 +471,12 @@ impl Error for JobError {}
 impl From<std::io::Error> for JobError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+impl From<ProcessRegistryError> for JobError {
+    fn from(error: ProcessRegistryError) -> Self {
+        Self::Launch(error.to_string())
     }
 }
 
@@ -462,25 +506,46 @@ impl JobHandle {
 }
 
 /// Mutable process supervisor that assigns job identifiers and spawns workers.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct JobManager {
     next_job_id: u64,
+    registry: Arc<Mutex<ProcessRegistry>>,
+}
+
+impl Default for JobManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl JobManager {
-    /// Creates a new job manager.
+    /// Creates a new job manager with a private Process Registry.
     pub fn new() -> Self {
-        Self { next_job_id: 1 }
+        Self::with_registry(Arc::new(Mutex::new(ProcessRegistry::new())))
+    }
+
+    /// Creates a job manager that shares an app-wide Process Registry.
+    pub fn with_registry(registry: Arc<Mutex<ProcessRegistry>>) -> Self {
+        Self {
+            next_job_id: 1,
+            registry,
+        }
+    }
+
+    /// Returns the shared Process Registry used for Owned Process Launch.
+    pub fn registry(&self) -> Arc<Mutex<ProcessRegistry>> {
+        Arc::clone(&self.registry)
     }
 
     /// Spawns an asynchronous job and returns a handle for later collection.
     pub fn spawn(&mut self, spec: JobSpec) -> Result<JobHandle, JobError> {
         let job_id = self.next_job_id;
         self.next_job_id += 1;
+        let registry = Arc::clone(&self.registry);
 
         let (sender, receiver) = mpsc::channel();
         let join_handle = thread::spawn(move || {
-            let result = run_job(job_id, spec);
+            let result = run_job(job_id, spec, registry);
             let _ = sender.send(result);
         });
 
@@ -539,108 +604,159 @@ impl CompilationRunner {
     }
 }
 
-fn run_job(id: u64, spec: JobSpec) -> Result<JobResult, JobError> {
+fn run_job(
+    id: u64,
+    spec: JobSpec,
+    registry: Arc<Mutex<ProcessRegistry>>,
+) -> Result<JobResult, JobError> {
     let started = Instant::now();
     #[cfg(not(windows))]
-    let output_result = build_job_command(&spec, spec.program(), None).output();
+    let mut launched = launch_job(&registry, &spec, spec.program(), None)?;
     #[cfg(windows)]
-    let output_result = {
-        let mut output_result = build_job_command(&spec, spec.program(), None).output();
-        let should_retry = matches!(
-            &output_result,
-            Err(error) if windows_should_retry_spawn_error(error)
-        );
-        if should_retry {
+    let mut launched = {
+        let mut launched = launch_job(&registry, &spec, spec.program(), None);
+        if matches!(&launched, Err(JobError::Launch(_)) | Err(JobError::Io(_))) {
             for candidate in windows_launch_program_candidates(spec.program()) {
-                output_result = build_job_command(&spec, &candidate, None).output();
-                match &output_result {
+                launched = launch_job(&registry, &spec, &candidate, None);
+                match &launched {
                     Ok(_) => break,
-                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(JobError::Launch(_)) | Err(JobError::Io(_)) => {}
                     Err(_) => break,
                 }
             }
         }
-        let should_retry_with_fnm = matches!(
-            &output_result,
-            Err(error) if windows_should_retry_spawn_error(error)
-        );
-        if should_retry_with_fnm
+        if matches!(&launched, Err(JobError::Launch(_)) | Err(JobError::Io(_)))
             && let Some(fnm_env) =
                 windows_fnm_environment(spec.cwd().map(PathBuf::as_path), spec.env())
         {
             for candidate in windows_fnm_launch_program_candidates(spec.program(), &fnm_env) {
-                output_result = build_job_command(&spec, &candidate, Some(&fnm_env)).output();
-                match &output_result {
+                launched = launch_job(&registry, &spec, &candidate, Some(&fnm_env));
+                match &launched {
                     Ok(_) => break,
-                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(JobError::Launch(_)) | Err(JobError::Io(_)) => {}
                     Err(_) => break,
                 }
             }
         }
-        let should_retry_with_nvm = matches!(
-            &output_result,
-            Err(error) if windows_should_retry_spawn_error(error)
-        );
-        if should_retry_with_nvm
+        if matches!(&launched, Err(JobError::Launch(_)) | Err(JobError::Io(_)))
             && let Some(nvm_env) =
                 windows_nvm_environment(spec.cwd().map(PathBuf::as_path), spec.env())
         {
             for candidate in windows_nvm_launch_program_candidates(spec.program(), &nvm_env) {
-                output_result = build_job_command(&spec, &candidate, Some(&nvm_env)).output();
-                match &output_result {
+                launched = launch_job(&registry, &spec, &candidate, Some(&nvm_env));
+                match &launched {
                     Ok(_) => break,
-                    Err(error) if windows_should_retry_spawn_error(error) => {}
+                    Err(JobError::Launch(_)) | Err(JobError::Io(_)) => {}
                     Err(_) => break,
                 }
             }
         }
-        output_result
+        launched
+    }?;
+
+    let owned_id = launched.id;
+    let stdout_reader = launched.stdout.take().map(|mut stdout| {
+        thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stdout.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+    let stderr_reader = launched.stderr.take().map(|mut stderr| {
+        thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = stderr.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+
+    loop {
+        let alive = match registry.lock() {
+            Ok(mut registry) => registry.is_alive(owned_id),
+            Err(_) => false,
+        };
+        if !alive {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let stdout = stdout_reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
+    let exit_code = {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| JobError::Launch("process registry mutex poisoned".to_owned()))?;
+        let exit_code = registry.exit_code(owned_id);
+        let _ = registry.reclaim(owned_id);
+        exit_code
     };
 
-    let output = output_result?;
     Ok(JobResult {
         id,
         spec,
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        exit_code,
         duration: started.elapsed(),
     })
 }
 
-fn build_job_command(
+fn launch_job(
+    registry: &Arc<Mutex<ProcessRegistry>>,
     spec: &JobSpec,
     program: &str,
     #[cfg(windows)] runtime_env: Option<&[(String, String)]>,
     #[cfg(not(windows))] _runtime_env: Option<&[(String, String)]>,
-) -> Command {
-    let (program, args) = supervised_command_if_resolved(
-        program,
-        spec.args(),
-        spec.env(),
-        #[cfg(windows)]
-        runtime_env,
-        #[cfg(not(windows))]
-        None,
-        ProcessSupervisionMode::Background,
-    );
-    let mut command = Command::new(&program);
-    configure_background_command(&mut command);
-    command.args(&args);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+) -> Result<LaunchedProcess, JobError> {
+    let mut launch_spec = build_job_launch_spec(spec, program, runtime_env);
+    if let Some(workspace_id) = spec.workspace_id() {
+        launch_spec = launch_spec.with_workspace(workspace_id);
+    }
+    let mut registry = registry
+        .lock()
+        .map_err(|_| JobError::Launch("process registry mutex poisoned".to_owned()))?;
+    Ok(registry.launch(launch_spec)?)
+}
 
-    if let Some(cwd) = spec.cwd() {
-        command.current_dir(cwd);
-    }
+fn build_job_launch_spec(
+    spec: &JobSpec,
+    program: &str,
+    #[cfg(windows)] runtime_env: Option<&[(String, String)]>,
+    #[cfg(not(windows))] _runtime_env: Option<&[(String, String)]>,
+) -> ProcessLaunchSpec {
+    let env_pairs = {
+        #[cfg(windows)]
+        {
+            if let Some(runtime_env) = runtime_env {
+                merge_windows_explicit_and_runtime_env(spec.env(), runtime_env)
+            } else {
+                spec.env().to_vec()
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            spec.env().to_vec()
+        }
+    };
     #[cfg(windows)]
-    if let Some(runtime_env) = runtime_env {
-        apply_windows_runtime_environment(&mut command, spec.env(), runtime_env);
-    } else {
-        apply_command_environment(&mut command, spec.env());
-    }
+    let resolved_program = resolve_command_path(program, &env_pairs, runtime_env)
+        .unwrap_or_else(|| program.to_owned());
     #[cfg(not(windows))]
-    apply_command_environment(&mut command, spec.env());
-    command
+    let resolved_program =
+        resolve_command_path(program, &env_pairs, None).unwrap_or_else(|| program.to_owned());
+    let mut launch_spec = ProcessLaunchSpec::new(resolved_program, spec.args().iter().cloned())
+        .with_mode(ProcessSupervisionMode::Background)
+        .with_stdio(ProcessLaunchStdio::Piped);
+    if let Some(cwd) = spec.cwd() {
+        launch_spec = launch_spec.with_current_dir(cwd.clone());
+    }
+    launch_spec.env = env_pairs;
+    launch_spec
 }
 
 fn apply_command_environment(command: &mut Command, env: &[(String, String)]) {
@@ -666,6 +782,7 @@ fn windows_launch_program_candidates(program: &str) -> Vec<String> {
 }
 
 #[cfg(windows)]
+#[cfg_attr(not(test), allow(dead_code))]
 fn windows_should_retry_spawn_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(193)
 }
@@ -837,17 +954,6 @@ fn parse_windows_cmd_environment(output: &str) -> Option<Vec<(String, String)>> 
 }
 
 #[cfg(windows)]
-fn apply_windows_runtime_environment(
-    command: &mut Command,
-    env: &[(String, String)],
-    runtime_env: &[(String, String)],
-) {
-    for (key, value) in merge_windows_explicit_and_runtime_env(env, runtime_env) {
-        command.env(key, value);
-    }
-}
-
-#[cfg(windows)]
 fn merge_windows_explicit_and_runtime_env(
     env: &[(String, String)],
     runtime_env: &[(String, String)],
@@ -885,3 +991,6 @@ fn explicit_windows_env_value<'a>(env: &'a [(String, String)], key: &str) -> Opt
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod process_registry_tests;

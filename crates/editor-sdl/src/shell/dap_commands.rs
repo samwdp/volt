@@ -637,7 +637,13 @@ fn run_dap_compile_before_debug(runtime: &mut EditorRuntime, command: &str) -> R
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         buffer.append_output_lines(&[format!("$ {command}"), String::new()]);
     }
-    let spec = JobSpec::command("dap-prelaunch", shell_program, args).with_cwd(cwd);
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let spec = JobSpec::command("dap-prelaunch", shell_program, args)
+        .with_cwd(cwd)
+        .with_workspace(editor_jobs::WorkspaceId::from_raw(workspace_id.get()));
     let manager = runtime
         .services()
         .get::<Mutex<JobManager>>()

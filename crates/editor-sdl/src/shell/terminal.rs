@@ -25,14 +25,19 @@ impl TerminalPollPriority {
 
 struct TrackedTerminalSession {
     session: LiveTerminalSession,
+    owned_process_id: Option<editor_jobs::OwnedProcessId>,
     last_poll_at: Option<Instant>,
     buffer_dirty: bool,
 }
 
 impl TrackedTerminalSession {
-    fn new(session: LiveTerminalSession) -> Self {
+    fn new(
+        session: LiveTerminalSession,
+        owned_process_id: Option<editor_jobs::OwnedProcessId>,
+    ) -> Self {
         Self {
             session,
+            owned_process_id,
             last_poll_at: None,
             buffer_dirty: false,
         }
@@ -59,15 +64,25 @@ impl TerminalBufferState {
         self.sessions.get_mut(&buffer_id)
     }
 
-    pub(super) fn insert(&mut self, buffer_id: BufferId, session: LiveTerminalSession) {
-        self.sessions
-            .insert(buffer_id, TrackedTerminalSession::new(session));
+    pub(super) fn insert(
+        &mut self,
+        buffer_id: BufferId,
+        session: LiveTerminalSession,
+        owned_process_id: Option<editor_jobs::OwnedProcessId>,
+    ) {
+        self.sessions.insert(
+            buffer_id,
+            TrackedTerminalSession::new(session, owned_process_id),
+        );
     }
 
-    pub(super) fn remove(&mut self, buffer_id: BufferId) -> Option<LiveTerminalSession> {
+    pub(super) fn remove(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Option<(LiveTerminalSession, Option<editor_jobs::OwnedProcessId>)> {
         self.sessions
             .remove(&buffer_id)
-            .map(|tracked| tracked.session)
+            .map(|tracked| (tracked.session, tracked.owned_process_id))
     }
 
     pub(super) fn buffer_ids(&self) -> Vec<BufferId> {
@@ -418,11 +433,31 @@ pub(super) fn ensure_terminal_session(
     if terminal_buffer_state(runtime)?.contains(buffer_id) {
         return Ok(false);
     }
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
     let config = terminal_spawn_config(runtime, buffer_id, 24, 80)?;
-    let session = LiveTerminalSession::spawn(config).map_err(|error| error.to_string())?;
+    let registry = process_registry_service(runtime)?;
+    let mut registry = registry
+        .lock()
+        .map_err(|_| "process registry mutex poisoned".to_owned())?;
+    let (owned_process_id, session) = registry
+        .launch_interactive_session(
+            [editor_jobs::WorkspaceId::from_raw(workspace_id.get())],
+            || {
+                let session =
+                    LiveTerminalSession::spawn(config).map_err(|error| error.to_string())?;
+                let root_pid = session.process_id().ok_or_else(|| {
+                    "interactive terminal Process Launch requires a root process id".to_owned()
+                })?;
+                Ok::<_, String>((session, root_pid))
+            },
+        )
+        .map_err(|error| error.to_string())?;
     let lines = session.snapshot().lines().to_vec();
     let render = session.render_snapshot();
-    terminal_buffer_state_mut(runtime)?.insert(buffer_id, session);
+    terminal_buffer_state_mut(runtime)?.insert(buffer_id, session, Some(owned_process_id));
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
     buffer.set_terminal_render(render);
     buffer.replace_with_lines_follow_output(lines);
@@ -640,7 +675,9 @@ pub(super) fn close_terminal_buffer(
     if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
         buffer.clear_terminal_render();
     }
-    let Some(mut session) = terminal_buffer_state_mut(runtime)?.remove(buffer_id) else {
+    let Some((mut session, owned_process_id)) =
+        terminal_buffer_state_mut(runtime)?.remove(buffer_id)
+    else {
         return Ok(());
     };
     session.kill().map_err(|error| {
@@ -648,8 +685,34 @@ pub(super) fn close_terminal_buffer(
             "failed to terminate terminal session `{}` for buffer `{buffer_id}`: {error}",
             session.title()
         )
-    })
+    })?;
+    if let Some(owned_process_id) = owned_process_id {
+        let registry = process_registry_service(runtime)?;
+        let mut registry = registry
+            .lock()
+            .map_err(|_| "process registry mutex poisoned".to_owned())?;
+        let _ = registry.teardown_process(owned_process_id, OWNED_PROCESS_TEARDOWN_GRACE);
+    }
+    Ok(())
 }
+
+pub(super) fn process_registry_service(
+    runtime: &EditorRuntime,
+) -> Result<Arc<Mutex<editor_jobs::ProcessRegistry>>, String> {
+    runtime
+        .services()
+        .get::<Arc<Mutex<editor_jobs::ProcessRegistry>>>()
+        .cloned()
+        .ok_or_else(|| "process registry service missing".to_owned())
+}
+
+pub(super) fn shared_process_registry(
+    runtime: &EditorRuntime,
+) -> Result<Arc<Mutex<editor_jobs::ProcessRegistry>>, String> {
+    process_registry_service(runtime)
+}
+
+pub(super) const OWNED_PROCESS_TEARDOWN_GRACE: Duration = Duration::from_millis(200);
 
 pub(super) fn terminal_key_for_event(keycode: Keycode, keymod: Mod) -> Option<TerminalKey> {
     if keymod.intersects(ctrl_mod()) && keycode == Keycode::C {

@@ -638,7 +638,10 @@ pub(super) fn install_test_lsp_manager(
             ))
             .map_err(|error| error.to_string())?;
     }
-    let manager = Arc::new(LspClientManager::new(registry));
+    let manager = Arc::new(LspClientManager::with_process_registry(
+        registry,
+        shared_process_registry(runtime)?,
+    ));
     runtime.services_mut().insert(Arc::clone(&manager));
     Ok(manager)
 }
@@ -2402,8 +2405,12 @@ pub(super) fn install_fake_tcp_dap_manager(
                 .with_preference(10),
         )
         .map_err(|e| e.to_string())?;
+    let process_registry = shared_process_registry(runtime)?;
     runtime
         .services_mut()
-        .insert(Arc::new(DapClientManager::new(registry)));
+        .insert(Arc::new(DapClientManager::with_process_registry(
+            registry,
+            process_registry,
+        )));
     Ok((port, handle))
 }

@@ -1074,11 +1074,13 @@ fn buffer_save_still_writes_when_format_on_save_fails() -> Result<(), String> {
     open_workspace_from_project(&mut state.runtime, "format-failure", &root)?;
 
     let buffer_id = open_workspace_file(&mut state.runtime, &path)?;
+    let process_registry = shared_process_registry(&state.runtime)?;
     state
         .runtime
         .services_mut()
-        .insert(Arc::new(LspClientManager::new(
+        .insert(Arc::new(LspClientManager::with_process_registry(
             LanguageServerRegistry::new(),
+            process_registry,
         )));
     state
         .runtime

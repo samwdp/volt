@@ -219,7 +219,13 @@ fn run_shell_command_in_buffer(
         buffer.append_output_lines(&[format!("$ {command}"), String::new()]);
         buffer.clear_input();
     }
-    let spec = JobSpec::command("command", shell_program, args).with_cwd(cwd);
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let spec = JobSpec::command("command", shell_program, args)
+        .with_cwd(cwd)
+        .with_workspace(editor_jobs::WorkspaceId::from_raw(workspace_id.get()));
     let manager = runtime
         .services()
         .get::<Mutex<JobManager>>()
@@ -443,17 +449,18 @@ fn replace_runtime_user_library(
     lsp_registry
         .register_all(user_library.language_servers())
         .map_err(|error| error.to_string())?;
-    runtime
-        .services_mut()
-        .insert(Arc::new(LspClientManager::new(lsp_registry)));
+    let process_registry = shared_process_registry(runtime)?;
+    runtime.services_mut().insert(Arc::new(
+        LspClientManager::with_process_registry(lsp_registry, Arc::clone(&process_registry)),
+    ));
 
     let mut dap_registry = DebugAdapterRegistry::new();
     dap_registry
         .register_all(user_library.debug_adapters())
         .map_err(|error| error.to_string())?;
-    runtime
-        .services_mut()
-        .insert(Arc::new(DapClientManager::new(dap_registry)));
+    runtime.services_mut().insert(Arc::new(
+        DapClientManager::with_process_registry(dap_registry, process_registry),
+    ));
 
     let mut syntax_registry = SyntaxRegistry::new();
     syntax_registry
