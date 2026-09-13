@@ -1,12 +1,13 @@
 #![doc = r#"Asynchronous job scheduling, process supervision, and compilation task coordination."#]
 
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use std::{
     env,
     error::Error,
     fmt,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver},
@@ -34,13 +35,11 @@ pub const fn role() -> &'static str {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-fn configure_background_command(_command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
+#[cfg(windows)]
+fn configure_background_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
 
-        _command.creation_flags(CREATE_NO_WINDOW);
-    }
+    command.creation_flags(CREATE_NO_WINDOW);
 }
 
 /// Environment variable used to advertise the Volt executable that can supervise child processes.
@@ -743,8 +742,7 @@ fn launch_job(
     registry: &Arc<Mutex<ProcessRegistry>>,
     spec: &JobSpec,
     program: &str,
-    #[cfg(windows)] runtime_env: Option<&[(String, String)]>,
-    #[cfg(not(windows))] _runtime_env: Option<&[(String, String)]>,
+    runtime_env: Option<&[(String, String)]>,
 ) -> Result<LaunchedProcess, JobError> {
     let mut launch_spec = build_job_launch_spec(spec, program, runtime_env);
     if let Some(workspace_id) = spec.workspace_id() {
@@ -792,6 +790,7 @@ fn build_job_launch_spec(
     launch_spec
 }
 
+#[cfg(windows)]
 fn apply_command_environment(command: &mut Command, env: &[(String, String)]) {
     for (key, value) in env {
         command.env(key, value);

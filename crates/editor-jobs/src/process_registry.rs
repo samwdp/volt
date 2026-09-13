@@ -848,11 +848,11 @@ pub fn owned_process_pid_alive(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        use rustix::process::{Pid, Signal, kill_process};
+        use rustix::process::{Pid, test_kill_process};
         let Some(pid) = Pid::from_raw(pid as i32) else {
             return false;
         };
-        kill_process(pid, Signal::EXISTS).is_ok()
+        test_kill_process(pid).is_ok()
     }
 }
 
