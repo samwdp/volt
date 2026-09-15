@@ -1,12 +1,11 @@
 use std::{
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Mutex, OnceLock},
 };
 
-use editor_plugin_api::list_repository_files;
 use editor_plugin_api::{
     PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
-    PluginAction, PluginCommand, PluginPackage,
+    PickerWorkspaceFileContext, PluginAction, PluginCommand, PluginPackage,
 };
 use editor_plugin_api::{
     ProjectCandidate, ProjectKind, ProjectSearchRoot, project_discovery_for_picker,
@@ -349,6 +348,14 @@ fn workspace_delete_picker_items(context: &PickerProviderContext) -> Vec<PickerI
 }
 
 fn workspace_file_picker_items(context: &PickerProviderContext) -> Vec<PickerItemSpec> {
+    if !context.workspace_files.is_empty() {
+        return context
+            .workspace_files
+            .iter()
+            .map(workspace_file_context_item)
+            .collect();
+    }
+
     let Some(root) = context.workspace_root.as_ref().into_option() else {
         return vec![message_item(
             "Workspace has no project root",
@@ -356,39 +363,34 @@ fn workspace_file_picker_items(context: &PickerProviderContext) -> Vec<PickerIte
             "workspace.list-files works from a project workspace created by workspace.new.",
         )];
     };
-    let root = PathBuf::from(root.as_str());
-    let files = match list_repository_files(&root) {
-        Ok(files) => files,
-        Err(error) => {
-            return vec![message_item(
-                "Unable to read workspace files",
-                error.to_string(),
-                root.display().to_string(),
-            )];
-        }
-    };
-    if files.is_empty() {
-        return vec![message_item(
-            "No visible files found",
-            "Git did not report any tracked or unignored files for this workspace.",
-            root.display().to_string(),
-        )];
+    vec![message_item(
+        "No visible files found",
+        "Git did not report any tracked or unignored files for this workspace.",
+        root.as_str(),
+    )]
+}
+
+fn workspace_file_context_item(file: &PickerWorkspaceFileContext) -> PickerItemSpec {
+    if file.path.is_empty() {
+        return message_item(
+            file.label.as_str(),
+            file.detail.as_str(),
+            file.detail.as_str(),
+        );
     }
-    files
-        .into_iter()
-        .map(|relative_path| {
-            let path = root.join(&relative_path);
-            let search_text = relative_path.display().to_string();
-            PickerItemSpec::new(
-                path.display().to_string(),
-                search_text.clone(),
-                "",
-                PickerActionSpec::open_file(path.display().to_string()),
-            )
-            .with_search_text(search_text)
-            .with_fringe(editor_plugin_api::seti_file_icon(&path))
-        })
-        .collect()
+    let mut item = PickerItemSpec::new(
+        file.path.as_str(),
+        file.label.as_str(),
+        file.detail.as_str(),
+        PickerActionSpec::open_file(file.path.as_str()),
+    );
+    if !file.search_text.is_empty() {
+        item = item.with_search_text(file.search_text.as_str());
+    }
+    if !file.fringe.is_empty() {
+        item = item.with_fringe(file.fringe.as_str());
+    }
+    item
 }
 
 fn message_item(
@@ -428,6 +430,7 @@ mod tests {
     use abi_stable::std_types::ROption;
     use editor_plugin_api::{
         PickerActionSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
+        PickerWorkspaceFileContext,
     };
     use editor_plugin_api::{
         ProjectSearchRoot, project_discovery_snapshot, reset_project_discovery_cache,
@@ -436,8 +439,7 @@ mod tests {
     };
     use std::{
         fs,
-        path::{Path, PathBuf},
-        process::Command,
+        path::PathBuf,
         sync::{Mutex, MutexGuard},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -706,19 +708,6 @@ mod tests {
         Ok(())
     }
 
-    fn git_available() -> bool {
-        Command::new("git").arg("--version").output().is_ok()
-    }
-
-    fn run_git(root: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-        let status = Command::new("git").args(args).current_dir(root).status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("git {:?} failed with status {status}", args).into())
-        }
-    }
-
     #[test]
     fn workspace_file_picker_items_report_no_project_root() {
         let context = PickerProviderContext::new(
@@ -733,28 +722,43 @@ mod tests {
     }
 
     #[test]
-    fn workspace_file_picker_items_list_paths_without_previews()
-    -> Result<(), Box<dyn std::error::Error>> {
-        if !git_available() {
-            return Ok(());
-        }
-
-        let root = temp_dir("files-lazy-preview");
-        let nested = root.join("src").join("deep");
-        fs::create_dir_all(&nested)?;
-        fs::write(root.join(".gitignore"), "ignored.txt\n")?;
-        fs::write(nested.join("nested.rs"), "fn nested() {}\n")?;
-        fs::write(root.join("ignored.txt"), "ignored\n")?;
-        fs::write(root.join("notes.txt"), "notes\n")?;
-        run_git(&root, &["init", "-q"])?;
-        run_git(&root, &["add", ".gitignore", "src/deep/nested.rs"])?;
-
+    fn workspace_file_picker_items_report_empty_list_when_root_set() {
         let mut context = PickerProviderContext::new(
             "workspace.files",
             "Workspace Files",
             PickerSource::WorkspaceFiles,
         );
-        context.workspace_root = ROption::RSome(root.display().to_string().into());
+        context.workspace_root = ROption::RSome("P:/example".into());
+        let items = picker_items(&context).expect("file picker items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label(), "No visible files found");
+    }
+
+    #[test]
+    fn workspace_file_picker_items_map_host_supplied_rows() {
+        let mut context = PickerProviderContext::new(
+            "workspace.files",
+            "Workspace Files",
+            PickerSource::WorkspaceFiles,
+        );
+        context.workspace_root = ROption::RSome("P:/repo".into());
+        context.workspace_files = vec![
+            PickerWorkspaceFileContext {
+                path: "P:/repo/src/deep/nested.rs".into(),
+                label: "src/deep/nested.rs".into(),
+                detail: "".into(),
+                search_text: "src/deep/nested.rs".into(),
+                fringe: "".into(),
+            },
+            PickerWorkspaceFileContext {
+                path: "P:/repo/notes.txt".into(),
+                label: "notes.txt".into(),
+                detail: "".into(),
+                search_text: "notes.txt".into(),
+                fringe: "".into(),
+            },
+        ]
+        .into();
         let items = picker_items(&context).expect("file picker items");
 
         assert!(
@@ -765,13 +769,32 @@ mod tests {
             item.label() == "src/deep/nested.rs"
                 && item.search_text() == Some("src/deep/nested.rs")
                 && item.detail().is_empty()
-                && item.fringe()
-                    == Some(editor_plugin_api::seti_file_icon(&nested.join("nested.rs")))
+                && item.fringe() == Some("")
+                && item.action() == &PickerActionSpec::open_file("P:/repo/src/deep/nested.rs")
         }));
         assert!(items.iter().any(|item| item.label() == "notes.txt"));
-        assert!(items.iter().all(|item| item.label() != "ignored.txt"));
+    }
 
-        fs::remove_dir_all(root)?;
-        Ok(())
+    #[test]
+    fn workspace_file_picker_items_map_host_list_error() {
+        let mut context = PickerProviderContext::new(
+            "workspace.files",
+            "Workspace Files",
+            PickerSource::WorkspaceFiles,
+        );
+        context.workspace_root = ROption::RSome("P:/repo".into());
+        context.workspace_files = vec![PickerWorkspaceFileContext {
+            path: "".into(),
+            label: "Unable to read workspace files".into(),
+            detail: "git failed".into(),
+            search_text: "".into(),
+            fringe: "".into(),
+        }]
+        .into();
+        let items = picker_items(&context).expect("file picker items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label(), "Unable to read workspace files");
+        assert_eq!(items[0].detail(), "git failed");
+        assert_eq!(items[0].action(), &PickerActionSpec::no_op());
     }
 }

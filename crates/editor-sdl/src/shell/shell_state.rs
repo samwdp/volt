@@ -375,6 +375,9 @@ impl ShellState {
         if let Some(due_at) = ui.autocomplete_worker.next_due_at() {
             deadlines.push(due_at);
         }
+        if let Some(due_at) = ui.completion_resolve_worker.next_due_at() {
+            deadlines.push(due_at);
+        }
         if let Some(due_at) = ui.inline_completion_worker.next_due_at() {
             deadlines.push(due_at);
         }

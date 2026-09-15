@@ -174,32 +174,37 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
         let ui = shell_ui(runtime)?;
         ui.autocomplete()
             .filter(|autocomplete| autocomplete.is_visible())
-            .and_then(|autocomplete| autocomplete.selected().cloned())
+            .and_then(|autocomplete| {
+                autocomplete.selected().map(|entry| {
+                    (
+                        entry.replacement.clone(),
+                        entry.replace_range,
+                        autocomplete.query.clone(),
+                    )
+                })
+            })
     };
-    let Some(selected) = selected else {
+    let Some((replacement, selected_range, query)) = selected else {
         return Ok(());
     };
 
     let buffer_id = active_shell_buffer_id(runtime)?;
     let ui = shell_ui_mut(runtime)?;
+    ui.close_autocomplete();
     let Some(buffer) = ui.buffer_mut(buffer_id) else {
-        ui.close_autocomplete();
         return Ok(());
     };
     if buffer.is_read_only() || buffer.has_input_field() {
-        ui.close_autocomplete();
         return Ok(());
     }
     let snapshot = buffer.text.snapshot();
-    let Some(query) = autocomplete_query(&snapshot, true) else {
-        ui.close_autocomplete();
-        return Ok(());
-    };
-    let replace_range = selected.replace_range.unwrap_or(query.replace_range);
-    let replacement =
-        normalize_completion_replacement(&snapshot, replace_range, &selected.replacement);
+    let replace_range = selected_range.unwrap_or_else(|| {
+        autocomplete_query(&snapshot, true)
+            .map(|live| live.replace_range)
+            .unwrap_or(query.replace_range)
+    });
+    let replacement = normalize_completion_replacement(&snapshot, replace_range, &replacement);
     buffer.replace_range(replace_range, &replacement);
     buffer.mark_syntax_dirty();
-    ui.close_autocomplete();
     Ok(())
 }

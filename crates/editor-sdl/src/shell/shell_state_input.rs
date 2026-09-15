@@ -582,7 +582,17 @@ impl ShellState {
                         request.query.clone(),
                     ));
                 } else if let Some(autocomplete) = ui.autocomplete_mut() {
-                    autocomplete.mark_loading(request.buffer_revision, request.query.clone());
+                    if autocomplete.is_visible()
+                        && request
+                            .query
+                            .prefix
+                            .to_ascii_lowercase()
+                            .starts_with(&autocomplete.query.prefix.to_ascii_lowercase())
+                    {
+                        autocomplete.narrow_to_query(request.buffer_revision, request.query.clone());
+                    } else {
+                        autocomplete.mark_loading(request.buffer_revision, request.query.clone());
+                    }
                 }
                 ui.autocomplete_worker.schedule(request);
             }
@@ -782,6 +792,8 @@ impl ShellState {
     }
 
     fn refresh_pending_completion_resolve(&mut self) -> Result<bool, ShellError> {
+        let now = Instant::now();
+        self.ui_mut()?.completion_resolve_worker.dispatch_due(now);
         let mut changed = false;
         if let Some(result) = self.ui()?.completion_resolve_worker.take_latest_result() {
             let applied = {
@@ -802,7 +814,6 @@ impl ShellState {
             if applied {
                 changed = true;
             }
-            self.ui_mut()?.completion_resolve_worker.clear_pending();
         }
 
         let schedule = {
@@ -816,6 +827,13 @@ impl ShellState {
             let Some(entry) = autocomplete.selected() else {
                 return Ok(changed);
             };
+            if entry
+                .documentation
+                .as_deref()
+                .is_some_and(|documentation| !documentation.trim().is_empty())
+            {
+                return Ok(changed);
+            }
             let Some(resolve) = entry.resolve.as_ref() else {
                 return Ok(changed);
             };

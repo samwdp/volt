@@ -15,7 +15,7 @@ use std::{
 use editor_buffer::{TextPoint, TextRange};
 use editor_jobs::{
     OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio, ProcessRegistry, ProcessSupervisionMode,
-    WorkspaceId, language_server_share_key,
+    WorkspaceId, enrich_env_with_node_manager, language_server_share_key, resolve_command_path,
 };
 pub use editor_plugin_api::LspCompletionKind;
 use lsp_types::{
@@ -220,6 +220,16 @@ impl LspCompletionItem {
 
     pub fn resolve_payload(&self) -> Option<LspCompletionResolvePayload> {
         if !self.needs_resolve() {
+            return None;
+        }
+        self.list_resolve_payload()
+    }
+
+    /// Payload for `completionItem/resolve` even when the complete list already
+    /// included documentation. Autocomplete list rows omit that markdown, so the
+    /// selected row still needs a resolve handle.
+    pub fn list_resolve_payload(&self) -> Option<LspCompletionResolvePayload> {
+        if !self.raw_item.is_object() {
             return None;
         }
         Some(LspCompletionResolvePayload {
@@ -1304,24 +1314,31 @@ pub(crate) fn launch_lsp_owned_process(
     request: LspLaunchRequest<'_>,
 ) -> Result<(OwnedProcessId, ChildStdin, ChildStdout, u32), String> {
     let share_key = language_server_share_key(request.server_id, request.root);
+    let mut base_env = request.env.to_vec();
+    editor_tool_install::merge_effective_path(&mut base_env);
+    // Node-based servers and npm shims need fnm/nvm on GUI hosts without a shell PATH.
+    let base_env = enrich_env_with_node_manager(request.cwd, base_env);
+    let resolved_program = resolve_command_path(request.program, &base_env, None)
+        .unwrap_or_else(|| request.program.to_owned());
+
     let mut attempts = Vec::new();
-    attempts.push((request.program.to_owned(), request.env.to_vec()));
+    attempts.push((resolved_program, base_env.clone()));
 
     #[cfg(windows)]
     {
         for candidate in windows_launch_program_candidates(request.program) {
-            attempts.push((candidate, request.env.to_vec()));
+            attempts.push((candidate, base_env.clone()));
         }
-        if let Some(fnm_env) = windows_fnm_environment(request.cwd, request.env) {
+        if let Some(fnm_env) = windows_fnm_environment(request.cwd, &base_env) {
             for candidate in windows_fnm_launch_program_candidates(request.program, &fnm_env) {
-                let mut merged = request.env.to_vec();
+                let mut merged = base_env.clone();
                 merged.extend(fnm_env.iter().cloned());
                 attempts.push((candidate, merged));
             }
         }
-        if let Some(nvm_env) = windows_nvm_environment(request.cwd, request.env) {
+        if let Some(nvm_env) = windows_nvm_environment(request.cwd, &base_env) {
             for candidate in windows_nvm_launch_program_candidates(request.program, &nvm_env) {
-                let mut merged = request.env.to_vec();
+                let mut merged = base_env.clone();
                 merged.extend(nvm_env.iter().cloned());
                 attempts.push((candidate, merged));
             }
@@ -3456,8 +3473,25 @@ pub(crate) fn parse_completion_item(server_id: &str, value: &Value) -> Option<Ls
             detail,
             documentation,
         )
-        .with_raw_item(value.clone(), has_documentation),
+        .with_raw_item(
+            completion_item_value_without_documentation(value),
+            has_documentation,
+        ),
     )
+}
+
+pub(crate) fn completion_item_value_without_documentation(value: &Value) -> Value {
+    let Some(map) = value.as_object() else {
+        return value.clone();
+    };
+    let mut slim = serde_json::Map::with_capacity(map.len());
+    for (key, nested) in map {
+        if key == "documentation" {
+            continue;
+        }
+        slim.insert(key.clone(), nested.clone());
+    }
+    Value::Object(slim)
 }
 
 pub(crate) fn completion_documentation(value: &Value) -> Option<String> {

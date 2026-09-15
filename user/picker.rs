@@ -41,10 +41,10 @@ pub fn truncate_strategy() -> PickerTruncateStrategy {
 }
 
 /// Fraction of the window width occupied by the picker card.
-pub const WIDTH_FRACTION: f32 = 0.52;
+pub const WIDTH_FRACTION: f32 = 0.8;
 
 /// Fraction of the window height occupied by the picker card.
-pub const HEIGHT_FRACTION: f32 = 0.48;
+pub const HEIGHT_FRACTION: f32 = 0.8;
 
 /// Returns the picker card size as window fractions.
 pub fn layout() -> editor_plugin_api::PickerLayout {

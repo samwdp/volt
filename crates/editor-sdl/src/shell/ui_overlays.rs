@@ -1,5 +1,11 @@
 use super::*;
 
+pub(super) fn defer_heavy_drop<T: Send + 'static>(value: T) {
+    let _ = std::thread::Builder::new()
+        .name("volt-drop-autocomplete".to_owned())
+        .spawn(move || drop(value));
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct AutocompleteProviderSpec {
     pub(super) id: String,
@@ -105,22 +111,57 @@ impl AutocompleteOverlay {
     }
 
     pub(super) fn is_visible(&self) -> bool {
-        !self.loading && !self.entries.is_empty()
+        // Keep the previous list painted while a refresh is in flight so insert
+        // typing does not blink the popup off for the debounce + LSP wait.
+        !self.entries.is_empty()
     }
 
     pub(super) fn mark_loading(&mut self, buffer_revision: u64, query: AutocompleteQuery) {
         self.buffer_revision = buffer_revision;
         self.query = query;
-        self.loading = true;
+        self.loading = self.entries.is_empty();
         self.docs_focused = false;
         self.docs_scroll_offset = 0;
+    }
+
+    /// Keep the popup responsive while a worker refresh is in flight by filtering
+    /// already-loaded rows to a longer prefix (typing forward).
+    pub(super) fn narrow_to_query(&mut self, buffer_revision: u64, query: AutocompleteQuery) {
+        let previous_prefix = self.query.prefix.to_ascii_lowercase();
+        let next_prefix = query.prefix.to_ascii_lowercase();
+        self.buffer_revision = buffer_revision;
+        self.query = query;
+        self.loading = false;
+        self.docs_focused = false;
+        self.docs_scroll_offset = 0;
+        if next_prefix.is_empty() || !next_prefix.starts_with(&previous_prefix) {
+            return;
+        }
+        if next_prefix == previous_prefix {
+            return;
+        }
+        self.entries.retain(|entry| {
+            entry.label.to_ascii_lowercase().starts_with(&next_prefix)
+                || entry
+                    .replacement
+                    .to_ascii_lowercase()
+                    .starts_with(&next_prefix)
+        });
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+        } else {
+            self.selected_index = self.selected_index.min(self.entries.len() - 1);
+        }
     }
 
     pub(super) fn set_entries(&mut self, entries: Vec<AutocompleteEntry>) {
         let previous = self
             .selected()
             .map(|entry| (entry.provider_id.clone(), entry.replacement.clone()));
-        self.entries = entries;
+        let previous_entries = std::mem::replace(&mut self.entries, entries);
+        if !previous_entries.is_empty() {
+            defer_heavy_drop(previous_entries);
+        }
         self.loading = false;
         self.selected_index = previous
             .and_then(|(provider_id, replacement)| {
@@ -193,15 +234,25 @@ impl AutocompleteOverlay {
         replacement: &str,
         documentation: Option<String>,
     ) -> bool {
-        let Some(entry) = self
+        let mut applied = false;
+        for entry in &mut self.entries {
+            if entry.provider_id == provider_id && entry.replacement == replacement {
+                applied = true;
+            } else {
+                entry.documentation = None;
+            }
+        }
+        if !applied {
+            return false;
+        }
+        if let Some(entry) = self
             .entries
             .iter_mut()
             .find(|entry| entry.provider_id == provider_id && entry.replacement == replacement)
-        else {
-            return false;
-        };
-        entry.documentation = documentation;
-        entry.resolve = None;
+        {
+            entry.documentation = documentation;
+            entry.resolve = None;
+        }
         true
     }
 }

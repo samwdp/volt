@@ -12,6 +12,7 @@ use super::{
     ProcessSupervisionMode, ShareKey, WorkspaceId, language_server_share_key,
     owned_process_pid_alive,
     process_registry::{discover_volt_supervisor_exe, synthetic_sleep_command},
+    run_captured_shared,
 };
 use std::path::Path;
 
@@ -89,8 +90,9 @@ fn descendant_tree_spec(
 }
 
 fn read_child_pid(path: &std::path::Path) -> u32 {
+    // PowerShell Start-Process + pid file can lag under suite load on Windows.
     assert!(
-        wait_until(Duration::from_secs(5), || path.is_file()),
+        wait_until(Duration::from_secs(20), || path.is_file()),
         "descendant should publish its pid file"
     );
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -134,6 +136,26 @@ fn process_image_name(pid: u32) -> String {
         let _ = pid;
         String::new()
     }
+}
+
+#[cfg(windows)]
+fn process_command_line(pid: u32) -> String {
+    use std::os::windows::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-CimInstance Win32_Process -Filter \"ProcessId = {pid}\").CommandLine"),
+        ])
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .expect("powershell command line");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 fn spawn_unmanaged_sleep() -> u32 {
@@ -212,6 +234,70 @@ fn process_launch_wraps_with_supervisor_when_volt_is_available() {
         );
     }
     must(registry.application_quit(Duration::from_millis(200)));
+}
+
+#[test]
+fn protocol_launch_resolves_bare_name_before_supervisor_wrap() {
+    let Some(supervisor) = discover_volt_supervisor_exe() else {
+        return;
+    };
+    let bin_dir = unique_temp_path("volt-protocol-resolve");
+    fs::create_dir_all(&bin_dir).expect("create bin dir");
+    #[cfg(windows)]
+    let (bare_name, shim_path) = {
+        let shim_path = bin_dir.join("acpshim.cmd");
+        fs::write(&shim_path, "@echo off\r\nping -n 61 127.0.0.1 >NUL\r\n").expect("write shim");
+        ("acpshim", shim_path)
+    };
+    #[cfg(unix)]
+    let (bare_name, shim_path) = {
+        use std::os::unix::fs::PermissionsExt as _;
+        let shim_path = bin_dir.join("acpshim");
+        fs::write(&shim_path, "#!/bin/sh\nexec sleep 60\n").expect("write shim");
+        let mut perms = fs::metadata(&shim_path).expect("meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&shim_path, perms).expect("chmod");
+        ("acpshim", shim_path)
+    };
+
+    let mut registry = ProcessRegistry::new();
+    let mut spec = ProcessLaunchSpec::new(bare_name, Vec::<String>::new())
+        .with_workspace(WorkspaceId::from_raw(21))
+        .with_stdio(ProcessLaunchStdio::Protocol)
+        .with_mode(ProcessSupervisionMode::Background)
+        .with_process_supervisor_exe(supervisor);
+    spec.env = vec![(
+        "PATH".to_owned(),
+        format!(
+            "{}{}{}",
+            bin_dir.display(),
+            if cfg!(windows) { ';' } else { ':' },
+            std::env::var("PATH").unwrap_or_default()
+        ),
+    )];
+    let launched = must(registry.launch(spec));
+    let pid = registry.root_pid(launched.id).expect("root pid");
+    #[cfg(windows)]
+    {
+        let command_line = process_command_line(pid).to_ascii_lowercase();
+        let expected = shim_path.to_string_lossy().to_ascii_lowercase();
+        assert!(
+            command_line.contains(&expected),
+            "supervisor must wrap resolved shim path, got `{command_line}` missing `{expected}`"
+        );
+        assert!(
+            !command_line.contains("-- acpshim ") && !command_line.ends_with("-- acpshim"),
+            "supervisor must not keep unresolved bare name, got `{command_line}`"
+        );
+    }
+    #[cfg(unix)]
+    {
+        let _ = (pid, &shim_path);
+        // Unix: resolved absolute path is validated by successful Protocol launch of the shim.
+        assert!(registry.is_alive(launched.id));
+    }
+    must(registry.application_quit(Duration::from_millis(200)));
+    let _ = fs::remove_dir_all(bin_dir);
 }
 
 #[test]
@@ -596,6 +682,63 @@ fn language_tooling_single_tagged_helper_dies_on_quit() {
     assert!(wait_until(Duration::from_secs(2), || {
         !owned_process_pid_alive(pid)
     }));
+}
+
+#[test]
+fn run_captured_shared_releases_lock_while_waiting() {
+    let registry = Arc::new(Mutex::new(ProcessRegistry::new()));
+    let gate = unique_temp_path("volt-capture-shared-gate");
+    let gate_display = gate.display().to_string();
+    #[cfg(windows)]
+    let (program, args) = (
+        "cmd".to_owned(),
+        vec![
+            "/C".to_owned(),
+            format!(
+                ":loop & if exist \"{gate_display}\" (exit /B 0) else (ping -n 1 127.0.0.1 >nul & goto loop)"
+            ),
+        ],
+    );
+    #[cfg(unix)]
+    let (program, args) = (
+        "sh".to_owned(),
+        vec![
+            "-c".to_owned(),
+            format!("while [ ! -f '{gate_display}' ]; do sleep 0.05; done"),
+        ],
+    );
+    let long_spec = ProcessLaunchSpec::new(program, args).with_stdio(ProcessLaunchStdio::Piped);
+    let registry_for_wait = Arc::clone(&registry);
+    let waiter = thread::spawn(move || must(run_captured_shared(&registry_for_wait, long_spec)));
+
+    assert!(wait_until(Duration::from_secs(2), || {
+        registry.lock().expect("registry").alive_count() >= 1
+    }));
+
+    let lock_started = Instant::now();
+    {
+        let mut guard = registry.lock().expect("registry");
+        assert!(
+            lock_started.elapsed() < Duration::from_millis(50),
+            "shared run_captured must not hold registry lock for the whole child wait"
+        );
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd".to_owned(),
+            vec!["/C".to_owned(), "echo nested-ok".to_owned()],
+        );
+        #[cfg(unix)]
+        let (program, args) = ("printf".to_owned(), vec!["nested-ok".to_owned()]);
+        let output = must(guard.run_captured(
+            ProcessLaunchSpec::new(program, args).with_stdio(ProcessLaunchStdio::Piped),
+        ));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("nested-ok"));
+    }
+
+    fs::write(&gate, b"done").expect("write gate");
+    let output = waiter.join().expect("waiter thread");
+    assert_eq!(output.exit_code, Some(0));
+    let _ = fs::remove_file(&gate);
 }
 
 #[test]

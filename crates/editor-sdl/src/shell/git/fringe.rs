@@ -197,7 +197,13 @@ pub(crate) fn refresh_pending_git_summary(
 ) -> Result<(), String> {
     if shell_ui(runtime)?.take_git_summary_changed() {
         mark_git_fringe_snapshots_stale(runtime)?;
-        if let Ok(root) = git_root(runtime) {
+        // Prefer the workspace root when deferring UI git probes so a long
+        // `git diff` behind ProcessRegistry cannot stall the input frame.
+        if !typing_active {
+            if let Ok(root) = git_root(runtime) {
+                invalidate_repository_file_list_cache_for(&root);
+            }
+        } else if let Ok(Some(root)) = active_workspace_root(runtime) {
             invalidate_repository_file_list_cache_for(&root);
         }
     }

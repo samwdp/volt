@@ -301,6 +301,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     );
                     if buffer_text_edited {
                         state.note_text_edit_activity();
+                    } else if matches!(profiled_event, Some(TypingEventMetadata::KeyDown)) {
+                        // Vim motions are KeyDown-only. Reuse the typing refresh budget so
+                        // headerline/git secondary work does not stall every normal-mode move.
+                        state.note_text_edit_activity();
                     }
                     if buffer_text_edited
                         || matches!(profiled_event, Some(TypingEventMetadata::TextInput { .. }))
@@ -389,17 +393,18 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 let refresh_now = Instant::now();
                 let secondary_refresh_deferred =
                     state.secondary_refresh_deferred_for_typing(refresh_now);
+                // Workspace first paint must not wait on picker/query typing idle (750ms).
+                // Git refresh and discovery stay behind the typing budget.
+                if let Err(error) = refresh_pending_workspace_readme_opens(&mut state.runtime) {
+                    state.record_shell_error(
+                        "shell.workspace-readme-open",
+                        ShellError::Runtime(error),
+                    );
+                }
+                if let Err(error) = refresh_pending_syntax_prewarm(&mut state.runtime) {
+                    state.record_shell_error("shell.syntax-prewarm", ShellError::Runtime(error));
+                }
                 if !secondary_refresh_deferred {
-                    if let Err(error) = refresh_pending_syntax_prewarm(&mut state.runtime) {
-                        state
-                            .record_shell_error("shell.syntax-prewarm", ShellError::Runtime(error));
-                    }
-                    if let Err(error) = refresh_pending_workspace_readme_opens(&mut state.runtime) {
-                        state.record_shell_error(
-                            "shell.workspace-readme-open",
-                            ShellError::Runtime(error),
-                        );
-                    }
                     state.tick_project_discovery_background();
                 }
                 let typing_refresh_budget_active = state.typing_refresh_budget_active(refresh_now);

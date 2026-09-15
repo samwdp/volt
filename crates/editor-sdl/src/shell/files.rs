@@ -142,7 +142,19 @@ fn open_workspace_file(runtime: &mut EditorRuntime, path: &Path) -> Result<Buffe
         .buffer(buffer_id)
         .ok_or_else(|| format!("new file buffer `{buffer_id}` is missing"))?;
     let user_library = shell_user_library(runtime);
-    let shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+    let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+    if let Some(language_id) = runtime
+        .services()
+        .get::<SyntaxRegistry>()
+        .and_then(|registry| {
+            registry
+                .language_for_path(path)
+                .map(|language| language.id().to_owned())
+        })
+    {
+        // Seed language before the syntax worker returns so Pretty markdown can paint early.
+        shell_buffer.set_language_id(Some(language_id));
+    }
 
     {
         let ui = shell_ui_mut(runtime)?;

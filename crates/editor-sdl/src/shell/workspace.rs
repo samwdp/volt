@@ -779,10 +779,9 @@ pub(crate) fn open_workspace_from_project(
     prepare_workspace_enter_for_debug_layout(runtime)?;
 
     invalidate_repository_file_list_cache_for(root);
+    // Queue only: run_loop drains one prewarm per frame so open stays interactive.
+    // First paint of a cold language may be uncolored until the worker finishes.
     queue_workspace_syntax_prewarm(runtime, root);
-    // Queue prewarm immediately so the shared worker starts loading grammars. Do not
-    // wait: first paint of a cold language may be uncolored until the worker finishes.
-    while refresh_pending_syntax_prewarm(runtime).unwrap_or(false) {}
 
     if let Some(readme_path) = initial_readme_path {
         queue_workspace_readme_open(runtime, readme_path);
@@ -896,41 +895,82 @@ fn refresh_pending_syntax_prewarm(runtime: &mut EditorRuntime) -> Result<bool, S
 }
 
 fn prewarm_workspace_syntax_languages(runtime: &mut EditorRuntime, root: &Path) {
-    let language_ids = {
+    let (configs, install_root) = {
         let Some(registry) = runtime.services().get::<SyntaxRegistry>() else {
             return;
         };
-        let candidates = if let Ok(files) = list_repository_files(root) {
-            collect_workspace_language_ids(registry, root, &files)
-        } else if let Ok(Some(readme_path)) = workspace_root_readme_path(root) {
-            let mut language_ids = BTreeSet::new();
-            if let Some(language_id) = registry
-                .language_for_path(&readme_path)
-                .map(|language| language.id().to_owned())
-            {
-                language_ids.insert(language_id);
-            }
-            language_ids
-        } else {
-            BTreeSet::new()
-        };
-        let mut preloadable = Vec::new();
-        for language_id in candidates {
-            match registry.is_installed(&language_id) {
-                Ok(true) => preloadable.push(language_id),
-                Ok(false) => {}
-                Err(error) => eprintln!("tree-sitter prewarm skipped `{language_id}`: {error}"),
-            }
-        }
-        preloadable
+        (
+            registry.languages().cloned().collect::<Vec<_>>(),
+            registry.install_root().to_path_buf(),
+        )
     };
-    if language_ids.is_empty() {
-        return;
-    }
-    // Shared highlight worker loads grammars in the background. UI stays interactive.
-    if let Ok(ui) = shell_ui_mut(runtime) {
-        ui.syntax_refresh_worker.preload_languages(language_ids);
-    }
+    let request_tx = {
+        let Ok(ui) = shell_ui_mut(runtime) else {
+            return;
+        };
+        if !ui.syntax_refresh_worker.ensure_worker_for_prewarm() {
+            return;
+        }
+        let Some(request_tx) = ui.syntax_refresh_worker.request_tx_clone() else {
+            return;
+        };
+        request_tx
+    };
+    let root = root.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("volt-syntax-prewarm-scan".to_owned())
+        .spawn(move || {
+            let mut probe = SyntaxRegistry::with_install_root(&install_root);
+            for config in configs {
+                if let Err(error) = probe.register(config) {
+                    eprintln!("tree-sitter prewarm register failed: {error}");
+                }
+            }
+            let candidates = if let Ok(files) = list_repository_files(&root) {
+                collect_workspace_language_ids(&probe, &root, &files)
+            } else if let Ok(Some(readme_path)) = workspace_root_readme_path(&root) {
+                let mut language_ids = BTreeSet::new();
+                if let Some(language_id) = probe
+                    .language_for_path(&readme_path)
+                    .map(|language| language.id().to_owned())
+                {
+                    language_ids.insert(language_id);
+                }
+                language_ids
+            } else {
+                BTreeSet::new()
+            };
+            let mut preloadable = Vec::new();
+            for language_id in candidates {
+                match probe.is_installed(&language_id) {
+                    Ok(true) => preloadable.push(language_id),
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("tree-sitter prewarm skipped `{language_id}`: {error}");
+                    }
+                }
+            }
+            for language_id in ["markdown", "markdown-inline"] {
+                if preloadable.iter().any(|id| id == language_id) {
+                    continue;
+                }
+                match probe.is_installed(language_id) {
+                    Ok(true) => preloadable.push(language_id.to_owned()),
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("tree-sitter prewarm skipped `{language_id}`: {error}");
+                    }
+                }
+            }
+            if preloadable.is_empty() {
+                return;
+            }
+            let message = SyntaxWorkerMessage::PreloadBatch {
+                language_ids: prioritize_syntax_preload_languages(preloadable),
+                done: None,
+            };
+            let _ = request_tx.send(message);
+        });
 }
 
 fn picker_preview_syntax_lines(

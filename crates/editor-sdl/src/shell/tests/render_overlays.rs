@@ -1106,6 +1106,33 @@ fn autocomplete_docs_panel_width_tracks_content_and_clamps_to_pane() {
 }
 
 #[test]
+fn autocomplete_docs_wrap_caps_huge_lsp_documentation() {
+    let entry = AutocompleteEntry {
+        provider_id: "lsp".to_owned(),
+        provider_label: "LSP".to_owned(),
+        provider_icon: "L".to_owned(),
+        item_icon: "ƒ".to_owned(),
+        label: "foo".to_owned(),
+        replacement: "foo".to_owned(),
+        replace_range: None,
+        detail: Some("fn foo()".to_owned()),
+        documentation: Some(
+            (0..5_000)
+                .map(|i| format!("docs line {i} with extra padding text"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        resolve: None,
+    };
+    let lines = autocomplete_docs_lines(Some(&entry), "fo", 40, "T");
+    assert!(
+        lines.len() <= AUTOCOMPLETE_DOCS_MAX_WRAP_LINES,
+        "docs wrap must stay bounded for UI-thread selection/render"
+    );
+    let _ = autocomplete_docs_panel_width(Some(&entry), "fo", 176, 4000, 8, "T");
+}
+
+#[test]
 fn autocomplete_docs_focus_and_scroll_update_overlay_state() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     install_text_test_buffer(&mut state, "*ac-docs*", vec!["alpha".to_owned()])?;

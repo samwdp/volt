@@ -1902,13 +1902,18 @@ impl ShellUiState {
         self.close_hover();
         self.autocomplete_worker.clear_pending();
         self.completion_resolve_worker.clear_pending();
+        if let Some(previous) = self.autocomplete.take() {
+            defer_heavy_drop(previous);
+        }
         self.autocomplete = Some(autocomplete);
     }
 
     fn close_autocomplete(&mut self) {
         self.autocomplete_worker.clear_pending();
         self.completion_resolve_worker.clear_pending();
-        self.autocomplete = None;
+        if let Some(previous) = self.autocomplete.take() {
+            defer_heavy_drop(previous);
+        }
     }
 
     fn hover(&self) -> Option<&HoverOverlay> {

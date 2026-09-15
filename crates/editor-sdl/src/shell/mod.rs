@@ -147,8 +147,9 @@ use editor_plugin_api::{
     PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
     PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
     PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext, PickerWorkspaceContext,
-    PluginBufferLayout, PluginBufferLayoutAxis, PluginBufferLayoutNode, PluginBufferSectionUpdate,
-    PluginBufferSections, StatuslineSpan, VimEditAction, WorkspaceDockSide,
+    PickerWorkspaceFileContext, PluginBufferLayout, PluginBufferLayoutAxis, PluginBufferLayoutNode,
+    PluginBufferSectionUpdate, PluginBufferSections, StatuslineSpan, VimEditAction,
+    WorkspaceDockSide,
     abi::{
         AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
         UserLibraryModuleRef,

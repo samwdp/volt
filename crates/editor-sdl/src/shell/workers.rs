@@ -578,20 +578,8 @@ impl SyntaxRefreshWorkerState {
                             }
                         }
                     }
-                    // Finish queued preloads before refresh so a cold language still
-                    // loads on the worker, not the UI thread. Callers do not wait.
-                    for (language_ids, done) in preload_batches {
-                        for language_id in language_ids {
-                            if let Err(error) = registry.preload_language(&language_id) {
-                                eprintln!(
-                                    "tree-sitter worker prewarm failed for `{language_id}`: {error}"
-                                );
-                            }
-                        }
-                        if let Some(done) = done {
-                            let _ = done.send(());
-                        }
-                    }
+                    // Visible buffer refreshes first. Speculative workspace preloads follow so
+                    // README/markdown coloring is not stuck behind every grammar DLL load.
                     for request in refreshes.into_values() {
                         let result = process_syntax_refresh_request(
                             &mut registry,
@@ -603,6 +591,19 @@ impl SyntaxRefreshWorkerState {
                             ping_shell_wakeup();
                         } else {
                             return;
+                        }
+                    }
+                    for (language_ids, done) in preload_batches {
+                        let language_ids = prioritize_syntax_preload_languages(language_ids);
+                        for (language_id, error) in
+                            registry.preload_languages_parallel(language_ids)
+                        {
+                            eprintln!(
+                                "tree-sitter worker prewarm failed for `{language_id}`: {error}"
+                            );
+                        }
+                        if let Some(done) = done {
+                            let _ = done.send(());
                         }
                     }
                 }
@@ -621,6 +622,14 @@ impl SyntaxRefreshWorkerState {
 
     fn is_configured(&self) -> bool {
         self.install_root.is_some()
+    }
+
+    fn ensure_worker_for_prewarm(&mut self) -> bool {
+        self.ensure_worker()
+    }
+
+    fn request_tx_clone(&self) -> Option<Sender<SyntaxWorkerMessage>> {
+        self.request_tx.clone()
     }
 
     #[cfg(test)]
@@ -644,7 +653,10 @@ impl SyntaxRefreshWorkerState {
         if !self.ensure_worker() {
             return false;
         }
-        let message = SyntaxWorkerMessage::PreloadBatch { language_ids, done };
+        let message = SyntaxWorkerMessage::PreloadBatch {
+            language_ids: prioritize_syntax_preload_languages(language_ids),
+            done,
+        };
         let sent = self
             .request_tx
             .as_ref()
@@ -745,5 +757,24 @@ fn process_syntax_refresh_request(
         compute_elapsed: started.elapsed(),
         highlight_span_count,
         syntax_result,
+    }
+}
+
+/// Markdown first: README / Pretty path must not wait behind unrelated grammars.
+fn prioritize_syntax_preload_languages(language_ids: Vec<String>) -> Vec<String> {
+    let mut language_ids = language_ids;
+    language_ids.sort_by(|left, right| {
+        syntax_preload_priority(left)
+            .cmp(&syntax_preload_priority(right))
+            .then_with(|| left.cmp(right))
+    });
+    language_ids
+}
+
+fn syntax_preload_priority(language_id: &str) -> u8 {
+    match language_id {
+        "markdown" => 0,
+        "markdown-inline" => 1,
+        _ => 2,
     }
 }

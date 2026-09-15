@@ -156,6 +156,18 @@ fn preload_language_loads_static_language_without_parsing() {
 }
 
 #[test]
+fn preload_languages_parallel_loads_multiple_static_languages() {
+    let mut registry = SyntaxRegistry::new();
+    must(registry.register(rust_configuration()));
+    must(registry.register(cmake_configuration()));
+
+    let errors = registry.preload_languages_parallel(["rust", "cmake", "rust"]);
+    assert!(errors.is_empty(), "unexpected preload errors: {errors:?}");
+    assert!(registry.is_loaded("rust"));
+    assert!(registry.is_loaded("cmake"));
+}
+
+#[test]
 fn registry_prefers_exact_filenames_and_globs_over_extensions() {
     let mut registry = SyntaxRegistry::new();
     must(registry.register(LanguageConfiguration::new(

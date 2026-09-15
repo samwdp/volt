@@ -651,7 +651,10 @@ fn autocomplete_trigger_updates_and_accepts_buffer_tokens() -> Result<(), Box<dy
     assert_eq!(state.autocomplete_selected()?, Some("alpha".to_owned()));
 
     state.handle_text_input("h")?;
-    assert!(!state.autocomplete_visible()?);
+    assert!(
+        state.autocomplete_visible()?,
+        "refresh must keep prior autocomplete entries visible"
+    );
     state.wait_for_autocomplete_results()?;
     assert!(state.autocomplete_visible()?);
     assert_eq!(
@@ -1711,15 +1714,17 @@ fn workspace_open_prewarms_installed_tree_sitter_languages()
     assert!(!registry.is_loaded("rust"));
 
     open_workspace_from_project(&mut state.runtime, "syntax-prewarm", &root)?;
-    // Already flushed during open; second flush should be a no-op.
+    // Queue drain starts the shared worker and a background git/language scan.
     state.flush_pending_syntax_prewarm_for_test()?;
     assert!(
         state.ui()?.syntax_refresh_worker_is_live(),
-        "workspace prewarm should start and finish on the shared syntax worker"
+        "workspace prewarm should start the shared syntax worker"
     );
+    // Let the scanner finish git ls-files + enqueue before deleting the temp repo.
+    std::thread::sleep(Duration::from_millis(750));
 
     drop(state);
-    fs::remove_dir_all(root)?;
+    let _ = fs::remove_dir_all(root);
     Ok(())
 }
 

@@ -37,6 +37,41 @@ fn sync_visible_buffer_layouts_reuses_headerline_snapshot_while_typing() -> Resu
 }
 
 #[test]
+fn sync_visible_buffer_layouts_reuses_headerline_snapshot_after_keydown_activity()
+-> Result<(), String> {
+    let render_width = 640;
+    let render_height = 360;
+    let cell_width = 8;
+    let line_height = 16;
+    let user_library = Arc::new(HeaderlineTestUserLibrary::default());
+    let mut state =
+        ShellState::new_with_user_library(default_error_log_path(), false, user_library.clone())
+            .map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*keydown-headerline-cache*",
+        vec!["alpha".to_owned(), "beta".to_owned()],
+    )?;
+
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())?;
+    let after_first = user_library.headerline_call_count();
+
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.set_cursor(TextPoint::new(1, 0));
+    }
+    // KeyDown-driven vim motions note activity without editing text.
+    state.note_text_edit_activity();
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())?;
+    assert_eq!(user_library.headerline_call_count(), after_first);
+    Ok(())
+}
+
+#[test]
 fn frame_pacing_remaining_clamps_to_120fps_budget() {
     let now = Instant::now();
     let remaining = frame_pacing_remaining(now - Duration::from_millis(2), now);
@@ -133,6 +168,33 @@ fn insert_mode_text_input_activates_typing_budget() -> Result<(), String> {
 
     assert!(state.secondary_refresh_deferred_for_typing(Instant::now()));
     assert!(state.typing_refresh_budget_active(Instant::now()));
+    Ok(())
+}
+
+#[test]
+fn workspace_readme_open_runs_while_typing_budget_active() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("readme-during-typing");
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    std::fs::write(root.join("README.md"), "# Demo\n").map_err(|error| error.to_string())?;
+
+    open_workspace_from_project(&mut state.runtime, "readme-during-typing", &root)
+        .map_err(|error| error.to_string())?;
+    // Simulate picker filter typing still inside the 750ms idle window.
+    state.last_text_input_at = Some(Instant::now());
+    assert!(state.secondary_refresh_deferred_for_typing(Instant::now()));
+
+    assert!(
+        refresh_pending_workspace_readme_opens(&mut state.runtime)?,
+        "README open must not wait on typing idle"
+    );
+    let active = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    assert_eq!(active.display_name(), "README.md");
+    assert_eq!(active.language_id(), Some("markdown"));
+
+    let _ = std::fs::remove_dir_all(root);
     Ok(())
 }
 

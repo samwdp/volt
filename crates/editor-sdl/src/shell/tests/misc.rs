@@ -28,6 +28,117 @@ fn preload_languages_returns_without_waiting_for_worker_done() {
 }
 
 #[test]
+fn prioritize_syntax_preload_languages_puts_markdown_first() {
+    let ordered = prioritize_syntax_preload_languages(vec![
+        "rust".to_owned(),
+        "toml".to_owned(),
+        "markdown-inline".to_owned(),
+        "json".to_owned(),
+        "markdown".to_owned(),
+        "yaml".to_owned(),
+    ]);
+    assert_eq!(
+        ordered,
+        vec![
+            "markdown".to_owned(),
+            "markdown-inline".to_owned(),
+            "json".to_owned(),
+            "rust".to_owned(),
+            "toml".to_owned(),
+            "yaml".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn measure_installed_grammar_preload_times() -> Result<(), String> {
+    let state = state_with_user_library()?;
+    let (install_root, query_asset_root, configs, language_ids) = {
+        let registry = state
+            .runtime
+            .services()
+            .get::<SyntaxRegistry>()
+            .ok_or_else(|| "syntax registry missing".to_owned())?;
+        (
+            registry.install_root().to_path_buf(),
+            registry.query_asset_root().map(Path::to_path_buf),
+            registry.languages().cloned().collect::<Vec<_>>(),
+            registry.installed_grammar_language_ids(),
+        )
+    };
+    if language_ids.is_empty() {
+        eprintln!(
+            "SKIP: no installed grammars under {}",
+            install_root.display()
+        );
+        return Ok(());
+    }
+
+    let mut total = Duration::ZERO;
+    let mut rows = Vec::new();
+    for language_id in &language_ids {
+        let mut registry = SyntaxRegistry::with_install_root(&install_root);
+        registry.set_query_asset_root(query_asset_root.clone());
+        for config in &configs {
+            if let Err(error) = registry.register(config.clone()) {
+                eprintln!("register `{language_id}` peer failed: {error}");
+            }
+        }
+        let started = Instant::now();
+        match registry.preload_language(language_id) {
+            Ok(()) => {
+                let elapsed = started.elapsed();
+                total += elapsed;
+                rows.push((language_id.clone(), elapsed, None));
+            }
+            Err(error) => {
+                rows.push((
+                    language_id.clone(),
+                    started.elapsed(),
+                    Some(error.to_string()),
+                ));
+            }
+        }
+    }
+
+    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
+    eprintln!("grammar cold preload timings ({})", install_root.display());
+    for (language_id, elapsed, error) in &rows {
+        match error {
+            Some(error) => eprintln!("  {language_id}: ERR {error} ({elapsed:?})"),
+            None => eprintln!("  {language_id}: {elapsed:?}"),
+        }
+    }
+    let markdown = rows
+        .iter()
+        .find(|(id, _, _)| id == "markdown")
+        .map(|(_, elapsed, _)| *elapsed);
+    let markdown_inline = rows
+        .iter()
+        .find(|(id, _, _)| id == "markdown-inline")
+        .map(|(_, elapsed, _)| *elapsed);
+    eprintln!(
+        "  sequential markdown={markdown:?} markdown-inline={markdown_inline:?} total={total:?} langs={}",
+        rows.len()
+    );
+
+    let mut parallel_registry = SyntaxRegistry::with_install_root(&install_root);
+    parallel_registry.set_query_asset_root(query_asset_root.clone());
+    for config in &configs {
+        let _ = parallel_registry.register(config.clone());
+    }
+    let parallel_started = Instant::now();
+    let parallel_errors = parallel_registry.preload_languages_parallel(language_ids.clone());
+    let parallel_elapsed = parallel_started.elapsed();
+    eprintln!(
+        "  parallel_batch={parallel_elapsed:?} errors={} speedup≈{:.1}x",
+        parallel_errors.len(),
+        total.as_secs_f64() / parallel_elapsed.as_secs_f64().max(0.000_001)
+    );
+    Ok(())
+}
+
+#[test]
 fn preload_languages_still_completes_on_worker() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     assert!(
@@ -3464,6 +3575,59 @@ fn accept_autocomplete_uses_lsp_text_edit_range_covering_trigger() -> Result<(),
     assert_eq!(
         active_shell_buffer_mut(&mut state.runtime)?.text.text(),
         "foo.bar()"
+    );
+    Ok(())
+}
+
+#[test]
+fn apply_resolved_documentation_keeps_only_selected_docs() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let mut overlay = AutocompleteOverlay::new(
+        buffer_id,
+        0,
+        AutocompleteQuery {
+            prefix: "u".to_owned(),
+            token: "u".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 1)),
+        },
+    );
+    overlay.set_entries(vec![
+        AutocompleteEntry {
+            provider_id: "lsp".to_owned(),
+            provider_label: "LSP".to_owned(),
+            provider_icon: "L".to_owned(),
+            item_icon: "ƒ".to_owned(),
+            label: "useMemo".to_owned(),
+            replacement: "useMemo".to_owned(),
+            replace_range: None,
+            detail: None,
+            documentation: Some("stale docs".to_owned()),
+            resolve: None,
+        },
+        AutocompleteEntry {
+            provider_id: "lsp".to_owned(),
+            provider_label: "LSP".to_owned(),
+            provider_icon: "L".to_owned(),
+            item_icon: "ƒ".to_owned(),
+            label: "useState".to_owned(),
+            replacement: "useState".to_owned(),
+            replace_range: None,
+            detail: None,
+            documentation: Some("other stale docs".to_owned()),
+            resolve: None,
+        },
+    ]);
+    overlay.selected_index = 1;
+    assert!(overlay.apply_resolved_documentation(
+        "lsp",
+        "useState",
+        Some("fn useState()".to_owned()),
+    ));
+    assert_eq!(overlay.entries[0].documentation.as_deref(), None);
+    assert_eq!(
+        overlay.entries[1].documentation.as_deref(),
+        Some("fn useState()")
     );
     Ok(())
 }

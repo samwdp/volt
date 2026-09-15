@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use editor_jobs::resolve_command_path;
+use editor_jobs::{enrich_env_with_node_manager, resolve_command_path};
 
 use crate::{
     InstallRecipe, ToolInstallError, ToolKind,
@@ -105,8 +105,11 @@ pub fn prepare_install(
     }
     fs::create_dir_all(&package)?;
     crate::paths::ensure_install_layout()?;
-    let toolchain = resolved_toolchain(recipe)?;
-    let commands = commands_for_recipe(recipe, &package, program, &toolchain)?;
+    // GUI hosts often lack fnm/nvm Node shims on process PATH. Enrich before the
+    // toolchain probe so npm recipes (typescript-language-server, …) can resolve.
+    let launch_env = install_launch_env(Some(package.as_path()));
+    let toolchain = resolved_toolchain(recipe, &launch_env)?;
+    let commands = commands_for_recipe(recipe, &package, program, &toolchain, launch_env)?;
     Ok(InstallPlan {
         kind,
         spec_id: spec_id.to_owned(),
@@ -116,7 +119,14 @@ pub fn prepare_install(
     })
 }
 
-fn resolved_toolchain(recipe: &InstallRecipe) -> Result<String, ToolInstallError> {
+fn install_launch_env(cwd: Option<&std::path::Path>) -> Vec<(String, String)> {
+    enrich_env_with_node_manager(cwd, vec![effective_path_env()])
+}
+
+fn resolved_toolchain(
+    recipe: &InstallRecipe,
+    launch_env: &[(String, String)],
+) -> Result<String, ToolInstallError> {
     let requested = recipe.toolchain_program();
     if requested == "python" {
         return python_program().ok_or_else(|| ToolInstallError::MissingToolchain {
@@ -124,17 +134,14 @@ fn resolved_toolchain(recipe: &InstallRecipe) -> Result<String, ToolInstallError
             recipe: recipe.label().to_owned(),
         });
     }
-    if program_is_available(requested) {
-        return Ok(requested.to_owned());
-    }
-    // Windows npm/dotnet often resolve as npm.cmd via PATHEXT through resolve_command_path.
-    let path_env = effective_path_env();
-    resolve_command_path(requested, std::slice::from_ref(&path_env), None).ok_or(
-        ToolInstallError::MissingToolchain {
+    // Prefer an absolute path so Process Launch wraps the real npm.cmd / dotnet.exe
+    // instead of a bare name that only the supervisor fails to find.
+    resolve_command_path(requested, launch_env, None)
+        .or_else(|| program_is_available(requested).then(|| requested.to_owned()))
+        .ok_or_else(|| ToolInstallError::MissingToolchain {
             program: requested.to_owned(),
             recipe: recipe.label().to_owned(),
-        },
-    )
+        })
 }
 
 fn python_program() -> Option<String> {
@@ -151,8 +158,8 @@ fn commands_for_recipe(
     package: &std::path::Path,
     program: &str,
     toolchain: &str,
+    mut env: Vec<(String, String)>,
 ) -> Result<Vec<InstallCommand>, ToolInstallError> {
-    let mut env = vec![effective_path_env()];
     let cwd = package.to_path_buf();
     let commands = match recipe {
         InstallRecipe::Npm { packages } => {

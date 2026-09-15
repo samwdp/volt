@@ -317,6 +317,70 @@ impl SyntaxRegistry {
         self.ensure_loaded_language(language_id)
     }
 
+    /// Cold-loads many grammars concurrently, then inserts them into this registry.
+    ///
+    /// Already-loaded ids are skipped. Failures are reported per language and do not
+    /// abort the rest of the batch.
+    pub fn preload_languages_parallel(
+        &mut self,
+        language_ids: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Vec<(String, SyntaxError)> {
+        let pending = language_ids
+            .into_iter()
+            .map(|language_id| language_id.as_ref().to_owned())
+            .filter(|language_id| !self.loaded.contains_key(language_id))
+            .filter_map(|language_id| {
+                self.languages
+                    .get(&language_id)
+                    .cloned()
+                    .map(|config| (language_id, config))
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            return Vec::new();
+        }
+
+        let install_root = self.install_root.clone();
+        let query_asset_root = self.query_asset_root.clone();
+
+        let loaded_batch = std::thread::scope(|scope| {
+            let mut joins = Vec::with_capacity(pending.len());
+            for (language_id, config) in &pending {
+                let install_root = &install_root;
+                let query_asset_root = query_asset_root.as_deref();
+                joins.push(scope.spawn(move || {
+                    let result = load_language(config, install_root, query_asset_root);
+                    (language_id.clone(), result)
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| {
+                    join.join().unwrap_or_else(|_| {
+                        (
+                            "<preload-panic>".to_owned(),
+                            Err(SyntaxError::LibraryLoad {
+                                language_id: "<preload-panic>".to_owned(),
+                                message: "syntax preload worker panicked".to_owned(),
+                            }),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let mut errors = Vec::new();
+        for (language_id, result) in loaded_batch {
+            match result {
+                Ok(loaded) => {
+                    self.loaded.insert(language_id, loaded);
+                }
+                Err(error) => errors.push((language_id, error)),
+            }
+        }
+        errors
+    }
+
     /// Builds a reusable install plan for one grammar-backed language.
     pub fn prepare_language_install(
         &self,

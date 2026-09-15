@@ -266,6 +266,11 @@ pub(super) fn render_pdf_buffer_body(
     fill_window_surface_rect(target, viewport, viewport_background, window_effects)
 }
 
+/// Hard cap for autocomplete docs wrapping on the UI thread.
+/// LSP resolve docs can be huge; wrapping tens of thousands of lines on every
+/// selection/render made Ctrl+n/Ctrl+p feel like the completion list ran on UI.
+pub(super) const AUTOCOMPLETE_DOCS_MAX_WRAP_LINES: usize = 128;
+
 pub(super) fn autocomplete_preview_lines(
     entry: Option<&AutocompleteEntry>,
     token: &str,
@@ -273,7 +278,7 @@ pub(super) fn autocomplete_preview_lines(
     max_lines: usize,
     token_icon: &str,
 ) -> Vec<String> {
-    let max_lines = max_lines.max(1);
+    let max_lines = max_lines.clamp(1, AUTOCOMPLETE_DOCS_MAX_WRAP_LINES);
     let Some(entry) = entry else {
         return wrap_overlay_text(
             &format!("{token_icon} {token}\n\nSelect a completion to preview details."),
@@ -330,7 +335,13 @@ pub(super) fn autocomplete_docs_lines(
     max_columns: usize,
     token_icon: &str,
 ) -> Vec<String> {
-    autocomplete_preview_lines(entry, token, max_columns, 10_000, token_icon)
+    autocomplete_preview_lines(
+        entry,
+        token,
+        max_columns,
+        AUTOCOMPLETE_DOCS_MAX_WRAP_LINES,
+        token_icon,
+    )
 }
 
 pub(super) fn user_autocomplete_docs_visible_rows(runtime: &EditorRuntime) -> usize {
@@ -368,10 +379,20 @@ pub(super) fn autocomplete_docs_panel_width(
     let docs_available = available.saturating_sub(list_width).saturating_sub(1);
     let min_width = ((cell_width.max(1) as u32) * 24).min(docs_available.max(1));
     let mut content_width = min_width;
-    let probe_lines = autocomplete_docs_lines(entry, token, 10_000, token_icon);
-    for line in probe_lines {
+    // Width probe must stay O(visible metadata), not full markdown wrap.
+    // Header/meta lines are enough plus a capped scan of raw doc lines.
+    for line in autocomplete_preview_lines(entry, token, 72, 6, token_icon) {
         content_width =
             content_width.max(monospace_text_width(&line, cell_width).saturating_add(28));
+    }
+    if let Some(documentation) = entry.and_then(|entry| entry.documentation.as_deref()) {
+        for line in documentation
+            .lines()
+            .take(AUTOCOMPLETE_DOCS_MAX_WRAP_LINES)
+        {
+            content_width =
+                content_width.max(monospace_text_width(line, cell_width).saturating_add(28));
+        }
     }
     content_width.clamp(min_width, docs_available.max(min_width))
 }

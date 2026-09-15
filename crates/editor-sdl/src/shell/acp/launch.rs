@@ -60,6 +60,9 @@ pub(crate) struct OwnedBackgroundLaunch {
     pub(crate) stderr: Option<tokio::process::ChildStderr>,
 }
 
+/// One Process Launch try: program, env pairs, argv.
+type LaunchAttempt = (String, Vec<(String, String)>, Vec<String>);
+
 pub(crate) async fn launch_owned_background_command(
     process_registry: &Arc<Mutex<ProcessRegistry>>,
     workspace_id: ProcessWorkspaceId,
@@ -70,20 +73,30 @@ pub(crate) async fn launch_owned_background_command(
     pipes: BackgroundCommandPipes,
 ) -> Result<OwnedBackgroundLaunch, String> {
     let stdio = pipes.to_launch_stdio();
-    let mut attempts: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    attempts.push((program.to_owned(), env.to_vec()));
+    let mut attempts: Vec<LaunchAttempt> = Vec::new();
+    // Prefer a PATH-resolved absolute program first so Process Launch can wrap the
+    // real shim (.cmd/.exe) instead of a bare name that only the supervisor fails on.
+    let initial =
+        editor_jobs::resolve_command_path(program, env, None).unwrap_or_else(|| program.to_owned());
+    push_launch_attempt(&mut attempts, initial, args, env);
 
     for candidate in background_command_candidates(program, env, None) {
-        attempts.push((candidate, env.to_vec()));
+        if attempts
+            .iter()
+            .any(|(existing, _, _)| existing == &candidate)
+        {
+            continue;
+        }
+        push_launch_attempt(&mut attempts, candidate, args, env);
     }
 
     let mut last_error = None;
-    for (candidate, attempt_env) in &attempts {
+    for (candidate, attempt_env, attempt_args) in &attempts {
         match try_owned_launch(
             process_registry,
             workspace_id,
             candidate,
-            args,
+            attempt_args,
             cwd,
             attempt_env,
             stdio,
@@ -100,35 +113,16 @@ pub(crate) async fn launch_owned_background_command(
         for candidate in background_command_candidates(program, env, Some(&launch_env)) {
             let mut merged = launch_env.clone();
             merged.extend(env.iter().cloned());
-            match try_owned_launch(
-                process_registry,
-                workspace_id,
-                &candidate,
-                args,
-                cwd,
-                &merged,
-                stdio,
-            ) {
-                Ok(launched) => return Ok(launched),
-                Err(error) if owned_launch_should_retry(&error) => {
-                    last_error = Some(error);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        #[cfg(windows)]
-        if let Some(node_manager_env) =
-            windows_node_manager_environment(cwd, env, Some(&launch_env)).await
-        {
-            for candidate in background_command_candidates(program, &[], Some(&node_manager_env)) {
+            let mut retry_attempts = Vec::new();
+            push_launch_attempt(&mut retry_attempts, candidate, args, &merged);
+            for (candidate, attempt_env, attempt_args) in &retry_attempts {
                 match try_owned_launch(
                     process_registry,
                     workspace_id,
-                    &candidate,
-                    args,
+                    candidate,
+                    attempt_args,
                     cwd,
-                    &node_manager_env,
+                    attempt_env,
                     stdio,
                 ) {
                     Ok(launched) => return Ok(launched),
@@ -139,9 +133,137 @@ pub(crate) async fn launch_owned_background_command(
                 }
             }
         }
+
+        #[cfg(windows)]
+        if let Some(node_manager_env) =
+            windows_node_manager_environment(cwd, env, Some(&launch_env)).await
+        {
+            for candidate in background_command_candidates(program, &[], Some(&node_manager_env)) {
+                let mut retry_attempts = Vec::new();
+                push_launch_attempt(&mut retry_attempts, candidate, args, &node_manager_env);
+                for (candidate, attempt_env, attempt_args) in &retry_attempts {
+                    match try_owned_launch(
+                        process_registry,
+                        workspace_id,
+                        candidate,
+                        attempt_args,
+                        cwd,
+                        attempt_env,
+                        stdio,
+                    ) {
+                        Ok(launched) => return Ok(launched),
+                        Err(error) if owned_launch_should_retry(&error) => {
+                            last_error = Some(error);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
     }
 
     Err(last_error.unwrap_or_else(|| format!("failed to launch `{program}`")))
+}
+
+fn push_launch_attempt(
+    attempts: &mut Vec<LaunchAttempt>,
+    program: String,
+    args: &[String],
+    env: &[(String, String)],
+) {
+    #[cfg(windows)]
+    if let Some((rewritten, rewritten_args)) = rewrite_windows_script_for_protocol(&program, args) {
+        if !attempts.iter().any(|(existing, _, existing_args)| {
+            existing == &rewritten && existing_args == &rewritten_args
+        }) {
+            attempts.push((rewritten, env.to_vec(), rewritten_args));
+        }
+        return;
+    }
+    #[cfg(not(windows))]
+    let _ = ();
+    if !attempts
+        .iter()
+        .any(|(existing, _, existing_args)| existing == &program && existing_args == args)
+    {
+        attempts.push((program, env.to_vec(), args.to_vec()));
+    }
+}
+
+/// Windows `.cmd`/`.bat` ACP shims (notably Cursor `agent.cmd`) nest `cmd` →
+/// PowerShell → Node and drop redirected Protocol stdio. Prefer the underlying
+/// Node entrypoint when the shim layout matches Cursor Agent installs.
+#[cfg(windows)]
+fn rewrite_windows_script_for_protocol(
+    program: &str,
+    args: &[String],
+) -> Option<(String, Vec<String>)> {
+    let path = Path::new(program);
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    if ext != "cmd" && ext != "bat" {
+        return None;
+    }
+    let dir = path.parent()?;
+    let (node, index) = cursor_agent_node_entrypoint(dir)?;
+    let mut rewritten_args = vec![index];
+    rewritten_args.extend(args.iter().cloned());
+    Some((node, rewritten_args))
+}
+
+#[cfg(windows)]
+fn cursor_agent_node_entrypoint(dir: &Path) -> Option<(String, String)> {
+    let root_node = dir.join("node.exe");
+    let root_index = dir.join("index.js");
+    if root_node.is_file() && root_index.is_file() {
+        return Some((
+            root_node.to_string_lossy().into_owned(),
+            root_index.to_string_lossy().into_owned(),
+        ));
+    }
+
+    let versions = dir.join("versions");
+    let mut best: Option<(u32, PathBuf)> = None;
+    let entries = std::fs::read_dir(&versions).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_str()?;
+        let Some(sort_key) = cursor_agent_version_sort_key(name) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|(best_key, _)| sort_key >= *best_key)
+        {
+            best = Some((sort_key, path));
+        }
+    }
+    let version_dir = best?.1;
+    let node = version_dir.join("node.exe");
+    let index = version_dir.join("index.js");
+    (node.is_file() && index.is_file()).then(|| {
+        (
+            node.to_string_lossy().into_owned(),
+            index.to_string_lossy().into_owned(),
+        )
+    })
+}
+
+#[cfg(windows)]
+fn cursor_agent_version_sort_key(name: &str) -> Option<u32> {
+    // YYYY.M.D-commit or YYYY.M.D-HH-MM-SS-commit
+    let date_part = name.split('-').next()?;
+    let mut parts = date_part.split('.');
+    let year: u32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(year * 10_000 + month * 100 + day)
 }
 
 fn try_owned_launch(
@@ -799,4 +921,74 @@ pub(crate) fn parse_nul_environment(output: &[u8]) -> Option<Vec<(String, String
         })
         .collect::<Vec<_>>();
     (!vars.is_empty()).then_some(vars)
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use super::{
+        cursor_agent_node_entrypoint, cursor_agent_version_sort_key,
+        rewrite_windows_script_for_protocol,
+    };
+    #[cfg(windows)]
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[cfg(windows)]
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cursor_agent_version_sort_key_parses_date_prefixes() {
+        assert_eq!(
+            cursor_agent_version_sort_key("2026.09.10-fd3934a"),
+            Some(20_260_910)
+        );
+        assert_eq!(
+            cursor_agent_version_sort_key("2026.9.2-c22c1a3"),
+            Some(20_260_902)
+        );
+        assert_eq!(cursor_agent_version_sort_key("not-a-version"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rewrite_windows_script_for_protocol_unwraps_cursor_agent_cmd() {
+        let root = unique_temp_path("volt-acp-cursor-shim");
+        let versions = root.join("versions").join("2026.09.10-aaaaaaa");
+        fs::create_dir_all(&versions).expect("mkdir");
+        fs::write(versions.join("node.exe"), b"fake").expect("node");
+        fs::write(versions.join("index.js"), b"fake").expect("index");
+        let cmd = root.join("agent.cmd");
+        fs::write(&cmd, b"@echo off\r\n").expect("cmd");
+
+        let rewritten = rewrite_windows_script_for_protocol(
+            cmd.to_str().expect("utf8"),
+            &["acp".to_owned(), "--yolo".to_owned()],
+        )
+        .expect("rewrite");
+        assert_eq!(rewritten.0, versions.join("node.exe").to_string_lossy());
+        assert_eq!(
+            rewritten.1,
+            vec![
+                versions.join("index.js").to_string_lossy().into_owned(),
+                "acp".to_owned(),
+                "--yolo".to_owned(),
+            ]
+        );
+        assert_eq!(
+            cursor_agent_node_entrypoint(&root).map(|(node, _)| node),
+            Some(versions.join("node.exe").to_string_lossy().into_owned())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

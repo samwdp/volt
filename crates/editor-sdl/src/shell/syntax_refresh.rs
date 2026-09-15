@@ -83,11 +83,36 @@ fn install_optional_runtime_services(
         .map_err(|error| ShellError::Runtime(error.to_string()))?;
     runtime.services_mut().insert(syntax_registry);
     configure_syntax_refresh_worker(runtime).map_err(ShellError::Runtime)?;
+    queue_startup_markdown_syntax_preload(runtime);
     editor_tool_install::ensure_install_layout()
         .map_err(|error| ShellError::Runtime(error.to_string()))?;
     register_lsp_status_hooks(runtime).map_err(ShellError::Runtime)?;
     register_dap_hooks(runtime).map_err(ShellError::Runtime)?;
     Ok(())
+}
+
+fn queue_startup_markdown_syntax_preload(runtime: &mut EditorRuntime) {
+    let Some(registry) = runtime.services().get::<SyntaxRegistry>() else {
+        return;
+    };
+    let mut language_ids = Vec::new();
+    for language_id in ["markdown", "markdown-inline"] {
+        match registry.is_installed(language_id) {
+            Ok(true) => language_ids.push(language_id.to_owned()),
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("tree-sitter startup prewarm skipped `{language_id}`: {error}");
+            }
+        }
+    }
+    if language_ids.is_empty() {
+        return;
+    }
+    let Ok(ui) = shell_ui_mut(runtime) else {
+        return;
+    };
+    // Background worker: warm README/Pretty grammars right after launch.
+    ui.syntax_refresh_worker.preload_languages(language_ids);
 }
 
 fn refresh_buffer_syntax(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {

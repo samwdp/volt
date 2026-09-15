@@ -304,9 +304,38 @@ fn picker_provider_context(
                 workspace_contexts(runtime, Some(shell_ui(runtime)?.default_workspace()))?.into();
         }
         PickerSource::WorkspaceFiles => {
-            context.workspace_root = active_workspace_root(runtime)?
+            let root = active_workspace_root(runtime)?;
+            context.workspace_root = root
+                .as_ref()
                 .map(|root| root.display().to_string().into())
                 .into();
+            if let Some(root) = root.as_ref() {
+                context.workspace_files = match list_repository_files(root) {
+                    Ok(files) => files
+                        .into_iter()
+                        .map(|relative_path| {
+                            let absolute = root.join(&relative_path);
+                            let search_text = relative_path.display().to_string();
+                            PickerWorkspaceFileContext {
+                                path: absolute.display().to_string().into(),
+                                label: search_text.clone().into(),
+                                detail: "".into(),
+                                search_text: search_text.into(),
+                                fringe: editor_icons::seti_file_icon(&absolute).into(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
+                    Err(error) => vec![PickerWorkspaceFileContext {
+                        path: "".into(),
+                        label: "Unable to read workspace files".into(),
+                        detail: error.to_string().into(),
+                        search_text: "".into(),
+                        fringe: "".into(),
+                    }]
+                    .into(),
+                };
+            }
         }
         PickerSource::Themes => {
             let registry = runtime

@@ -13,6 +13,18 @@ use std::{
 
 use crate::git::RepositoryFilesError;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+fn configure_background_command(_command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 /// Byte cap for Workspace Files picker previews.
 pub const REPOSITORY_FILE_PREVIEW_MAX_BYTES: u64 = 16 * 1024;
 /// Line cap for Workspace Files picker previews (body lines after the path header).
@@ -103,7 +115,9 @@ pub fn list_repository_files_uncached(
     root: impl AsRef<Path>,
 ) -> Result<Vec<PathBuf>, RepositoryFilesError> {
     let root = root.as_ref();
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    configure_background_command(&mut command);
+    let output = command
         .args([
             "ls-files",
             "-z",

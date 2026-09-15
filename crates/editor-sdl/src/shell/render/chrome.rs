@@ -346,13 +346,14 @@ pub(super) fn render_autocomplete_overlay(
         .max((cell_width.max(1) as u32) * 18)
         .min((cell_width.max(1) as u32) * 28)
         .min(pane_rect.width().saturating_sub(48).max(1));
+    let token_icon = user_library.autocomplete_token_icon();
     let docs_width = autocomplete_docs_panel_width(
         autocomplete.selected(),
         &autocomplete.query.token,
         list_width,
         pane_rect.width(),
         cell_width,
-        user_library.autocomplete_token_icon(),
+        token_icon,
     );
     let width = list_width
         .saturating_add(1)
@@ -366,7 +367,7 @@ pub(super) fn render_autocomplete_overlay(
         autocomplete.selected(),
         &autocomplete.query.token,
         docs_columns,
-        user_library.autocomplete_token_icon(),
+        token_icon,
     );
     let docs_scroll = autocomplete
         .docs_scroll_offset

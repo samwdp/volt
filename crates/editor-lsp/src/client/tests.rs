@@ -61,6 +61,8 @@ fn completion_parser_handles_lists_and_docs() {
     assert_eq!(items[0].edit_range(), None);
     assert!(items[0].has_documentation());
     assert!(!items[0].needs_resolve());
+    assert!(items[0].raw_item().get("documentation").is_none());
+    assert!(items[0].list_resolve_payload().is_some());
 }
 
 #[test]

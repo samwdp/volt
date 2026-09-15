@@ -21,7 +21,7 @@ mod process_registry;
 pub use process_registry::{
     CapturedProcessOutput, LaunchedProcess, OwnedProcessId, ProcessLaunchSpec, ProcessLaunchStdio,
     ProcessRegistry, ProcessRegistryError, ShareKey, WorkspaceId, language_server_share_key,
-    owned_process_pid_alive,
+    owned_process_pid_alive, run_captured_shared,
 };
 
 /// Human-readable summary of this crate's responsibility.
@@ -73,12 +73,15 @@ pub fn app_process_registry() -> Option<Arc<Mutex<ProcessRegistry>>> {
 ///
 /// Returns `None` when no app registry is installed so callers can skip spawning
 /// outside Process Launch instead of falling back to ad-hoc `Command::spawn`.
+///
+/// The registry mutex is not held while waiting for the child to exit, so other
+/// UI-thread Silent Commands (for example `git rev-parse`) are not blocked behind
+/// a long `git diff`.
 pub fn run_captured_in_app_registry(
     spec: ProcessLaunchSpec,
 ) -> Option<Result<CapturedProcessOutput, ProcessRegistryError>> {
     let registry = app_process_registry()?;
-    let mut registry = registry.lock().ok()?;
-    Some(registry.run_captured(spec))
+    Some(run_captured_shared(&registry, spec))
 }
 
 /// Controls how the supervised child should be launched on the current platform.

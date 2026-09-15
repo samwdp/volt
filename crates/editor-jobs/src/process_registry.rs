@@ -207,6 +207,42 @@ impl CapturedProcessOutput {
     }
 }
 
+/// Silent Command helper for a shared Process Registry.
+///
+/// Launches under the mutex, releases it while waiting for exit, then reacquires
+/// to reclaim. Callers that hold [`ProcessRegistry`] exclusively can use
+/// [`ProcessRegistry::run_captured`] instead.
+pub fn run_captured_shared(
+    registry: &std::sync::Arc<std::sync::Mutex<ProcessRegistry>>,
+    mut spec: ProcessLaunchSpec,
+) -> Result<CapturedProcessOutput, ProcessRegistryError> {
+    if matches!(spec.stdio, ProcessLaunchStdio::Null) {
+        spec = spec.with_stdio(ProcessLaunchStdio::Piped);
+    }
+    let readers = {
+        let mut guard = registry.lock().map_err(|_| {
+            ProcessRegistryError::Launch("process registry mutex poisoned".to_owned())
+        })?;
+        guard.launch_captured_readers(spec)?
+    };
+    loop {
+        let alive = {
+            let mut guard = registry.lock().map_err(|_| {
+                ProcessRegistryError::Launch("process registry mutex poisoned".to_owned())
+            })?;
+            guard.is_alive(readers.id)
+        };
+        if !alive {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut guard = registry
+        .lock()
+        .map_err(|_| ProcessRegistryError::Launch("process registry mutex poisoned".to_owned()))?;
+    guard.finish_captured(readers)
+}
+
 /// Builds a Share Key for a language server serving one on-disk root.
 pub fn language_server_share_key(server_id: &str, root: Option<&Path>) -> ShareKey {
     match root {
@@ -261,6 +297,12 @@ impl fmt::Debug for OwnedProcessEntry {
             .field("root_pid", &self.tree.root_pid())
             .finish()
     }
+}
+
+struct CapturedReaders {
+    id: OwnedProcessId,
+    stdout_reader: Option<thread::JoinHandle<Vec<u8>>>,
+    stderr_reader: Option<thread::JoinHandle<Vec<u8>>>,
 }
 
 impl ProcessRegistry {
@@ -318,6 +360,9 @@ impl ProcessRegistry {
     /// Silent Command helper: Process Launch with piped stdio, wait for exit,
     /// capture output, then reclaim. Application Quit can still tear the tree
     /// down if the wait is interrupted by a concurrent quit sweep.
+    ///
+    /// Prefer [`run_captured_shared`] when the registry lives behind a mutex so
+    /// the wait does not hold that lock for the whole child lifetime.
     pub fn run_captured(
         &mut self,
         mut spec: ProcessLaunchSpec,
@@ -325,6 +370,17 @@ impl ProcessRegistry {
         if matches!(spec.stdio, ProcessLaunchStdio::Null) {
             spec = spec.with_stdio(ProcessLaunchStdio::Piped);
         }
+        let readers = self.launch_captured_readers(spec)?;
+        while self.is_alive(readers.id) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        self.finish_captured(readers)
+    }
+
+    fn launch_captured_readers(
+        &mut self,
+        spec: ProcessLaunchSpec,
+    ) -> Result<CapturedReaders, ProcessRegistryError> {
         let mut launched = self.launch(spec)?;
         let id = launched.id;
         let stdout_reader = launched.stdout.take().map(|mut stdout| {
@@ -341,19 +397,27 @@ impl ProcessRegistry {
                 buffer
             })
         });
+        Ok(CapturedReaders {
+            id,
+            stdout_reader,
+            stderr_reader,
+        })
+    }
 
-        while self.is_alive(id) {
-            thread::sleep(Duration::from_millis(10));
-        }
-
-        let exit_code = self.exit_code(id);
-        let stdout = stdout_reader
+    fn finish_captured(
+        &mut self,
+        readers: CapturedReaders,
+    ) -> Result<CapturedProcessOutput, ProcessRegistryError> {
+        let exit_code = self.exit_code(readers.id);
+        let stdout = readers
+            .stdout_reader
             .and_then(|handle| handle.join().ok())
             .unwrap_or_default();
-        let stderr = stderr_reader
+        let stderr = readers
+            .stderr_reader
             .and_then(|handle| handle.join().ok())
             .unwrap_or_default();
-        let _ = self.reclaim(id);
+        let _ = self.reclaim(readers.id);
         Ok(CapturedProcessOutput {
             stdout,
             stderr,
@@ -754,12 +818,19 @@ fn supervised_command_for_launch(spec: &ProcessLaunchSpec) -> (String, Vec<Strin
     if matches!(spec.mode, ProcessSupervisionMode::Interactive) {
         return (spec.program.clone(), spec.args.clone());
     }
-    supervised_command_with_exe(
-        spec.process_supervisor_exe.as_deref(),
-        &spec.program,
-        &spec.args,
-        spec.mode,
-    )
+    // Resolve against Launch env (and process PATH) before wrapping. Bare names
+    // wrapped as `volt --process-supervisor -- <bare>` make the supervisor spawn
+    // succeed while the inner child fails with "program not found", which skips
+    // caller PATH-candidate retries (ACP/LSP .cmd shims, GUI-missing PATH).
+    match crate::resolve_command_path(&spec.program, &spec.env, None) {
+        Some(program) => supervised_command_with_exe(
+            spec.process_supervisor_exe.as_deref(),
+            &program,
+            &spec.args,
+            spec.mode,
+        ),
+        None => (spec.program.clone(), spec.args.clone()),
+    }
 }
 
 fn signal_graceful(root_pid: u32) -> Result<(), String> {

@@ -420,7 +420,9 @@ impl AutocompleteWorkerState {
         let debounce = if cfg!(test) {
             Duration::from_millis(0)
         } else {
-            Duration::from_millis(45)
+            // LSP completion is first in the source or-group and can take hundreds of
+            // milliseconds. Coalesce rapid insert/backspace into one settled request.
+            Duration::from_millis(100)
         };
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.pending = Some(PendingAutocompleteRequest {
@@ -541,7 +543,10 @@ fn autocomplete_entries(
             })
             .then_with(|| left.entry.replacement.cmp(&right.entry.replacement))
     });
-    ranked.into_iter().map(|entry| entry.entry).collect()
+    ranked
+        .into_iter()
+        .map(|entry| entry.entry)
+        .collect()
 }
 
 fn buffer_autocomplete_entries(
@@ -664,8 +669,11 @@ fn lsp_autocomplete_entries(
                     replacement,
                     replace_range: item.edit_range(),
                     detail: item.detail().map(str::to_owned),
-                    documentation: item.documentation().map(str::to_owned),
-                    resolve: item.resolve_payload(),
+                    // Keep list rows cheap. Docs + raw CompletionItem markdown
+                    // belong on the selected row after resolve, not on every item
+                    // copied onto the UI thread (accept/drop hitch).
+                    documentation: None,
+                    resolve: item.list_resolve_payload(),
                 },
                 autocomplete_score(&candidate, 2, query) + 40,
             ))
@@ -1050,8 +1058,15 @@ struct CompletionResolveWorkerResult {
     documentation: Option<String>,
 }
 
+struct PendingCompletionResolveRequest {
+    due_at: Instant,
+    key: (BufferId, String, String),
+    request: CompletionResolveWorkerRequest,
+}
+
 struct CompletionResolveWorkerState {
-    pending_key: Option<(BufferId, String, String)>,
+    pending: Option<PendingCompletionResolveRequest>,
+    dispatched_key: Option<(BufferId, String, String)>,
     next_request_id: u64,
     request_tx: Sender<CompletionResolveWorkerRequest>,
     results: Arc<Mutex<Vec<CompletionResolveWorkerResult>>>,
@@ -1087,7 +1102,8 @@ impl CompletionResolveWorkerState {
         });
 
         Self {
-            pending_key: None,
+            pending: None,
+            dispatched_key: None,
             next_request_id: 0,
             request_tx,
             results,
@@ -1095,7 +1111,8 @@ impl CompletionResolveWorkerState {
     }
 
     fn clear_pending(&mut self) {
-        self.pending_key = None;
+        self.pending = None;
+        self.dispatched_key = None;
     }
 
     fn schedule(&mut self, request: CompletionResolveWorkerRequest) {
@@ -1104,14 +1121,46 @@ impl CompletionResolveWorkerState {
             request.provider_id.clone(),
             request.replacement.clone(),
         );
-        if self.pending_key.as_ref() == Some(&key) {
+        if self.dispatched_key.as_ref() == Some(&key)
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.key == key)
+        {
             return;
         }
-        self.pending_key = Some(key);
+        let debounce = if cfg!(test) {
+            Duration::from_millis(0)
+        } else {
+            // Rapid Ctrl+n/Ctrl+p should resolve only the settled selection.
+            Duration::from_millis(40)
+        };
         self.next_request_id = self.next_request_id.saturating_add(1);
         let mut request = request;
         request.request_id = self.next_request_id;
-        let _ = self.request_tx.send(request);
+        self.pending = Some(PendingCompletionResolveRequest {
+            due_at: Instant::now() + debounce,
+            key,
+            request,
+        });
+    }
+
+    fn dispatch_due(&mut self, now: Instant) {
+        let Some(pending) = self.pending.as_ref() else {
+            return;
+        };
+        if now < pending.due_at {
+            return;
+        }
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.dispatched_key = Some(pending.key);
+        let _ = self.request_tx.send(pending.request);
+    }
+
+    fn next_due_at(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|pending| pending.due_at)
     }
 
     fn take_latest_result(&self) -> Option<CompletionResolveWorkerResult> {
