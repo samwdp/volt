@@ -21,3 +21,6 @@ path = "src/lib.rs"
 name = "editor_theme"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

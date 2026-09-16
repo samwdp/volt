@@ -2963,7 +2963,7 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
     if runtime.hooks().contains(HOOK_LSP_DEFINITION) {
         runtime
             .subscribe_hook(HOOK_LSP_DEFINITION, "shell.lsp-definition", |_, runtime| {
-                goto_lsp_definition(runtime)
+                run_volt_command_or_fallback(runtime, "lsp.definition", goto_lsp_definition)
             })
             .map_err(|error| error.to_string())?;
     }
@@ -2971,7 +2971,7 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
     if runtime.hooks().contains(HOOK_LSP_REFERENCES) {
         runtime
             .subscribe_hook(HOOK_LSP_REFERENCES, "shell.lsp-references", |_, runtime| {
-                goto_lsp_references(runtime)
+                run_volt_command_or_fallback(runtime, "lsp.references", goto_lsp_references)
             })
             .map_err(|error| error.to_string())?;
     }
@@ -2981,7 +2981,13 @@ fn register_lsp_status_hooks(runtime: &mut EditorRuntime) -> Result<(), String> 
             .subscribe_hook(
                 HOOK_LSP_IMPLEMENTATION,
                 "shell.lsp-implementation",
-                |_, runtime| goto_lsp_implementation(runtime),
+                |_, runtime| {
+                    run_volt_command_or_fallback(
+                        runtime,
+                        "lsp.implementation",
+                        goto_lsp_implementation,
+                    )
+                },
             )
             .map_err(|error| error.to_string())?;
     }

@@ -146,16 +146,63 @@ impl WorkspaceSearchWorkerState {
         let results = Arc::new(Mutex::new(Vec::new()));
         let worker_results = Arc::clone(&results);
         std::thread::spawn(move || {
-            while let Ok(mut request) = request_rx.recv() {
+            let mut queued: Option<WorkspaceSearchWorkerRequest> = None;
+            loop {
+                let mut request = match queued.take() {
+                    Some(request) => request,
+                    None => match request_rx.recv() {
+                        Ok(request) => request,
+                        Err(_) => return,
+                    },
+                };
                 while let Ok(newer_request) = request_rx.try_recv() {
                     request = newer_request;
                 }
-                let data = workspace_search_entries(
-                    &request.process_registry,
-                    request.workspace_id,
-                    &request.root,
-                    &request.query,
-                );
+
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancel_flag = Arc::clone(&cancel);
+                let process_registry = Arc::clone(&request.process_registry);
+                let workspace_id = request.workspace_id;
+                let root = request.root.clone();
+                let query = request.query.clone();
+                let (done_tx, done_rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let data = workspace_search_entries_cancellable(
+                        &process_registry,
+                        workspace_id,
+                        &root,
+                        &query,
+                        Some(cancel_flag.as_ref()),
+                    );
+                    let _ = done_tx.send(data);
+                });
+
+                let mut superseded = None;
+                let data = loop {
+                    while let Ok(newer_request) = request_rx.try_recv() {
+                        superseded = Some(newer_request);
+                    }
+                    if let Some(newer_request) = superseded.take() {
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        let _ = done_rx.recv();
+                        queued = Some(newer_request);
+                        break None;
+                    }
+                    match done_rx.try_recv() {
+                        Ok(data) => break Some(data),
+                        Err(mpsc::TryRecvError::Empty) => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => break None,
+                    }
+                };
+
+                let Some(data) = data else {
+                    continue;
+                };
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    continue;
+                }
                 if let Ok(mut results) = worker_results.lock() {
                     results.push(WorkspaceSearchWorkerResult {
                         request_id: request.request_id,

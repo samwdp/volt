@@ -203,13 +203,15 @@ impl LspSyncWorkerState {
                         Some(server_id) => request
                             .lsp_client
                             .start_buffer_server_with_edits_for_workspace(
-                                &request.path,
-                                request.text.text(),
-                                request.revision,
-                                request.root.as_deref(),
-                                server_id,
-                                request.edits.as_deref(),
-                                request.workspace_id,
+                                editor_lsp::LspStartBufferServerRequest {
+                                    path: &request.path,
+                                    text: request.text.text().to_owned(),
+                                    revision: request.revision,
+                                    root: request.root.as_deref(),
+                                    server_id,
+                                    edits: request.edits.as_deref(),
+                                    workspace_id: request.workspace_id,
+                                },
                             ),
                         None => request.lsp_client.sync_buffer_with_edits_for_workspace(
                             &request.path,
@@ -576,6 +578,7 @@ fn buffer_autocomplete_entries(
                     replacement: token.clone(),
                     replace_range: None,
                     detail: None,
+                    kind_label: None,
                     documentation: None,
                     resolve: None,
                 },
@@ -668,7 +671,8 @@ fn lsp_autocomplete_entries(
                     label: candidate.clone(),
                     replacement,
                     replace_range: item.edit_range(),
-                    detail: item.detail().map(str::to_owned),
+                    detail: item.list_type_text(),
+                    kind_label: item.kind().map(editor_lsp::LspCompletionKind::label).map(str::to_owned),
                     // Keep list rows cheap. Docs + raw CompletionItem markdown
                     // belong on the selected row after resolve, not on every item
                     // copied onto the UI thread (accept/drop hitch).
@@ -715,6 +719,7 @@ fn manual_autocomplete_entries(
                     replacement: item.replacement.clone(),
                     replace_range: None,
                     detail: item.detail.clone(),
+                    kind_label: None,
                     documentation: item.documentation.clone(),
                     resolve: None,
                 },
@@ -758,6 +763,7 @@ fn db_autocomplete_entries(
                     replacement: candidate.replacement.clone(),
                     replace_range: None,
                     detail: candidate.detail.clone(),
+                    kind_label: None,
                     documentation: candidate.documentation.clone(),
                     resolve: None,
                 },

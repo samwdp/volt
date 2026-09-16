@@ -478,3 +478,35 @@ fn visual_indent_shifts_selected_lines_right() -> Result<(), String> {
     assert_eq!(shell_ui(&state.runtime)?.input_mode(), InputMode::Normal);
     Ok(())
 }
+
+#[test]
+fn silent_lsp_session_does_not_block_ui_hover_or_goto() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let manager = install_test_lsp_manager(&mut state.runtime, &["rust-analyzer"])?;
+    let root = unique_temp_dir("silent-lsp-ui");
+    let path = root.join("main.rs");
+    std::fs::write(&path, "fn main() {}\n").map_err(|error| error.to_string())?;
+    let buffer_id = install_lsp_enabled_file_buffer(
+        &mut state,
+        "main.rs",
+        &path,
+        vec!["fn main() {}".to_owned()],
+    )?;
+    manager
+        .install_silent_session("rust-analyzer", &path, Some(&root))
+        .map_err(|error| error.to_string())?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 3));
+
+    let started = Instant::now();
+    show_hover_overlay(&mut state.runtime, false)?;
+    goto_lsp_definition(&mut state.runtime)?;
+    open_lsp_code_actions(&mut state.runtime)?;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "UI LSP actions blocked for {elapsed:?}; jumping bucket is LspSessionHandle::request recv_timeout"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}

@@ -27,3 +27,6 @@ path = "src/lib.rs"
 name = "editor_plugin_host"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

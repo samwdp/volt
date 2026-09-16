@@ -142,6 +142,7 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
     let lsp_context = active_lsp_buffer_context(runtime).ok();
     if let (Some(lsp_client), Some(lsp_context)) = (lsp_client.as_ref(), lsp_context.as_ref()) {
         apply_sqls_workspace_settings_for_active_buffer_context(runtime, lsp_client, lsp_context)?;
+        schedule_lsp_ui_hover(runtime, focused)?;
     }
     let user_library = shell_user_library(runtime);
     let overlay = {
@@ -149,12 +150,193 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
         let Some(buffer) = ui.buffer(buffer_id) else {
             return Ok(());
         };
+        hover_overlay_draft_for_buffer(buffer_id, buffer, &registry, None, &*user_library)
+    }
+    .map(|draft| finalize_hover_overlay(runtime, draft));
+    let ui = shell_ui_mut(runtime)?;
+    if let Some(mut overlay) = overlay {
+        overlay.focused = focused;
+        ui.set_hover(overlay);
+    }
+    Ok(())
+}
+
+fn schedule_lsp_ui_hover(runtime: &mut EditorRuntime, focused: bool) -> Result<(), String> {
+    let context = active_lsp_buffer_context(runtime)?;
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
+        return Ok(());
+    };
+    let (cursor, signature_point, edits) = {
+        let buffer = shell_buffer(runtime, context.buffer_id)?;
+        (
+            buffer.cursor_point(),
+            hover_signature_request_point(buffer),
+            None,
+        )
+    };
+    let ui = shell_ui_mut(runtime)?;
+    ui.lsp_ui_worker.schedule(LspUiWorkerRequest {
+        buffer_id: context.buffer_id,
+        buffer_revision: context.revision,
+        path: context.path,
+        text: context.text,
+        root: context.root,
+        cursor,
+        kind: LspUiRequestKind::Hover {
+            signature_point,
+            focused,
+        },
+        lsp_client,
+        edits,
+    });
+    Ok(())
+}
+
+fn apply_lsp_ui_worker_results(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let results = {
+        let ui = shell_ui_mut(runtime)?;
+        ui.lsp_ui_worker.take_results()
+    };
+    if results.is_empty() {
+        return Ok(false);
+    }
+    let mut changed = false;
+    for result in results {
+        if let Some(error) = result.error {
+            record_runtime_error(runtime, "lsp.ui-worker", error);
+        }
+        if let Some((payload, focused)) = result.hover {
+            changed |= apply_lsp_ui_hover_result(runtime, result.buffer_id, result.cursor, payload, focused)?;
+        }
+        if let Some((title, locations)) = result.locations {
+            open_lsp_locations(runtime, &title, locations)?;
+            changed = true;
+        }
+        if let Some(format) = result.format {
+            changed |= apply_lsp_ui_format_result(
+                runtime,
+                result.buffer_id,
+                result.buffer_revision,
+                format,
+            )?;
+        }
+        if let Some(code_actions) = result.code_actions {
+            changed |= apply_lsp_ui_code_actions_result(runtime, result.buffer_id, code_actions)?;
+        }
+    }
+    Ok(changed)
+}
+
+fn apply_lsp_ui_format_result(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    payload: LspUiFormatPayload,
+) -> Result<bool, String> {
+    let revision_matches = shell_buffer(runtime, buffer_id)
+        .ok()
+        .is_some_and(|buffer| buffer.text.revision() == buffer_revision);
+    match (
+        revision_matches,
+        payload.edits.as_ref(),
+        payload.then_save,
+    ) {
+        (true, Some(edits), _) => {
+            let buffer = shell_buffer_mut(runtime, buffer_id)?;
+            apply_lsp_text_edits(buffer, edits);
+            buffer.set_cursor(payload.original_cursor);
+            finish_format_command(runtime)?;
+        }
+        (true, None, false) => {
+            if let Ok(formatter) = formatter_for_path(runtime, &payload.path) {
+                if let Some(range) = payload.range {
+                    format_range_with_formatter(
+                        runtime,
+                        &formatter,
+                        range,
+                        payload.extension.as_deref(),
+                        payload.cwd.as_deref(),
+                    )?;
+                    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+                    buffer.set_cursor(payload.original_cursor);
+                    finish_format_command(runtime)?;
+                } else {
+                    format_buffer_entire_with_formatter(
+                        runtime,
+                        buffer_id,
+                        &formatter,
+                        payload.extension.as_deref(),
+                        payload.cwd.as_deref(),
+                        payload.original_cursor,
+                    )?;
+                    finish_format_command(runtime)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    if payload.then_save {
+        save_buffer_inner(runtime, payload.workspace_id, buffer_id, &payload.path)?;
+    }
+    Ok(true)
+}
+
+fn apply_lsp_ui_code_actions_result(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    payload: LspUiCodeActionsPayload,
+) -> Result<bool, String> {
+    sync_lsp_buffer_state(runtime, payload.workspace_id, buffer_id, &payload.labels)?;
+    if payload.actions.is_empty() {
+        let picker = lsp_code_actions_status_picker_overlay(
+            "No code actions available",
+            "The active cursor position does not expose any LSP code actions.",
+            Some(payload.path.display().to_string()),
+        );
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(true);
+    }
+    let picker = lsp_code_actions_picker_overlay(
+        payload.workspace_id,
+        buffer_id,
+        &payload.path,
+        &payload.actions,
+    );
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(true)
+}
+
+fn apply_lsp_ui_hover_result(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    cursor: TextPoint,
+    payload: LspUiHoverPayload,
+    focused: bool,
+) -> Result<bool, String> {
+    let still_valid = {
+        let ui = shell_ui(runtime)?;
+        ui.buffer(buffer_id)
+            .is_some_and(|buffer| buffer.cursor_point() == cursor)
+    };
+    if !still_valid {
+        return Ok(false);
+    }
+    let registry = runtime
+        .services()
+        .get::<HoverRegistry>()
+        .cloned()
+        .ok_or_else(|| "hover registry service missing".to_owned())?;
+    let user_library = shell_user_library(runtime);
+    let overlay = {
+        let ui = shell_ui(runtime)?;
+        let Some(buffer) = ui.buffer(buffer_id) else {
+            return Ok(false);
+        };
         hover_overlay_draft_for_buffer(
             buffer_id,
             buffer,
             &registry,
-            lsp_client.as_ref(),
-            lsp_context.as_ref(),
+            Some(&payload),
             &*user_library,
         )
     }
@@ -163,10 +345,10 @@ fn show_hover_overlay(runtime: &mut EditorRuntime, focused: bool) -> Result<(), 
     if let Some(mut overlay) = overlay {
         overlay.focused = focused;
         ui.set_hover(overlay);
+        Ok(true)
     } else {
-        ui.close_hover();
+        Ok(false)
     }
-    Ok(())
 }
 
 fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {

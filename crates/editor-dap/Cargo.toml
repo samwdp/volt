@@ -32,3 +32,6 @@ path = "src/lib.rs"
 name = "editor_dap"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

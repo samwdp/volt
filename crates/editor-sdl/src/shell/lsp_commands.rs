@@ -455,18 +455,18 @@ fn open_lsp_log_buffer(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 fn goto_lsp_definition(runtime: &mut EditorRuntime) -> Result<(), String> {
-    navigate_to_lsp_locations(runtime, "Definitions", LspClientManager::definitions)
+    navigate_to_lsp_locations(runtime, "Definitions", LspUiLocationKind::Definition)
 }
 
 fn goto_lsp_references(runtime: &mut EditorRuntime) -> Result<(), String> {
-    navigate_to_lsp_locations(runtime, "References", LspClientManager::references)
+    navigate_to_lsp_locations(runtime, "References", LspUiLocationKind::References)
 }
 
 fn goto_lsp_implementation(runtime: &mut EditorRuntime) -> Result<(), String> {
     navigate_to_lsp_locations(
         runtime,
         "Implementations",
-        LspClientManager::implementations,
+        LspUiLocationKind::Implementation,
     )
 }
 
@@ -554,57 +554,27 @@ fn open_lsp_code_actions(runtime: &mut EditorRuntime) -> Result<(), String> {
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
-    let load_code_actions = || -> Result<(Vec<String>, Vec<LspCodeAction>), String> {
-        let labels = lsp_client
-            .sync_buffer(
-                &context.path,
-                &context.text,
-                context.revision,
-                context.root.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
-        let code_actions = lsp_client
-            .code_actions(&context.path, range)
-            .map_err(|error| error.to_string())?;
-        Ok((labels, code_actions))
-    };
-    let (labels, code_actions) = match load_code_actions() {
-        Ok(result) => result,
-        Err(error) => {
-            record_runtime_error(
-                runtime,
-                "lsp.code-actions",
-                format!(
-                    "failed to load code actions for `{}`: {error}",
-                    context.path.display()
-                ),
-            );
-            let picker = lsp_code_actions_status_picker_overlay(
-                "Code actions unavailable",
-                &error,
-                Some(format!("Path: {}", context.path.display())),
-            );
-            shell_ui_mut(runtime)?.set_picker(picker);
-            return Ok(());
-        }
-    };
-    sync_lsp_buffer_state(runtime, context.workspace_id, context.buffer_id, &labels)?;
-    if code_actions.is_empty() {
-        let picker = lsp_code_actions_status_picker_overlay(
-            "No code actions available",
-            "The active cursor position does not expose any LSP code actions.",
-            Some(context.path.display().to_string()),
-        );
-        shell_ui_mut(runtime)?.set_picker(picker);
-        return Ok(());
-    }
-    let picker = lsp_code_actions_picker_overlay(
-        context.workspace_id,
-        context.buffer_id,
-        &context.path,
-        &code_actions,
+    let picker = lsp_code_actions_status_picker_overlay(
+        "Loading code actions",
+        "Waiting for language server response.",
+        Some(context.path.display().to_string()),
     );
     shell_ui_mut(runtime)?.set_picker(picker);
+    let ui = shell_ui_mut(runtime)?;
+    ui.lsp_ui_worker.schedule(LspUiWorkerRequest {
+        buffer_id: context.buffer_id,
+        buffer_revision: context.revision,
+        path: context.path,
+        text: context.text,
+        root: context.root,
+        cursor: TextPoint::default(),
+        kind: LspUiRequestKind::CodeActions {
+            range,
+            workspace_id: context.workspace_id,
+        },
+        lsp_client,
+        edits: None,
+    });
     Ok(())
 }
 
@@ -631,7 +601,7 @@ fn active_lsp_code_action_range(
 fn navigate_to_lsp_locations(
     runtime: &mut EditorRuntime,
     title: &str,
-    request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<LspLocation>, LspClientError>,
+    kind: LspUiLocationKind,
 ) -> Result<(), String> {
     let context = active_lsp_buffer_context(runtime)?;
     let position = shell_buffer(runtime, context.buffer_id)?.cursor_point();
@@ -642,30 +612,28 @@ fn navigate_to_lsp_locations(
         .ok_or_else(|| "LSP client manager service missing".to_owned())?;
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
-    let (labels, locations) = {
-        let labels = lsp_client
-            .sync_buffer(
-                &context.path,
-                &context.text,
-                context.revision,
-                context.root.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
-        let locations =
-            request(&lsp_client, &context.path, position).map_err(|error| error.to_string())?;
-        (labels, locations)
-    };
     {
         let ui = shell_ui_mut(runtime)?;
         if let Some(buffer) = ui.buffer_mut(context.buffer_id) {
             buffer.set_lsp_enabled(true);
         }
-        ui.set_attached_lsp_server(
-            context.workspace_id,
-            (!labels.is_empty()).then(|| labels.join(", ")),
-        );
     }
-    open_lsp_locations(runtime, title, locations)
+    let ui = shell_ui_mut(runtime)?;
+    ui.lsp_ui_worker.schedule(LspUiWorkerRequest {
+        buffer_id: context.buffer_id,
+        buffer_revision: context.revision,
+        path: context.path,
+        text: context.text,
+        root: context.root,
+        cursor: position,
+        kind: LspUiRequestKind::Locations {
+            title: title.to_owned(),
+            kind,
+        },
+        lsp_client,
+        edits: None,
+    });
+    Ok(())
 }
 
 fn open_lsp_locations(

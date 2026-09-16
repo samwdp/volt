@@ -1893,10 +1893,68 @@ pub(super) fn open_workspace_dashboard(runtime: &mut EditorRuntime) -> Result<()
     runtime
         .execute_command("workspace.dashboard")
         .map_err(|error| error.to_string())?;
-    shell_ui(runtime)?
-        .picker()
-        .ok_or_else(|| "workspace.dashboard did not open picker".to_owned())?;
+    wait_for_workspace_dashboard_ready(runtime)?;
     Ok(())
+}
+
+pub(super) fn wait_for_workspace_dashboard_ready(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
+    let Some(picker) = shell_ui(runtime)?.picker() else {
+        return Err("workspace.dashboard did not open picker".to_owned());
+    };
+    if picker
+        .session
+        .matches()
+        .iter()
+        .any(|matched| matched.item().id() == "workspace-dashboard-unavailable")
+    {
+        let detail = picker
+            .session
+            .matches()
+            .iter()
+            .find(|matched| matched.item().id() == "workspace-dashboard-unavailable")
+            .map(|matched| matched.item().detail().to_owned())
+            .unwrap_or_default();
+        return Err(format!("workspace dashboard unavailable: {detail}"));
+    }
+    Ok(())
+}
+
+pub(super) fn wait_for_worktree_branch_picker_ready(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
+    for _ in 0..500 {
+        let _ = apply_pending_worktree_branch_loads(runtime)?;
+        let Some(picker) = shell_ui(runtime)?.picker() else {
+            return Err("worktree branch picker did not open".to_owned());
+        };
+        let loading = picker
+            .session
+            .matches()
+            .iter()
+            .any(|matched| matched.item().id() == "git-worktree-branch-loading");
+        if !loading {
+            if picker
+                .session
+                .matches()
+                .iter()
+                .any(|matched| matched.item().id() == "git-worktree-branch-unavailable")
+            {
+                let detail = picker
+                    .session
+                    .matches()
+                    .iter()
+                    .find(|matched| matched.item().id() == "git-worktree-branch-unavailable")
+                    .map(|matched| matched.item().detail().to_owned())
+                    .unwrap_or_default();
+                return Err(format!("worktree branch picker unavailable: {detail}"));
+            }
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    Err("timed out waiting for worktree branch picker load".to_owned())
 }
 
 pub(super) fn select_dashboard_row_matching_path(
@@ -1970,7 +2028,7 @@ pub(super) fn prepare_quickfix_workspace_search_picker(
 }
 
 // ---------------------------------------------------------------------------
-// LeaveOpen exit action
+// Streamed command worker helpers
 // ---------------------------------------------------------------------------
 
 pub(super) fn wait_for_streamed_command_worker_done(

@@ -5,18 +5,18 @@ use editor_plugin_api::{
     PluginVimMode,
 };
 
-pub const HOOK_LSP_START: &str = "lsp.server-start";
-pub const HOOK_LSP_STOP: &str = "lsp.server-stop";
-pub const HOOK_LSP_RESTART: &str = "lsp.server-restart";
-pub const HOOK_LSP_LOG: &str = "lsp.open-log";
-pub const HOOK_LSP_DEFINITION: &str = "lsp.goto-definition";
-pub const HOOK_LSP_REFERENCES: &str = "lsp.goto-references";
-pub const HOOK_LSP_IMPLEMENTATION: &str = "lsp.goto-implementation";
-pub const HOOK_LSP_DIAGNOSTICS: &str = "lsp.diagnostics";
-pub const HOOK_LSP_CODE_ACTIONS: &str = "lsp.code-actions";
-pub const HOOK_LSP_COPILOT_SIGN_IN: &str = "lsp.copilot-sign-in";
-pub const HOOK_LSP_COPILOT_SIGN_OUT: &str = "lsp.copilot-sign-out";
-pub const HOOK_LSP_INSTALL: &str = "lsp.install-server";
+pub const HOOK_LSP_START: &str = editor_plugin_api::volt::hook::lsp::START;
+pub const HOOK_LSP_STOP: &str = editor_plugin_api::volt::hook::lsp::STOP;
+pub const HOOK_LSP_RESTART: &str = editor_plugin_api::volt::hook::lsp::RESTART;
+pub const HOOK_LSP_LOG: &str = editor_plugin_api::volt::hook::lsp::LOG;
+pub const HOOK_LSP_DEFINITION: &str = editor_plugin_api::volt::hook::lsp::DEFINITION;
+pub const HOOK_LSP_REFERENCES: &str = editor_plugin_api::volt::hook::lsp::REFERENCES;
+pub const HOOK_LSP_IMPLEMENTATION: &str = editor_plugin_api::volt::hook::lsp::IMPLEMENTATION;
+pub const HOOK_LSP_DIAGNOSTICS: &str = editor_plugin_api::volt::hook::lsp::DIAGNOSTICS;
+pub const HOOK_LSP_CODE_ACTIONS: &str = editor_plugin_api::volt::hook::lsp::CODE_ACTIONS;
+pub const HOOK_LSP_COPILOT_SIGN_IN: &str = editor_plugin_api::volt::hook::lsp::COPILOT_SIGN_IN;
+pub const HOOK_LSP_COPILOT_SIGN_OUT: &str = editor_plugin_api::volt::hook::lsp::COPILOT_SIGN_OUT;
+pub const HOOK_LSP_INSTALL: &str = editor_plugin_api::volt::hook::lsp::INSTALL;
 pub const CODE_ACTIONS_CHORD: &str = "Ctrl+Space";
 pub const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
 pub const COPILOT_ENABLED_DEFAULT: bool = false;
@@ -1099,6 +1099,16 @@ pub fn package() -> PluginPackage {
             Some(".rng"),
         ),
     ])
+}
+
+/// Dispatches jump commands through `volt::lsp`. Lifecycle commands stay on host hooks.
+pub fn run_volt_command(name: &str) -> bool {
+    match name {
+        "lsp.definition" => editor_plugin_api::volt::lsp::goto_definition(),
+        "lsp.references" => editor_plugin_api::volt::lsp::goto_references(),
+        "lsp.implementation" => editor_plugin_api::volt::lsp::goto_implementation(),
+        _ => false,
+    }
 }
 
 /// Returns LSP server specifications compiled into the user library.

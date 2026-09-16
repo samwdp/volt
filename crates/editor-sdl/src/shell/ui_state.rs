@@ -726,13 +726,14 @@ impl PickerOverlay {
         self.quickfix_entries = quickfix_entries;
         self.session.set_items(items);
         self.session.set_selected_index(selected_index);
+        self.ensure_selected_picker_preview();
     }
 
     fn append_query(&mut self, text: &str) {
         let mut query = self.session.query().to_owned();
         query.push_str(text);
         self.session.set_query(query);
-        self.ensure_selected_workspace_file_preview();
+        self.ensure_selected_picker_preview();
     }
 
     fn backspace_query(&mut self) {
@@ -740,8 +741,38 @@ impl PickerOverlay {
         if query.pop().is_some() {
             self.session
                 .set_query(query.into_iter().collect::<String>());
-            self.ensure_selected_workspace_file_preview();
+            self.ensure_selected_picker_preview();
         }
+    }
+
+    fn ensure_selected_picker_preview(&mut self) {
+        if self.source == Some(PickerSource::WorkspaceFiles) {
+            self.ensure_selected_workspace_file_preview();
+            return;
+        }
+        if !matches!(self.mode, PickerMode::WorkspaceSearch { .. }) {
+            return;
+        }
+        let Some(selected) = self.session.selected() else {
+            return;
+        };
+        let item_id = selected.item().id().to_owned();
+        let Some(PickerAction::OpenFileLocation { path, target }) = self.actions.get(&item_id)
+        else {
+            return;
+        };
+        let path = path.clone();
+        let target = *target;
+        if selected
+            .item()
+            .preview()
+            .is_some_and(|preview| preview.lines().count() > 1)
+        {
+            return;
+        }
+        let preview = file_context_preview(&path, target)
+            .unwrap_or_else(|| path.display().to_string());
+        self.session.set_item_preview(&item_id, preview);
     }
 
     fn ensure_selected_workspace_file_preview(&mut self) {
@@ -765,12 +796,12 @@ impl PickerOverlay {
 
     fn select_next(&mut self) {
         self.session.select_next();
-        self.ensure_selected_workspace_file_preview();
+        self.ensure_selected_picker_preview();
     }
 
     fn select_previous(&mut self) {
         self.session.select_previous();
-        self.ensure_selected_workspace_file_preview();
+        self.ensure_selected_picker_preview();
     }
 }
 
@@ -914,6 +945,7 @@ pub(crate) struct ShellUiState {
     dismissed_popups: BTreeMap<WorkspaceId, DismissedPopupState>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
+    worktree_branch_load: WorktreeBranchLoadState,
     git_head_blobs: GitHeadBlobCache,
     autocomplete_worker: AutocompleteWorkerState,
     completion_resolve_worker: CompletionResolveWorkerState,
@@ -923,6 +955,7 @@ pub(crate) struct ShellUiState {
     file_reload_worker: FileReloadWorkerState,
     syntax_refresh_worker: SyntaxRefreshWorkerState,
     lsp_sync_worker: LspSyncWorkerState,
+    lsp_ui_worker: LspUiWorkerState,
     streamed_command_worker: StreamedCommandWorkerState,
     git_editor: GitEditorState,
     issues_worker: IssuesWorkerState,
@@ -997,6 +1030,7 @@ impl ShellUiState {
             dismissed_popups: BTreeMap::new(),
             yank_flash: None,
             git_summary: GitSummaryState::new(),
+            worktree_branch_load: WorktreeBranchLoadState::new(),
             git_head_blobs: GitHeadBlobCache::new(),
             autocomplete_worker: AutocompleteWorkerState::new(),
             completion_resolve_worker: CompletionResolveWorkerState::new(),
@@ -1006,6 +1040,7 @@ impl ShellUiState {
             file_reload_worker: FileReloadWorkerState::new(),
             syntax_refresh_worker: SyntaxRefreshWorkerState::disabled(),
             lsp_sync_worker: LspSyncWorkerState::new(),
+            lsp_ui_worker: LspUiWorkerState::new(),
             streamed_command_worker: StreamedCommandWorkerState::new(),
             git_editor: GitEditorState::new(),
             issues_worker: IssuesWorkerState::new(),
@@ -1193,6 +1228,10 @@ impl ShellUiState {
 
     fn git_summary_state(&self) -> GitSummaryState {
         self.git_summary.clone()
+    }
+
+    fn worktree_branch_load_state(&self) -> WorktreeBranchLoadState {
+        self.worktree_branch_load.clone()
     }
 
     fn git_head_blob_cache(&self) -> GitHeadBlobCache {

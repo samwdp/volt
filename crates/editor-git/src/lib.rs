@@ -13,9 +13,9 @@ pub use editor_plugin_api::{
     repository_file_list_generation, repository_file_preview,
 };
 pub use probe::{
-    GitProbeSnapshot, git_probe_generation, git_probe_snapshot, git_probe_snapshot_with_numstat,
-    invalidate_git_probe_cache, invalidate_git_probe_cache_for, last_probe_generation,
-    parse_git_numstat,
+    GitProbeSnapshot, git_probe_generation, git_probe_snapshot, git_probe_snapshot_no_spawn,
+    git_probe_snapshot_with_numstat, invalidate_git_probe_cache, invalidate_git_probe_cache_for,
+    last_probe_generation, parse_git_numstat,
 };
 
 /// Human-readable summary of this crate's responsibility.

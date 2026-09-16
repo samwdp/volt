@@ -60,7 +60,9 @@ impl WorkspaceDockBranchCache {
     }
 
     pub(super) fn branch_for_root(&self, root: &Path) -> Option<String> {
-        git_probe_snapshot(root).dock_branch().map(str::to_owned)
+        git_probe_snapshot_no_spawn(root)
+            .dock_branch()
+            .map(str::to_owned)
     }
 }
 
@@ -147,9 +149,25 @@ pub(super) fn refresh_workspace_dock_branches(
     roots: &[PathBuf],
     _now: Instant,
 ) {
+    // UI/render path: never spawn git. Warm cache off-thread when missing.
+    let mut need_warm = Vec::new();
     for root in roots {
-        let _ = git_probe_snapshot(root);
+        let snapshot = git_probe_snapshot_no_spawn(root);
+        let needs_probe = (snapshot.present() && snapshot.dock_branch().is_none())
+            || (!snapshot.present() && root.join(".git").exists());
+        if needs_probe {
+            need_warm.push(root.clone());
+        }
     }
+    if need_warm.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        for root in need_warm {
+            let _ = git_probe_snapshot(&root);
+        }
+        ping_shell_wakeup();
+    });
 }
 
 pub(super) fn render_workspace_dock(

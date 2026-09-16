@@ -114,7 +114,7 @@ fn workspace_search_match_entry_builds_open_file_location_action() {
     assert_eq!(entry.item.detail(), "src\\main.rs | Ln 7, Col 5");
     assert_eq!(
         entry.item.preview().map(ToOwned::to_owned),
-        Some(root.join("src\\main.rs").display().to_string())
+        Some("fn main() {}".to_owned())
     );
     assert!(matches!(
         entry.action,

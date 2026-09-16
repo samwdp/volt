@@ -78,6 +78,7 @@ fn should_yield_after_typing_batch(
 
 /// Runs the SDL3 + SDL_ttf demo shell.
 pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
+    editor_jobs::mark_current_thread_as_ui();
     let mut startup_trace = StartupTrace::new();
     let log_file_path = default_error_log_path();
     install_panic_hook(log_file_path.clone());
@@ -503,6 +504,21 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                         false
                     }
                 };
+                let lsp_ui_changed = match apply_lsp_ui_worker_results(&mut state.runtime) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.lsp-ui-worker", ShellError::Runtime(error));
+                        false
+                    }
+                };
+                let volt_ui_changed = match apply_volt_host_actions(&mut state.runtime) {
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.volt-host", ShellError::Runtime(error));
+                        false
+                    }
+                };
+                let hover_changed = hover_changed || lsp_ui_changed || volt_ui_changed;
                 if let Some(frame) = typing_frame.as_mut() {
                     frame.hover_refresh = hover_refresh_started.elapsed();
                 }

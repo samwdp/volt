@@ -801,6 +801,11 @@ impl ShellState {
                 if let Some(autocomplete) = ui.autocomplete_mut()
                     && autocomplete.buffer_id == result.buffer_id
                     && autocomplete.is_visible()
+                    && autocomplete.docs_focused
+                    && autocomplete.selected().is_some_and(|entry| {
+                        entry.provider_id == result.provider_id
+                            && entry.replacement == result.replacement
+                    })
                 {
                     autocomplete.apply_resolved_documentation(
                         &result.provider_id,
@@ -816,14 +821,19 @@ impl ShellState {
             }
         }
 
+        let docs_requested = self.ui()?.autocomplete().is_some_and(|autocomplete| {
+            autocomplete.is_visible() && autocomplete.docs_focused
+        });
+        if !docs_requested {
+            self.ui_mut()?.completion_resolve_worker.clear_pending();
+            return Ok(changed);
+        }
+
         let schedule = {
             let ui = self.ui()?;
             let Some(autocomplete) = ui.autocomplete() else {
                 return Ok(changed);
             };
-            if !autocomplete.is_visible() {
-                return Ok(changed);
-            }
             let Some(entry) = autocomplete.selected() else {
                 return Ok(changed);
             };
@@ -1131,6 +1141,7 @@ impl ShellState {
                 if let Some(autocomplete) = self.ui_mut()?.autocomplete_mut() {
                     autocomplete.blur_docs();
                 }
+                let _ = self.refresh_pending_completion_resolve()?;
                 Ok(true)
             }
             Keycode::Tab => {
@@ -1138,6 +1149,7 @@ impl ShellState {
                     autocomplete.blur_docs();
                 }
                 self.queue_suppressed_text_input_for_chord("Tab");
+                let _ = self.refresh_pending_completion_resolve()?;
                 Ok(true)
             }
             Keycode::Down | Keycode::J => {
@@ -1250,6 +1262,9 @@ impl ShellState {
         };
         if handled {
             self.queue_suppressed_text_input_for_chord(&chord);
+            if chord == "Tab" {
+                let _ = self.refresh_pending_completion_resolve()?;
+            }
         }
         Ok(handled)
     }

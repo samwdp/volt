@@ -15,6 +15,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64},
     },
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -63,6 +64,48 @@ fn completion_parser_handles_lists_and_docs() {
     assert!(!items[0].needs_resolve());
     assert!(items[0].raw_item().get("documentation").is_none());
     assert!(items[0].list_resolve_payload().is_some());
+}
+
+#[test]
+fn completion_parser_uses_label_details_for_list_type_text() {
+    let item = parse_completion_item(
+        "rust-analyzer",
+        &json!({
+            "label": "len",
+            "kind": 2,
+            "detail": "pub const fn len(&self) -> usize",
+            "labelDetails": {
+                "detail": "(&self) -> usize",
+                "description": "alloc::vec::Vec"
+            }
+        }),
+    )
+    .expect("parse completion item");
+    assert_eq!(item.detail(), Some("pub const fn len(&self) -> usize"));
+    assert_eq!(item.label_detail(), Some("(&self) -> usize"));
+    assert_eq!(item.label_description(), Some("alloc::vec::Vec"));
+    assert_eq!(
+        item.list_type_text().as_deref(),
+        Some("(&self) -> usize  alloc::vec::Vec")
+    );
+}
+
+#[test]
+fn completion_list_type_text_uses_detail_when_label_details_missing() {
+    assert_eq!(
+        completion_list_type_text(
+            "ArrayType",
+            None,
+            None,
+            Some("javax.lang.model.type.ArrayType")
+        )
+        .as_deref(),
+        Some("javax.lang.model.type.ArrayType")
+    );
+    assert_eq!(
+        completion_list_type_text("foo", None, None, Some("foo")),
+        None
+    );
 }
 
 #[test]
@@ -1274,6 +1317,33 @@ fn work_done_progress_params_generate_unique_tokens() {
             SignatureHelpRequest::METHOD
         )))
     );
+}
+
+#[test]
+fn hover_request_blocks_until_timeout_when_server_silent() {
+    let path = PathBuf::from("src").join("main.rs");
+    let session = test_session_handle("rust-analyzer", &path, BTreeMap::new());
+    let started = Instant::now();
+    let result = session.hover(&path, TextPoint::new(0, 0));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= REQUEST_TIMEOUT,
+        "silent hover returned in {elapsed:?}, expected at least {REQUEST_TIMEOUT:?}"
+    );
+    assert!(
+        elapsed < REQUEST_TIMEOUT + Duration::from_millis(800),
+        "silent hover hung for {elapsed:?}"
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn jumping_frame_bucket_is_session_request_recv_timeout() {
+    // Phase 0: with a silent server, `LspSessionHandle::request` waits on
+    // `recv_timeout(REQUEST_TIMEOUT)`. That is the jumping frame bucket when
+    // hover/signature/goto run on the UI thread. Shell UI must schedule those
+    // calls on a worker so movement/typing frames do not include this wait.
+    assert_eq!(REQUEST_TIMEOUT, Duration::from_millis(400));
 }
 
 #[test]

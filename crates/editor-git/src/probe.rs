@@ -162,13 +162,22 @@ pub fn invalidate_git_probe_cache_for(root: impl AsRef<Path>) {
 /// Returns HEAD, branch, and present for `root`, spawning git only on identity miss fallbacks.
 #[must_use]
 pub fn git_probe_snapshot(root: impl AsRef<Path>) -> GitProbeSnapshot {
-    load_snapshot(root.as_ref(), false)
+    load_snapshot(root.as_ref(), false, true)
 }
 
 /// Same as [`git_probe_snapshot`], plus numstat when HEAD or the index identity changed.
 #[must_use]
 pub fn git_probe_snapshot_with_numstat(root: impl AsRef<Path>) -> GitProbeSnapshot {
-    load_snapshot(root.as_ref(), true)
+    load_snapshot(root.as_ref(), true, true)
+}
+
+/// UI-safe probe: filesystem/cache only. Never spawns `git`.
+///
+/// Use from render/input/save paths. Background workers should call
+/// [`git_probe_snapshot`] / [`git_probe_snapshot_with_numstat`] to warm the cache.
+#[must_use]
+pub fn git_probe_snapshot_no_spawn(root: impl AsRef<Path>) -> GitProbeSnapshot {
+    load_snapshot(root.as_ref(), false, false)
 }
 
 /// Parses `git diff --numstat` stdout into `(added, removed)` line counts.
@@ -186,7 +195,7 @@ pub fn parse_git_numstat(output: &str) -> (usize, usize) {
     (added, removed)
 }
 
-fn load_snapshot(root: &Path, want_numstat: bool) -> GitProbeSnapshot {
+fn load_snapshot(root: &Path, want_numstat: bool, allow_spawn: bool) -> GitProbeSnapshot {
     let key = cache_key(root);
     let identity = probe_identity(root);
     let cached = {
@@ -199,11 +208,14 @@ fn load_snapshot(root: &Path, want_numstat: bool) -> GitProbeSnapshot {
         if !want_numstat || entry.numstat_identity.as_ref() == Some(&identity) {
             return snapshot_from_entry(entry, want_numstat);
         }
+        if !allow_spawn {
+            return snapshot_from_entry(entry, false);
+        }
         return fill_numstat(root, &key, identity, entry.snapshot.clone());
     }
 
-    let snapshot = compute_identity_snapshot(root, &identity);
-    if want_numstat {
+    let snapshot = compute_identity_snapshot(root, &identity, allow_spawn);
+    if want_numstat && allow_spawn {
         fill_numstat(root, &key, identity, snapshot)
     } else {
         lock_cache().insert(
@@ -266,8 +278,12 @@ fn fill_numstat(
     snapshot
 }
 
-fn compute_identity_snapshot(root: &Path, identity: &ProbeIdentity) -> GitProbeSnapshot {
-    let Some(dirs) = resolve_probe_dirs(root) else {
+fn compute_identity_snapshot(
+    root: &Path,
+    identity: &ProbeIdentity,
+    allow_spawn: bool,
+) -> GitProbeSnapshot {
+    let Some(dirs) = resolve_probe_dirs(root, allow_spawn) else {
         return GitProbeSnapshot::absent(next_identity_revision());
     };
     let (git_dir, common_dir) = dirs;
@@ -288,10 +304,12 @@ fn compute_identity_snapshot(root: &Path, identity: &ProbeIdentity) -> GitProbeS
                 .or_else(|| packed_ref_sha(&git_dir, &common_dir, &ref_name));
             match branch {
                 Some(branch) => (Some(branch), sha),
-                None => fallback_rev_parse(root, sha),
+                None if allow_spawn => fallback_rev_parse(root, sha),
+                None => (None, sha),
             }
         }
-        HeadParse::Missing | HeadParse::Ambiguous => fallback_rev_parse(root, None),
+        HeadParse::Missing | HeadParse::Ambiguous if allow_spawn => fallback_rev_parse(root, None),
+        HeadParse::Missing | HeadParse::Ambiguous => (None, None),
     };
 
     GitProbeSnapshot {
@@ -309,12 +327,15 @@ fn next_identity_revision() -> u64 {
     identity_revision().fetch_add(1, Ordering::Relaxed)
 }
 
-fn resolve_probe_dirs(root: &Path) -> Option<(PathBuf, PathBuf)> {
+fn resolve_probe_dirs(root: &Path, allow_spawn: bool) -> Option<(PathBuf, PathBuf)> {
     if let Some(dirs) = resolve_git_dirs(root) {
         return Some(dirs);
     }
     let marker = root.join(".git");
     if !marker.is_file() {
+        return None;
+    }
+    if !allow_spawn {
         return None;
     }
     let git_dir = rev_parse_git_dir(root)?;
@@ -472,6 +493,13 @@ fn probe_numstat(root: &Path) -> (usize, usize) {
 }
 
 fn run_git(root: &Path, args: &[&str], allowed_exit_codes: &[i32]) -> Option<String> {
+    if editor_jobs::current_thread_is_ui() {
+        eprintln!(
+            "{}",
+            editor_jobs::git_process_on_ui_thread_error("editor-git probe")
+        );
+        return None;
+    }
     spawn_generation().fetch_add(1, Ordering::Relaxed);
     let output = run_owned_git(root, args)?;
     let exit_code = output.exit_code?;

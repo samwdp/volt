@@ -38,3 +38,6 @@ path = "src/lib.rs"
 name = "editor_lsp"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

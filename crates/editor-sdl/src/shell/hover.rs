@@ -41,8 +41,7 @@ fn hover_overlay_draft_for_buffer(
     buffer_id: BufferId,
     buffer: &ShellBuffer,
     registry: &HoverRegistry,
-    lsp_client: Option<&Arc<LspClientManager>>,
-    lsp_context: Option<&ActiveLspBufferContext>,
+    lsp_payload: Option<&LspUiHoverPayload>,
     user_library: &dyn UserLibrary,
 ) -> Option<HoverOverlayDraft> {
     if registry.providers.is_empty() {
@@ -63,12 +62,17 @@ fn hover_overlay_draft_for_buffer(
                 HoverProviderKind::TestHover => vec![HoverProviderFragment::PlainLines(
                     hover_test_provider_lines(buffer, token_info.as_ref()),
                 )],
-                HoverProviderKind::Lsp => {
-                    hover_lsp_provider_fragments(buffer, lsp_client, lsp_context)
-                }
-                HoverProviderKind::SignatureHelp => {
-                    hover_signature_provider_fragments(buffer, lsp_client, lsp_context)
-                }
+                HoverProviderKind::Lsp => lsp_payload
+                    .map(|payload| hover_fragments_from_payload(&payload.hovers))
+                    .unwrap_or_default(),
+                HoverProviderKind::SignatureHelp => lsp_payload
+                    .map(|payload| {
+                        hover_signature_fragments_from_payload(
+                            buffer.language_id(),
+                            &payload.signatures,
+                        )
+                    })
+                    .unwrap_or_default(),
                 HoverProviderKind::Diagnostics => {
                     hover_diagnostic_provider_fragments(buffer, user_library)
                 }
@@ -83,17 +87,22 @@ fn hover_overlay_draft_for_buffer(
             })
         })
         .collect::<Vec<_>>();
-    let providers = if providers.is_empty() {
-        vec![HoverProviderDraft {
-            provider_label: "Hover".to_owned(),
-            provider_icon: editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE.to_owned(),
-            fragments: vec![HoverProviderFragment::PlainLines(
-                hover_empty_provider_lines(buffer, token_info.as_ref()),
-            )],
-        }]
-    } else {
-        providers
-    };
+    if providers.is_empty() {
+        lsp_payload.as_ref()?;
+        return Some(HoverOverlayDraft {
+            buffer_id,
+            anchor,
+            token,
+            providers: vec![HoverProviderDraft {
+                provider_label: "Hover".to_owned(),
+                provider_icon: editor_icons::symbols::md::MD_HELP_CIRCLE_OUTLINE.to_owned(),
+                fragments: vec![HoverProviderFragment::PlainLines(
+                    hover_empty_provider_lines(buffer, token_info.as_ref()),
+                )],
+            }],
+            line_limit: registry.line_limit,
+        });
+    }
     Some(HoverOverlayDraft {
         buffer_id,
         anchor,
@@ -603,12 +612,9 @@ fn hover_manual_provider_lines(buffer: &ShellBuffer, provider: &HoverProviderSpe
         .unwrap_or_default()
 }
 
-fn hover_lsp_provider_fragments(
-    buffer: &ShellBuffer,
-    lsp_client: Option<&Arc<LspClientManager>>,
-    lsp_context: Option<&ActiveLspBufferContext>,
+fn hover_fragments_from_payload(
+    hovers: &[editor_lsp::LspHoverContents],
 ) -> Vec<HoverProviderFragment> {
-    let hovers = synced_hover_lsp_request(buffer, lsp_client, lsp_context, LspClientManager::hover);
     let show_server_labels = hovers.len() > 1;
     let mut fragments = Vec::new();
     for hover in hovers {
@@ -628,18 +634,10 @@ fn hover_lsp_provider_fragments(
     fragments
 }
 
-fn hover_signature_provider_fragments(
-    buffer: &ShellBuffer,
-    lsp_client: Option<&Arc<LspClientManager>>,
-    lsp_context: Option<&ActiveLspBufferContext>,
+fn hover_signature_fragments_from_payload(
+    language: Option<&str>,
+    signatures: &[editor_lsp::LspSignatureHelpContents],
 ) -> Vec<HoverProviderFragment> {
-    let signatures = synced_hover_lsp_request_at_point(
-        lsp_client,
-        lsp_context,
-        hover_signature_request_point(buffer),
-        LspClientManager::signature_help,
-    );
-    let language = buffer.language_id();
     let show_server_labels = signatures.len() > 1;
     let mut fragments = Vec::new();
     for signature in signatures {
@@ -659,39 +657,6 @@ fn hover_signature_provider_fragments(
         }
     }
     fragments
-}
-
-fn synced_hover_lsp_request<T>(
-    buffer: &ShellBuffer,
-    lsp_client: Option<&Arc<LspClientManager>>,
-    lsp_context: Option<&ActiveLspBufferContext>,
-    request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<T>, LspClientError>,
-) -> Vec<T> {
-    synced_hover_lsp_request_at_point(lsp_client, lsp_context, buffer.cursor_point(), request)
-}
-
-fn synced_hover_lsp_request_at_point<T>(
-    lsp_client: Option<&Arc<LspClientManager>>,
-    lsp_context: Option<&ActiveLspBufferContext>,
-    position: TextPoint,
-    request: fn(&LspClientManager, &Path, TextPoint) -> Result<Vec<T>, LspClientError>,
-) -> Vec<T> {
-    let Some(lsp_client) = lsp_client else {
-        return Vec::new();
-    };
-    let Some(context) = lsp_context else {
-        return Vec::new();
-    };
-    lsp_client
-        .sync_buffer(
-            &context.path,
-            &context.text,
-            context.revision,
-            context.root.as_deref(),
-        )
-        .ok()
-        .and_then(|_| request(lsp_client, &context.path, position).ok())
-        .unwrap_or_default()
 }
 
 fn hover_diagnostic_provider_fragments(

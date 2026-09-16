@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 abi_stable = "0.11"
+arboard = "3.6.1"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 fontdue = "0.9.3"
@@ -23,6 +24,7 @@ notify = "8.2.0"
 resvg = "0.47.0"
 rustybuzz = "0.20.1"
 url = "2.5.7"
+serde_json = "1.0.149"
 
 [dependencies.agent-client-protocol]
 version = "0.10.2"
@@ -114,9 +116,6 @@ version = "2.12.1"
 default-features = false
 features = ["tls"]
 
-[dependencies.rustc-hash]
-version = "2.1.1"
-
 [dev-dependencies]
 tree-sitter-rust = "0.24.1"
 
@@ -157,3 +156,6 @@ test = false
 doctest = false
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

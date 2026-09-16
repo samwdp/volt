@@ -217,13 +217,13 @@ pub(crate) fn highlight_tree(
         if !general_predicates_match(
             &loaded.query,
             query_match.pattern_index,
-            query_match.captures,
+            query_match.captures(),
             buffer,
         ) {
             continue;
         }
 
-        for capture in query_match.captures {
+        for capture in query_match.captures() {
             let node = capture.node;
             let start = node.start_position();
             let end = node.end_position();
@@ -281,13 +281,13 @@ pub(crate) fn collect_injection_regions(
         if !general_predicates_match(
             injections_query,
             query_match.pattern_index,
-            query_match.captures,
+            query_match.captures(),
             buffer,
         ) {
             continue;
         }
 
-        let language_capture = query_match.captures.iter().find_map(|capture| {
+        let language_capture = query_match.captures().iter().find_map(|capture| {
             let capture_name = capture_names.get(capture.index as usize)?;
             (*capture_name == "injection.language").then(|| {
                 buffer_text_for_byte_range(
@@ -297,7 +297,7 @@ pub(crate) fn collect_injection_regions(
                 )
             })?
         });
-        for capture in query_match.captures {
+        for capture in query_match.captures() {
             let Some(capture_name) = capture_names.get(capture.index as usize) else {
                 continue;
             };

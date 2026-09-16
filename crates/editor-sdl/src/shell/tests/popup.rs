@@ -345,7 +345,9 @@ fn leave_open_keeps_popup_buffer_after_process_exits() -> Result<(), String> {
             args: vec!["/C".to_owned(), "exit 0".to_owned()],
             env: Vec::new(),
             cwd: std::env::temp_dir(),
-            on_exit: StreamedCommandExitAction::LeaveOpen,
+            on_exit: StreamedCommandExitAction::LeaveOpenAndMaybeReloadUserLibrary {
+                command: "true".to_owned(),
+            },
             notify_on_success: false,
             notify_on_failure: false,
         },
@@ -356,11 +358,11 @@ fn leave_open_keeps_popup_buffer_after_process_exits() -> Result<(), String> {
     let ui = shell_ui(&state.runtime)?;
     assert!(
         ui.buffer(buffer_id).is_some(),
-        "LeaveOpen: popup buffer must remain open after process exits"
+        "LeaveOpenAndMaybeReloadUserLibrary: popup buffer must remain open after process exits"
     );
     assert!(
         !ui.streamed_command_worker.contains(buffer_id),
-        "LeaveOpen: worker should be done"
+        "LeaveOpenAndMaybeReloadUserLibrary: worker should be done"
     );
     Ok(())
 }
@@ -388,7 +390,9 @@ fn closing_streamed_command_popup_kills_worker() -> Result<(), String> {
             args: vec!["/C".to_owned(), "timeout /T 60 /NOBREAK".to_owned()],
             env: Vec::new(),
             cwd: std::env::temp_dir(),
-            on_exit: StreamedCommandExitAction::LeaveOpen,
+            on_exit: StreamedCommandExitAction::LeaveOpenAndMaybeReloadUserLibrary {
+                command: "sleep".to_owned(),
+            },
             notify_on_success: false,
             notify_on_failure: false,
         },

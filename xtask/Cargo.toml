@@ -20,3 +20,6 @@ workspace = true
 path = "src/main.rs"
 name = "xtask"
 required-features = []
+
+[lints]
+workspace = true

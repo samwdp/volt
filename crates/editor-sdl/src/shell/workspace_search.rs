@@ -31,11 +31,12 @@ pub(super) struct SearchPickerData {
     pub(super) selected_index: usize,
 }
 
-pub(super) fn workspace_search_entries(
+pub(super) fn workspace_search_entries_cancellable(
     process_registry: &Arc<Mutex<ProcessRegistry>>,
     workspace_id: ProcessWorkspaceId,
     root: &Path,
     query: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> SearchPickerData {
     let query = query.trim();
     if query.is_empty() {
@@ -44,8 +45,20 @@ pub(super) fn workspace_search_entries(
             selected_index: 0,
         };
     }
+    if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+        return SearchPickerData {
+            entries: Vec::new(),
+            selected_index: 0,
+        };
+    }
 
-    let entries = match workspace_search_output(process_registry, workspace_id, root, query) {
+    let entries = match workspace_search_output_cancellable(
+        process_registry,
+        workspace_id,
+        root,
+        query,
+        cancel,
+    ) {
         Ok(output) => {
             let parsed = parse_workspace_search_entries(root, query, &output);
             if parsed.is_empty() {
@@ -59,6 +72,7 @@ pub(super) fn workspace_search_entries(
                 parsed
             }
         }
+        Err(error) if error == "search cancelled" => Vec::new(),
         Err(error) => vec![workspace_search_status_entry(
             query,
             "Search unavailable",
@@ -73,26 +87,41 @@ pub(super) fn workspace_search_entries(
     }
 }
 
-pub(super) fn workspace_search_output(
+pub(super) fn workspace_search_output_cancellable(
     process_registry: &Arc<Mutex<ProcessRegistry>>,
     workspace_id: ProcessWorkspaceId,
     root: &Path,
     query: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<String, String> {
-    match workspace_search_rg_output(process_registry, workspace_id, root, query) {
+    match workspace_search_rg_output_cancellable(
+        process_registry,
+        workspace_id,
+        root,
+        query,
+        cancel,
+    ) {
         Ok(output) => Ok(output),
-        Err(rg_error) => workspace_search_grep_output(process_registry, workspace_id, root, query)
-            .map_err(|grep_error| {
-                format!("workspace search requires `rg` or `grep`: {rg_error}; {grep_error}")
-            }),
+        Err(rg_error) if rg_error == "search cancelled" => Err(rg_error),
+        Err(rg_error) => workspace_search_grep_output_cancellable(
+            process_registry,
+            workspace_id,
+            root,
+            query,
+            cancel,
+        )
+        .map_err(|grep_error| {
+            format!("workspace search requires `rg` or `grep`: {rg_error}; {grep_error}")
+        }),
     }
 }
 
-pub(super) fn workspace_search_rg_output(
+pub(super) fn workspace_search_rg_output_cancellable(
     process_registry: &Arc<Mutex<ProcessRegistry>>,
     workspace_id: ProcessWorkspaceId,
     root: &Path,
     query: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<String, String> {
     let mut args = vec![
         "--vimgrep".to_owned(),
@@ -100,6 +129,9 @@ pub(super) fn workspace_search_rg_output(
         "--color".to_owned(),
         "never".to_owned(),
         "--fixed-strings".to_owned(),
+        // Bound per-file matches so live queries stop instead of scanning forever.
+        "--max-count".to_owned(),
+        WORKSPACE_SEARCH_OUTPUT_LIMIT.to_string(),
     ];
     if !search_is_case_sensitive(query) {
         args.push("--ignore-case".to_owned());
@@ -107,14 +139,15 @@ pub(super) fn workspace_search_rg_output(
     args.push("--".to_owned());
     args.push(query.to_owned());
     args.push(".".to_owned());
-    run_search_command(process_registry, workspace_id, root, "rg", &args)
+    run_search_command_cancellable(process_registry, workspace_id, root, "rg", &args, cancel)
 }
 
-pub(super) fn workspace_search_grep_output(
+pub(super) fn workspace_search_grep_output_cancellable(
     process_registry: &Arc<Mutex<ProcessRegistry>>,
     workspace_id: ProcessWorkspaceId,
     root: &Path,
     query: &str,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<String, String> {
     let mut args = vec![
         "-R".to_owned(),
@@ -122,6 +155,8 @@ pub(super) fn workspace_search_grep_output(
         "-F".to_owned(),
         "--binary-files=without-match".to_owned(),
         "--exclude-dir=.git".to_owned(),
+        "-m".to_owned(),
+        WORKSPACE_SEARCH_OUTPUT_LIMIT.to_string(),
     ];
     if !search_is_case_sensitive(query) {
         args.push("-i".to_owned());
@@ -129,15 +164,16 @@ pub(super) fn workspace_search_grep_output(
     args.push("--".to_owned());
     args.push(query.to_owned());
     args.push(".".to_owned());
-    run_search_command(process_registry, workspace_id, root, "grep", &args)
+    run_search_command_cancellable(process_registry, workspace_id, root, "grep", &args, cancel)
 }
 
-pub(super) fn run_search_command(
+pub(super) fn run_search_command_cancellable(
     process_registry: &Arc<Mutex<ProcessRegistry>>,
     workspace_id: ProcessWorkspaceId,
     root: &Path,
     command: &str,
     args: &[String],
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<String, String> {
     let launch_spec = ProcessLaunchSpec::new(command, args.to_vec())
         .with_workspace(workspace_id)
@@ -169,19 +205,29 @@ pub(super) fn run_search_command(
         Ok(bytes)
     });
 
-    let (stdout, reached_limit) = collect_search_output(stdout, WORKSPACE_SEARCH_OUTPUT_LIMIT)
-        .map_err(|error| format!("failed to read `{command}` output: {error}"))?;
-    if reached_limit {
+    let (stdout, reached_limit) =
+        collect_search_output_cancellable(stdout, WORKSPACE_SEARCH_OUTPUT_LIMIT, cancel)
+            .map_err(|error| format!("failed to read `{command}` output: {error}"))?;
+    if reached_limit || cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
         if let Ok(mut registry) = process_registry.lock() {
             let _ = registry.teardown_process(owned_id, std::time::Duration::ZERO);
         }
         let _ = stderr_reader.join();
+        if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err("search cancelled".to_owned());
+        }
         return Ok(stdout);
     }
 
     if let Ok(mut registry) = process_registry.lock() {
         while registry.is_alive(owned_id) {
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+                let _ = registry.teardown_process(owned_id, std::time::Duration::ZERO);
+                drop(registry);
+                let _ = stderr_reader.join();
+                return Err("search cancelled".to_owned());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
     }
     let stderr = stderr_reader
@@ -209,9 +255,10 @@ pub(super) fn run_search_command(
     Ok(stdout)
 }
 
-pub(super) fn collect_search_output(
+pub(super) fn collect_search_output_cancellable(
     stdout: impl std::io::Read,
     limit: usize,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<(String, bool)> {
     let mut reader = BufReader::new(stdout);
     let mut output = String::new();
@@ -220,6 +267,9 @@ pub(super) fn collect_search_output(
     let limit = limit.max(1);
 
     loop {
+        if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Ok((output, true));
+        }
         line.clear();
         let bytes_read = reader.read_line(&mut line)?;
         if bytes_read == 0 {
@@ -322,7 +372,12 @@ pub(super) fn workspace_search_match_entry(
         target,
         preview_line,
     );
-    let preview = file_context_preview(&path, target).or_else(|| Some(path.display().to_string()));
+    // Match line only here — full file body loads on selection (telescope-style).
+    let preview = if preview_line.is_empty() {
+        None
+    } else {
+        Some(preview_line.to_owned())
+    };
     PickerEntry {
         item: PickerItem::new(
             format!("{}:{}:{}", path.display(), line_number, column + 1),
@@ -588,7 +643,7 @@ fn lsp_diagnostic_picker_entry(
     }
 }
 
-fn file_context_preview(path: &Path, target: TextPoint) -> Option<String> {
+pub(super) fn file_context_preview(path: &Path, target: TextPoint) -> Option<String> {
     let buffer = TextBuffer::load_from_path(path).ok()?;
     let line_count = buffer.line_count();
     if line_count == 0 {

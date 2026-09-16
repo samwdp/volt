@@ -298,24 +298,27 @@ impl LspClientManager {
     /// Removes Language Server Sessions whose Owned Processes are no longer registered.
     pub fn reap_dead_sessions(&self) -> Result<(), LspClientError> {
         let stale_keys = {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            let owned = {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+                state
+                    .sessions
+                    .iter()
+                    .filter_map(|(key, session)| {
+                        session
+                            .owned_process_id()
+                            .map(|owned_id| (key.clone(), owned_id))
+                    })
+                    .collect::<Vec<_>>()
+            };
             let registry = self.process_registry.lock().map_err(|_| {
                 LspClientError::Protocol("process registry mutex poisoned".to_owned())
             })?;
-            state
-                .sessions
-                .iter()
-                .filter_map(|(key, session)| {
-                    let owned_id = session.owned_process_id()?;
-                    if registry.root_pid(owned_id).is_none() {
-                        Some(key.clone())
-                    } else {
-                        None
-                    }
-                })
+            owned
+                .into_iter()
+                .filter_map(|(key, owned_id)| registry.root_pid(owned_id).is_none().then_some(key))
                 .collect::<BTreeSet<_>>()
         };
         self.shutdown_sessions(&stale_keys)

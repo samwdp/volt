@@ -265,11 +265,13 @@ impl ShellBuffer {
         if let Some(state) = self.acp_state.as_mut() {
             let tool_key = tool_call.tool_call_id.to_string();
             if let Some(index) = state.tool_item_indices.get(tool_key.as_str()).copied() {
-                state.output_items[index] = AcpOutputItem::ToolCall(tool_call);
+                state.output_items[index] = AcpOutputItem::ToolCall(Box::new(tool_call));
             } else {
                 let index = state.output_items.len();
                 state.tool_item_indices.insert(tool_key, index);
-                state.output_items.push(AcpOutputItem::ToolCall(tool_call));
+                state
+                    .output_items
+                    .push(AcpOutputItem::ToolCall(Box::new(tool_call)));
             }
         }
         self.acp_rebuild_output_view(follow_output);
@@ -298,7 +300,9 @@ impl ShellBuffer {
                     .unwrap_or_else(|_| acp_tool_call_from_partial_update(&update));
                 let index = state.output_items.len();
                 state.tool_item_indices.insert(tool_key, index);
-                state.output_items.push(AcpOutputItem::ToolCall(tool_call));
+                state
+                    .output_items
+                    .push(AcpOutputItem::ToolCall(Box::new(tool_call)));
             }
         }
         self.acp_rebuild_output_view(follow_output);
@@ -419,12 +423,12 @@ impl ShellBuffer {
     fn git_status_refresh_due(&self, root: &Path, _now: Instant) -> bool {
         self.git_snapshot.is_none()
             || self.git_status_root.as_deref() != Some(root)
-            || self.git_status_probe_revision != Some(git_probe_snapshot(root).revision())
+            || self.git_status_probe_revision != Some(git_probe_snapshot_no_spawn(root).revision())
     }
 
     fn mark_git_status_refreshed(&mut self, root: &Path, _now: Instant) {
         self.git_status_root = Some(root.to_path_buf());
-        self.git_status_probe_revision = Some(git_probe_snapshot(root).revision());
+        self.git_status_probe_revision = Some(git_probe_snapshot_no_spawn(root).revision());
     }
 
     fn git_view(&self) -> Option<&GitViewState> {
@@ -488,7 +492,8 @@ impl ShellBuffer {
     fn mark_git_fringe_stale(&mut self) {
         if matches!(self.kind, BufferKind::File) && self.git_fringe.is_some() {
             self.git_fringe_dirty = true;
-            self.git_fringe_last_edit_at = None;
+            // Debounce like edits so save does not force same-frame fringe work.
+            self.git_fringe_last_edit_at = Some(Instant::now());
         }
     }
 

@@ -82,9 +82,12 @@ impl Drop for LspSessionHandle {
         self.disconnected.store(true, Ordering::Release);
         if let (Some(id), Some(registry)) =
             (self.owned_process_id.take(), self.process_registry.take())
-            && let Ok(mut registry) = registry.lock()
         {
-            let _ = registry.teardown_process(id, Duration::from_millis(200));
+            std::thread::spawn(move || {
+                if let Ok(mut registry) = registry.lock() {
+                    let _ = registry.teardown_process(id, Duration::from_millis(200));
+                }
+            });
             return;
         }
         if let Some(child) = self.child.as_ref()

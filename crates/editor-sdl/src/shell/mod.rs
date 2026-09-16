@@ -123,17 +123,17 @@ use editor_fs::{
 };
 use editor_git::{
     GitLogEntry, GitStatusSnapshot, detect_in_progress, git_probe_snapshot,
-    git_probe_snapshot_with_numstat, invalidate_git_probe_cache_for,
+    git_probe_snapshot_no_spawn, git_probe_snapshot_with_numstat, invalidate_git_probe_cache_for,
     invalidate_repository_file_list_cache_for, list_repository_files, parse_log_oneline,
     parse_stash_list, parse_status, repository_file_preview,
 };
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity,
-    LanguageServerRegistry, LspClientError, LspClientManager, LspCodeAction,
-    LspCompletionResolvePayload, LspFormattingOptions, LspInlineCompletionItem, LspLiveSession,
-    LspLocation, LspLogEntry, LspLogSnapshot, LspNotificationAction, LspNotificationLevel,
-    LspNotificationSnapshot, LspTextEdit, LspWorkspaceDiagnostic,
+    LanguageServerRegistry, LspClientManager, LspCodeAction, LspCompletionResolvePayload,
+    LspFormattingOptions, LspInlineCompletionItem, LspLiveSession, LspLocation, LspLogEntry,
+    LspLogSnapshot, LspNotificationAction, LspNotificationLevel, LspNotificationSnapshot,
+    LspTextEdit, LspWorkspaceDiagnostic,
 };
 use editor_picker::{
     PickerExportableRow, PickerExtraDispatch, PickerExtraKeybind, PickerItem, PickerOneShotContext,
@@ -157,7 +157,7 @@ use editor_plugin_api::{
     autocomplete_hooks, browser_hooks, buffer_kinds, dap_hooks, db_hooks, decode_modeline,
     flatten_modeline_text, flatten_modeline_to_spans, git_actions, git_hooks, git_sections,
     hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol, pdf_hooks,
-    plugin_hooks, terminal_hooks,
+    plugin_hooks, resolve_git_dirs, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -235,7 +235,9 @@ include!("overlay_commands.rs");
 include!("buffer_access.rs");
 include!("vim_search.rs");
 include!("workers_autocomplete.rs");
+include!("workers_lsp_ui.rs");
 include!("hover.rs");
+include!("volt_host.rs");
 include!("workers.rs");
 include!("vim_motion.rs");
 include!("vim_visual.rs");

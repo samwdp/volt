@@ -69,11 +69,12 @@ fn readme_path_priority(path: &Path) -> (u8, String) {
 }
 
 fn git_root(runtime: &EditorRuntime) -> Result<PathBuf, String> {
+    // Filesystem-only: never spawn `git rev-parse` on the UI thread.
     if let Some(root) = active_directory_root(runtime)? {
-        return resolve_git_root_from_path(&root).or(Ok(root));
+        return Ok(resolve_git_root_from_path(&root).unwrap_or(root));
     }
     if let Some(root) = active_workspace_root(runtime)? {
-        return resolve_git_root_from_path(&root).or(Ok(root));
+        return Ok(resolve_git_root_from_path(&root).unwrap_or(root));
     }
     env::current_dir().map_err(|error| format!("git status requires a workspace root: {error}"))
 }
@@ -108,53 +109,20 @@ fn normalize_git_output_path_windows(trimmed: &str) -> Option<PathBuf> {
     })
 }
 
-fn resolve_git_root_from_path(path: &Path) -> Result<PathBuf, String> {
-    let spec = editor_jobs::ProcessLaunchSpec::new(
-        "git",
-        ["rev-parse", "--show-toplevel"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>(),
-    )
-    .with_mode(editor_jobs::ProcessSupervisionMode::Background)
-    .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
-    .with_current_dir(path);
-    let output = match editor_jobs::run_captured_in_app_registry(spec) {
-        Some(Ok(output)) => output,
-        Some(Err(error)) => {
-            return Err(format!(
-                "failed to resolve git root from {}: {error}",
-                path.display()
-            ));
-        }
-        None => {
-            return Err(format!(
-                "failed to resolve git root from {}: app Process Registry is not installed",
-                path.display()
-            ));
-        }
+fn resolve_git_root_from_path(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_file() {
+        path.parent()?.to_path_buf()
+    } else {
+        path.to_path_buf()
     };
-    if !output.succeeded() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(if stderr.is_empty() {
-            format!(
-                "git rev-parse --show-toplevel failed in {} with status {:?}",
-                path.display(),
-                output.exit_code
-            )
-        } else {
-            stderr
-        });
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let root = stdout.trim();
-    if root.is_empty() {
-        return Err(format!(
-            "git rev-parse --show-toplevel returned no root for {}",
-            path.display()
-        ));
-    }
-    Ok(normalize_git_output_path(root))
 }
 
 fn find_workspace_by_root(

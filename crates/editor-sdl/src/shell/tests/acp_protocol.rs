@@ -136,12 +136,12 @@ fn acp_output_speaker_roles_and_tool_chip() {
     let items = vec![
         AcpOutputItem::UserPrompt("hi".to_owned()),
         AcpOutputItem::AgentBlocks(vec![ContentBlock::Text(TextContent::new("hello"))]),
-        AcpOutputItem::ToolCall(
+        AcpOutputItem::ToolCall(Box::new(
             ToolCall::new("tool-1", "Read file")
                 .kind(ToolKind::Read)
                 .status(ToolCallStatus::InProgress)
                 .content(vec![ToolCallContent::from("12 lines")]),
-        ),
+        )),
     ];
     let lines = acp_build_output_lines(&items, None, None);
     let texts: Vec<_> = lines
@@ -280,7 +280,7 @@ fn render_acp_diff_expands_tab_indentation_to_spaces() -> Result<(), String> {
 
 #[test]
 fn acp_tool_diff_renders_added_and_removed_lines() {
-    let items = vec![AcpOutputItem::ToolCall(
+    let items = vec![AcpOutputItem::ToolCall(Box::new(
         ToolCall::new("tool-diff", "Edit file")
             .kind(ToolKind::Edit)
             .status(ToolCallStatus::Completed)
@@ -288,7 +288,7 @@ fn acp_tool_diff_renders_added_and_removed_lines() {
                 Diff::new("src/main.rs", "fn main() {\n    println!(\"b\");\n}\n")
                     .old_text("fn main() {\n    println!(\"a\");\n}\n"),
             )]),
-    )];
+    ))];
     let lines = acp_build_output_lines(&items, None, None);
     let texts: Vec<_> = lines
         .iter()

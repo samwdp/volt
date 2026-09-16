@@ -342,33 +342,44 @@ pub(super) fn render_autocomplete_overlay(
         blend_color(base_foreground, panel_background, 0.46),
     );
     let row_height = line_height.max(1);
-    let list_width = ((cell_width.max(1) as u32) * 22)
-        .max((cell_width.max(1) as u32) * 18)
-        .min((cell_width.max(1) as u32) * 28)
-        .min(pane_rect.width().saturating_sub(48).max(1));
     let token_icon = user_library.autocomplete_token_icon();
-    let docs_width = autocomplete_docs_panel_width(
-        autocomplete.selected(),
-        &autocomplete.query.token,
-        list_width,
+    let docs_visible = autocomplete.docs_focused;
+    let list_width = autocomplete_list_panel_width(
+        autocomplete.entries(),
         pane_rect.width(),
         cell_width,
-        token_icon,
+        docs_visible,
     );
+    let docs_width = if docs_visible {
+        autocomplete_docs_panel_width(
+            autocomplete.selected(),
+            &autocomplete.query.token,
+            list_width,
+            pane_rect.width(),
+            cell_width,
+            token_icon,
+        )
+    } else {
+        0
+    };
     let width = list_width
-        .saturating_add(1)
+        .saturating_add(u32::from(docs_visible))
         .saturating_add(docs_width)
         .min(pane_rect.width().saturating_sub(16).max(1));
     let docs_columns = overlay_text_columns(docs_width, 20, cell_width);
     let visible_result_limit = user_library.autocomplete_result_limit().max(1);
     let max_body_rows = ((pane_rect.height().saturating_sub(28)) / row_height as u32)
         .clamp(4, visible_result_limit.max(6) as u32 + 2) as usize;
-    let docs_lines = autocomplete_docs_lines(
-        autocomplete.selected(),
-        &autocomplete.query.token,
-        docs_columns,
-        token_icon,
-    );
+    let docs_lines = if docs_visible {
+        autocomplete_docs_lines(
+            autocomplete.selected(),
+            &autocomplete.query.token,
+            docs_columns,
+            token_icon,
+        )
+    } else {
+        Vec::new()
+    };
     let docs_scroll = autocomplete
         .docs_scroll_offset
         .min(docs_lines.len().saturating_sub(1));
@@ -413,24 +424,26 @@ pub(super) fn render_autocomplete_overlay(
             shadow: false,
         },
     )?;
-    fill_overlay_surface_rect(
-        target,
-        PixelRectToRect::rect(x + list_width as i32, y + 8, 1, height.saturating_sub(16)),
-        border,
-        window_effects,
-    )?;
-    fill_overlay_right_band(
-        target,
-        PixelRectToRect::rect(
-            x + list_width as i32 + 1,
-            y + 1,
-            docs_width.saturating_sub(1),
-            height.saturating_sub(2),
-        ),
-        radius.saturating_sub(1),
-        docs_background,
-        window_effects,
-    )?;
+    if docs_visible {
+        fill_overlay_surface_rect(
+            target,
+            PixelRectToRect::rect(x + list_width as i32, y + 8, 1, height.saturating_sub(16)),
+            border,
+            window_effects,
+        )?;
+        fill_overlay_right_band(
+            target,
+            PixelRectToRect::rect(
+                x + list_width as i32 + 1,
+                y + 1,
+                docs_width.saturating_sub(1),
+                height.saturating_sub(2),
+            ),
+            radius.saturating_sub(1),
+            docs_background,
+            window_effects,
+        )?;
+    }
     if autocomplete.entries().is_empty() {
         return Ok(());
     }
@@ -464,12 +477,45 @@ pub(super) fn render_autocomplete_overlay(
                 window_effects,
             )?;
         }
-        let label = truncate_text_to_width(
-            &format!("{} {}", entry.item_icon, entry.label),
-            list_text_width,
+        let row = autocomplete_list_row(entry);
+        let kind_width = row
+            .kind
+            .as_ref()
+            .map(|kind| monospace_text_width(kind, cell_width))
+            .unwrap_or(0);
+        let gap = cell_width.max(1) as u32;
+        let kind_reserved = if kind_width == 0 {
+            0
+        } else {
+            kind_width.saturating_add(gap)
+        };
+        let head = truncate_text_to_width(
+            &row.head,
+            list_text_width.saturating_sub(kind_reserved),
             cell_width,
         );
-        draw_text(target, x + 10, row_y, &label, foreground)?;
+        draw_text(target, x + 10, row_y, &head, foreground)?;
+        let head_width = monospace_text_width(&head, cell_width);
+        if let Some(annotation) = row.annotation.as_deref() {
+            let annotation_budget = list_text_width
+                .saturating_sub(head_width)
+                .saturating_sub(gap)
+                .saturating_sub(kind_reserved);
+            if annotation_budget > gap {
+                let clipped = truncate_text_to_width(annotation, annotation_budget, cell_width);
+                draw_text(
+                    target,
+                    x + 10 + head_width as i32 + cell_width.max(1),
+                    row_y,
+                    &clipped,
+                    muted,
+                )?;
+            }
+        }
+        if let Some(kind) = row.kind.as_deref() {
+            let kind_x = x + 10 + list_text_width as i32 - kind_width as i32;
+            draw_text(target, kind_x.max(x + 10), row_y, kind, muted)?;
+        }
     }
     for (index, line) in preview_lines.iter().take(body_rows).enumerate() {
         let row_y = y + 8 + index as i32 * row_height;

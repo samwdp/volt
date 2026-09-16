@@ -8,6 +8,10 @@ pub(crate) fn git_branch_list(
     _runtime: &mut EditorRuntime,
     root: &Path,
 ) -> Result<Vec<String>, String> {
+    git_branch_list_at(root)
+}
+
+pub(crate) fn git_branch_list_at(root: &Path) -> Result<Vec<String>, String> {
     let output = git_read_command_output(
         root,
         "branch --format",
@@ -24,31 +28,21 @@ pub(crate) fn git_branch_list(
     Ok(branches)
 }
 
-pub(crate) fn git_remote_worktree_branch_list(
-    runtime: &mut EditorRuntime,
-    root: &Path,
-) -> Result<Vec<(String, String)>, String> {
-    trace_oil_worktree(
-        runtime,
-        format!("listing remote branches from `{}`", root.display()),
-    );
-    let fetch_error = fetch_git_prune(runtime, root).err();
-    match &fetch_error {
-        Some(error) => trace_oil_worktree(runtime, format!("git fetch --prune failed: {error}")),
-        None => trace_oil_worktree(runtime, "git fetch --prune succeeded"),
-    }
-    let local = git_branch_list(runtime, root)?
+/// Fetch + branch list for worktree pickers. Safe off the UI thread (direct git).
+///
+/// Returns `(branches, optional_fetch_error)`. Fetch failure is soft when any
+/// branch refs remain readable.
+type RemoteWorktreeBranchList = (Vec<(String, String)>, Option<String>);
+
+fn collect_remote_worktree_branches(root: &Path) -> Result<Vec<(String, String)>, String> {
+    let local = git_branch_list_at(root)?
         .into_iter()
         .collect::<BTreeSet<_>>();
-    trace_oil_worktree(runtime, format!("found {} local branches", local.len()));
-    let output = match git_read_command_output(
+    let output = git_read_command_output(
         root,
         "branch -r --format",
         &["branch", "-r", "--format=%(refname:short)"],
-    ) {
-        Ok(output) => output,
-        Err(error) => return Err(fetch_error.unwrap_or(error)),
-    };
+    )?;
     let mut branches = output
         .lines()
         .map(str::trim)
@@ -64,10 +58,6 @@ pub(crate) fn git_remote_worktree_branch_list(
         })
         .collect::<Vec<_>>();
     if branches.is_empty() {
-        trace_oil_worktree(
-            runtime,
-            "no remote branches found; falling back to local branch refs",
-        );
         branches = local
             .iter()
             .filter(|branch| branch.as_str() != "HEAD")
@@ -76,11 +66,51 @@ pub(crate) fn git_remote_worktree_branch_list(
     }
     branches.sort();
     branches.dedup();
-    if branches.is_empty() {
-        if let Some(error) = fetch_error {
-            return Err(error);
-        }
-    } else if let Some(error) = fetch_error {
+    Ok(branches)
+}
+
+fn finish_remote_worktree_branch_list(
+    branches: Vec<(String, String)>,
+    fetch_error: Option<String>,
+) -> Result<RemoteWorktreeBranchList, String> {
+    if branches.is_empty()
+        && let Some(error) = fetch_error
+    {
+        return Err(error);
+    }
+    Ok((branches, fetch_error))
+}
+
+pub(crate) fn git_remote_worktree_branch_list_at(
+    root: &Path,
+) -> Result<RemoteWorktreeBranchList, String> {
+    let fetch_error = fetch_git_prune_at(root).err();
+    let branches = match collect_remote_worktree_branches(root) {
+        Ok(branches) => branches,
+        Err(error) => return Err(fetch_error.unwrap_or(error)),
+    };
+    finish_remote_worktree_branch_list(branches, fetch_error)
+}
+
+pub(crate) fn git_remote_worktree_branch_list(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    trace_oil_worktree(
+        runtime,
+        format!("listing remote branches from `{}`", root.display()),
+    );
+    let fetch_error = fetch_git_prune(runtime, root).err();
+    match &fetch_error {
+        Some(error) => trace_oil_worktree(runtime, format!("git fetch --prune failed: {error}")),
+        None => trace_oil_worktree(runtime, "git fetch --prune succeeded"),
+    }
+    let branches = match collect_remote_worktree_branches(root) {
+        Ok(branches) => branches,
+        Err(error) => return Err(fetch_error.unwrap_or(error)),
+    };
+    let (branches, fetch_error) = finish_remote_worktree_branch_list(branches, fetch_error)?;
+    if let Some(error) = fetch_error {
         record_runtime_error(runtime, "git.worktree.fetch", error);
     }
     trace_oil_worktree(

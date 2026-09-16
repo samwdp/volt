@@ -51,6 +51,38 @@ pub const PROCESS_SUPERVISOR_FLAG: &str = "--process-supervisor";
 pub(crate) const PROCESS_SUPERVISOR_BACKGROUND_FLAG: &str = "--background";
 
 static APP_PROCESS_REGISTRY: Mutex<Option<Arc<Mutex<ProcessRegistry>>>> = Mutex::new(None);
+static UI_THREAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn current_thread_token() -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Marks the calling thread as the shell UI thread. Git process launches on this
+/// thread are rejected so fringe/status/mutations stay off the input/render path.
+pub fn mark_current_thread_as_ui() {
+    UI_THREAD_ID.store(current_thread_token(), std::sync::atomic::Ordering::Release);
+}
+
+/// Clears the shell UI thread mark (tests / teardown).
+pub fn clear_ui_thread_mark() {
+    UI_THREAD_ID.store(0, std::sync::atomic::Ordering::Release);
+}
+
+/// Returns true when the caller is the marked shell UI thread.
+#[must_use]
+pub fn current_thread_is_ui() -> bool {
+    let marked = UI_THREAD_ID.load(std::sync::atomic::Ordering::Acquire);
+    marked != 0 && marked == current_thread_token()
+}
+
+/// Error when a git process would block the UI thread.
+pub fn git_process_on_ui_thread_error(context: &str) -> String {
+    format!("{context}: git process must not run on the UI thread")
+}
 
 /// Installs the app-wide Process Registry used by library crates that cannot
 /// thread `EditorRuntime` (for example `editor-git` probes). Shell and bootstrap
@@ -817,7 +849,7 @@ fn windows_launch_program_candidates(program: &str) -> Vec<String> {
 }
 
 #[cfg(windows)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn windows_should_retry_spawn_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(193)
 }

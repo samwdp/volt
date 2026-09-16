@@ -366,7 +366,7 @@ fn git_status_stash_spans_handle_compact_stash_names() {
 
 #[test]
 fn git_status_uppercase_f_starts_pull_prefix() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let _buffer_id = install_git_status_test_buffer(&mut state)?;
 
     assert!(handle_git_status_chord(&mut state.runtime, "F")?);
@@ -376,7 +376,7 @@ fn git_status_uppercase_f_starts_pull_prefix() -> Result<(), String> {
 
 #[test]
 fn git_status_sequence_commands_are_registered() -> Result<(), String> {
-    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let state = state_with_user_library()?;
 
     for &(name, _, _) in GIT_STATUS_COMMANDS {
         assert!(
@@ -438,7 +438,7 @@ fn git_status_visual_s_stages_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
@@ -469,7 +469,7 @@ fn git_status_visual_u_unstages_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
     run_git_in_dir(&repo, &["add", "--", "alpha.txt", "beta.txt", "gamma.txt"])?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "alpha.txt")?;
@@ -499,7 +499,7 @@ fn git_status_ctrl_v_visual_s_stages_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
@@ -537,7 +537,7 @@ fn git_status_ctrl_v_visual_u_unstages_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
     run_git_in_dir(&repo, &["add", "--", "alpha.txt", "beta.txt", "gamma.txt"])?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "alpha.txt")?;
@@ -574,7 +574,7 @@ fn git_status_ctrl_v_visual_x_deletes_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
@@ -611,7 +611,7 @@ fn git_status_shift_v_visual_s_stages_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
@@ -649,7 +649,7 @@ fn git_status_shift_v_visual_u_unstages_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
     run_git_in_dir(&repo, &["add", "--", "alpha.txt", "beta.txt", "gamma.txt"])?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_UNSTAGE_FILE, "alpha.txt")?;
@@ -686,7 +686,7 @@ fn git_status_shift_v_visual_x_deletes_selected_items() -> Result<(), String> {
     std::fs::write(repo.join("beta.txt"), "beta\n").map_err(|error| error.to_string())?;
     std::fs::write(repo.join("gamma.txt"), "gamma\n").map_err(|error| error.to_string())?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let alpha =
         git_status_line_for_action_detail(&state, buffer_id, GIT_ACTION_STAGE_FILE, "alpha.txt")?;
@@ -1002,7 +1002,7 @@ fn git_push_upstream_streams_into_popup_buffer_and_refreshes_status() -> Result<
     run_git_in_dir(&repo, &["add", "--", "feature.txt"])?;
     run_git_in_dir(&repo, &["commit", "-qm", "feature"])?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     let snapshot = shell_buffer(&state.runtime, buffer_id)?
         .git_snapshot()
@@ -1102,7 +1102,7 @@ fn git_pull_upstream_streams_into_popup_buffer() -> Result<(), String> {
     run_git_in_dir(&clone, &["commit", "-qm", "remote change"])?;
     run_git_in_dir(&clone, &["push", "-q", "origin", "HEAD"])?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     pull_git_upstream(&mut state.runtime, buffer_id)?;
 
@@ -1147,7 +1147,7 @@ fn fetch_git_prune_is_silent_command_without_popup() -> Result<(), String> {
         &["push", "-q", "--set-upstream", "origin", branch.as_str()],
     )?;
 
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let _buffer_id = open_repo_git_status_buffer(&mut state, &repo)?;
     fetch_git_prune(&mut state.runtime, &repo)?;
     assert!(
@@ -1162,7 +1162,7 @@ fn fetch_git_prune_is_silent_command_without_popup() -> Result<(), String> {
 
 #[test]
 fn git_editor_confirm_writes_file_and_signals_stub() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let mut env = Vec::new();
     inject_git_editor_env(&mut state.runtime, &mut env)?;
     let dir = env
@@ -1199,7 +1199,7 @@ fn git_editor_confirm_writes_file_and_signals_stub() -> Result<(), String> {
 
 #[test]
 fn git_editor_confirm_preserves_crlf_line_endings() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let mut env = Vec::new();
     inject_git_editor_env(&mut state.runtime, &mut env)?;
     let dir = env
@@ -1365,7 +1365,7 @@ fn acp_at_symbol_opens_git_file_picker_and_return_inserts_mention() -> Result<()
 
 #[test]
 fn undo_tree_picker_entries_use_fringe_indent_and_diff_preview() -> Result<(), String> {
-    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let mut state = state_with_user_library()?;
     let buffer_id =
         install_text_test_buffer(&mut state, "*undo-tree-picker*", vec!["alpha".to_owned()])?;
     let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;

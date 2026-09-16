@@ -46,3 +46,32 @@ fn clipboard_image_from_path_text_ignores_plain_text() {
     assert!(clipboard_image_from_path_text("hello world").is_none());
     assert!(clipboard_image_from_path_text("not/a/real/image.png").is_none());
 }
+
+#[test]
+fn read_system_clipboard_paste_prefers_image_over_text() {
+    set_clipboard_image_override_for_test(Some(ClipboardImage {
+        name: "Image".to_owned(),
+        mime_type: "image/png".to_owned(),
+        bytes: TINY_PNG.to_vec(),
+    }));
+    set_clipboard_text_override_for_test(Some("hello"));
+    let paste = read_system_clipboard_paste();
+    set_clipboard_image_override_for_test(None);
+    set_clipboard_text_override_for_test(None);
+    match paste {
+        ClipboardPaste::Image(image) => {
+            assert_eq!(image.mime_type, "image/png");
+            assert_eq!(image.bytes, TINY_PNG);
+        }
+        other => panic!("expected image paste, got {other:?}"),
+    }
+}
+
+#[test]
+fn clipboard_image_from_rgba_encodes_png() {
+    let rgba = [0u8, 0, 0, 255];
+    let image = clipboard_image_from_rgba(1, 1, &rgba).expect("encode rgba");
+    assert_eq!(image.name, "Image");
+    assert_eq!(image.mime_type, "image/png");
+    assert_eq!(sniff_image_mime(&image.bytes), Some("image/png"));
+}

@@ -33,8 +33,6 @@ pub(super) enum StreamedCommandExitAction {
     ContinueTreeSitterInstall(Box<TreeSitterInstallState>),
     ContinueTreeSitterRecompile(Box<TreeSitterRecompileState>),
     ContinueToolInstall(Box<ToolInstallState>),
-    /// Keep the popup buffer open after the process exits; no git refresh, no close.
-    LeaveOpen,
     /// Keep the popup buffer open; if the build succeeded and the command targets
     /// `volt-user`, trigger a user-library hot-reload into the running runtime.
     LeaveOpenAndMaybeReloadUserLibrary {
@@ -98,17 +96,6 @@ impl ExternalCommandSpec {
             notify_on_failure: true,
             use_git_editor: false,
         }
-    }
-
-    pub(super) fn with_stream(mut self, stream: bool) -> Self {
-        self.stream = stream;
-        self
-    }
-
-    pub(super) fn with_notify(mut self, on_success: bool, on_failure: bool) -> Self {
-        self.notify_on_success = on_success;
-        self.notify_on_failure = on_failure;
-        self
     }
 
     pub(super) fn with_git_editor(mut self, enabled: bool) -> Self {
@@ -616,7 +603,6 @@ pub(super) fn refresh_pending_streamed_commands(
                             );
                         }
                     }
-                    StreamedCommandExitAction::LeaveOpen => {}
                     StreamedCommandExitAction::LeaveOpenAndMaybeReloadUserLibrary { command } => {
                         if outcome.success && command_builds_user_library(&command) {
                             let reload_lines =

@@ -225,6 +225,7 @@ impl ShellState {
         if let Some(trace) = startup_trace.as_mut() {
             trace.mark("shell.theme-registry");
         }
+        install_volt_host_table();
         runtime
             .services_mut()
             .insert(UserLibraryService(Arc::clone(&user_library)));

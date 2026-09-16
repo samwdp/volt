@@ -672,3 +672,35 @@ pub enum LspCompletionKind {
     Operator,
     TypeParameter,
 }
+
+impl LspCompletionKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Text => "Text",
+            Self::Method => "Method",
+            Self::Function => "Function",
+            Self::Constructor => "Constructor",
+            Self::Field => "Field",
+            Self::Variable => "Variable",
+            Self::Class => "Class",
+            Self::Interface => "Interface",
+            Self::Module => "Module",
+            Self::Property => "Property",
+            Self::Unit => "Unit",
+            Self::Value => "Value",
+            Self::Enum => "Enum",
+            Self::Keyword => "Keyword",
+            Self::Snippet => "Snippet",
+            Self::Color => "Color",
+            Self::File => "File",
+            Self::Reference => "Reference",
+            Self::Folder => "Folder",
+            Self::EnumMember => "Enum Member",
+            Self::Constant => "Constant",
+            Self::Struct => "Struct",
+            Self::Event => "Event",
+            Self::Operator => "Operator",
+            Self::TypeParameter => "Type Parameter",
+        }
+    }
+}

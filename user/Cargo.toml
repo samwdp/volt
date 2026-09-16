@@ -35,3 +35,6 @@ path = "lib.rs"
 name = "user"
 required-features = []
 crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true

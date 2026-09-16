@@ -50,6 +50,17 @@ pub(super) fn statusline_lsp_diagnostics(
     (errors > 0 || warnings > 0).then_some(PluginLspDiagnosticsInfo { errors, warnings })
 }
 
+pub(super) const LSP_DIAGNOSTIC_PAINT_CAP: usize = 256;
+
+pub(super) fn cap_diagnostics_for_paint(mut diagnostics: Vec<LspDiagnostic>) -> Vec<LspDiagnostic> {
+    if diagnostics.len() <= LSP_DIAGNOSTIC_PAINT_CAP {
+        return diagnostics;
+    }
+    diagnostics.sort_by_key(|diagnostic| diagnostic_severity_rank(diagnostic.severity()));
+    diagnostics.truncate(LSP_DIAGNOSTIC_PAINT_CAP);
+    diagnostics
+}
+
 pub(super) fn diagnostic_line_spans_for_diagnostics(
     diagnostics: &[LspDiagnostic],
 ) -> BTreeMap<usize, Box<[DiagnosticLineSpan]>> {
@@ -200,4 +211,35 @@ pub(super) fn draw_diagnostic_underlines_for_segment(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod diagnostic_paint_cap_tests {
+    use editor_buffer::{TextPoint, TextRange};
+    use editor_lsp::{Diagnostic, DiagnosticSeverity};
+
+    use super::{LSP_DIAGNOSTIC_PAINT_CAP, cap_diagnostics_for_paint};
+
+    #[test]
+    fn cap_diagnostics_for_paint_keeps_errors_first() {
+        let mut diagnostics = Vec::new();
+        for index in 0..(LSP_DIAGNOSTIC_PAINT_CAP + 8) {
+            diagnostics.push(Diagnostic::new(
+                "rustc",
+                format!("warning {index}"),
+                DiagnosticSeverity::Warning,
+                TextRange::new(TextPoint::new(index, 0), TextPoint::new(index, 1)),
+            ));
+        }
+        diagnostics.push(Diagnostic::new(
+            "rustc",
+            "error last",
+            DiagnosticSeverity::Error,
+            TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 1)),
+        ));
+        let capped = cap_diagnostics_for_paint(diagnostics);
+        assert_eq!(capped.len(), LSP_DIAGNOSTIC_PAINT_CAP);
+        assert_eq!(capped[0].severity(), DiagnosticSeverity::Error);
+        assert_eq!(capped[0].message(), "error last");
+    }
 }

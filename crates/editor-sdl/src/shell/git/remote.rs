@@ -198,31 +198,47 @@ pub(crate) fn fetch_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
 }
 
 pub(crate) fn fetch_git_prune(runtime: &mut EditorRuntime, root: &Path) -> Result<(), String> {
-    let remotes = git_remote_list(runtime, root)?;
+    fetch_git_prune_at(root)?;
+    refresh_git_status_buffers(runtime)?;
+    Ok(())
+}
+
+/// Silent `git fetch --prune` via direct Process Launch (UI-safe only off UI thread).
+pub(crate) fn fetch_git_prune_at(root: &Path) -> Result<(), String> {
+    let remotes = {
+        let output = git_read_command_output(root, "remote", &["remote"])?;
+        let mut remotes = output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_owned())
+            .collect::<Vec<_>>();
+        remotes.sort();
+        remotes.dedup();
+        remotes
+    };
     if remotes.is_empty() {
         return Err("no git remotes found".to_owned());
     }
     for remote in remotes {
         let refspec = format!("+refs/heads/*:refs/remotes/{remote}/*");
-        run_command(
-            runtime,
-            ExternalCommandSpec::git_argv(
-                "Git Fetch",
-                vec![
-                    "fetch".to_owned(),
-                    "--prune".to_owned(),
-                    remote.clone(),
-                    refspec,
-                ],
-                root.to_path_buf(),
-                StreamedCommandExitAction::LeaveOpen,
-            )
-            .with_stream(false)
-            .with_notify(false, false),
+        let output = run_direct_git_command(
+            root,
+            &["fetch", "--prune", remote.as_str(), refspec.as_str()],
         )?;
-        // Silent success discards stdout; prune is for side effects.
+        let exit_code = output.exit_code.ok_or_else(|| {
+            format!(
+                "git fetch --prune failed to return an exit code: {}",
+                command_output_transcript(&output)
+            )
+        })?;
+        if exit_code != 0 {
+            return Err(format!(
+                "git fetch --prune failed: {}",
+                command_output_transcript(&output)
+            ));
+        }
     }
-    refresh_git_status_buffers(runtime)?;
     Ok(())
 }
 

@@ -3518,6 +3518,7 @@ fn accept_autocomplete_avoids_double_dot_when_lsp_insert_includes_trigger() -> R
             replacement: ".bar()".to_owned(),
             replace_range: None,
             detail: None,
+            kind_label: None,
             documentation: None,
             resolve: None,
         }],
@@ -3562,6 +3563,7 @@ fn accept_autocomplete_uses_lsp_text_edit_range_covering_trigger() -> Result<(),
             replacement: ".bar()".to_owned(),
             replace_range: Some(TextRange::new(TextPoint::new(0, 3), TextPoint::new(0, 4))),
             detail: None,
+            kind_label: None,
             documentation: None,
             resolve: None,
         }],
@@ -3602,6 +3604,7 @@ fn apply_resolved_documentation_keeps_only_selected_docs() -> Result<(), String>
             replacement: "useMemo".to_owned(),
             replace_range: None,
             detail: None,
+            kind_label: None,
             documentation: Some("stale docs".to_owned()),
             resolve: None,
         },
@@ -3614,6 +3617,7 @@ fn apply_resolved_documentation_keeps_only_selected_docs() -> Result<(), String>
             replacement: "useState".to_owned(),
             replace_range: None,
             detail: None,
+            kind_label: None,
             documentation: Some("other stale docs".to_owned()),
             resolve: None,
         },
@@ -3629,6 +3633,45 @@ fn apply_resolved_documentation_keeps_only_selected_docs() -> Result<(), String>
         overlay.entries[1].documentation.as_deref(),
         Some("fn useState()")
     );
+    Ok(())
+}
+
+#[test]
+fn set_entries_keeps_docs_focus_only_for_same_selected_item() -> Result<(), String> {
+    let state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let mut overlay = AutocompleteOverlay::new(
+        buffer_id,
+        0,
+        AutocompleteQuery {
+            prefix: "u".to_owned(),
+            token: "u".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 1)),
+        },
+    );
+    let use_state = AutocompleteEntry {
+        provider_id: "lsp".to_owned(),
+        provider_label: "LSP".to_owned(),
+        provider_icon: "L".to_owned(),
+        item_icon: "ƒ".to_owned(),
+        label: "useState".to_owned(),
+        replacement: "useState".to_owned(),
+        replace_range: None,
+        detail: None,
+        kind_label: None,
+        documentation: None,
+        resolve: None,
+    };
+    overlay.set_entries(vec![use_state.clone()]);
+    overlay.focus_docs();
+    overlay.set_entries(vec![use_state.clone()]);
+    assert!(overlay.docs_focused);
+    overlay.set_entries(vec![AutocompleteEntry {
+        label: "useMemo".to_owned(),
+        replacement: "useMemo".to_owned(),
+        ..use_state
+    }]);
+    assert!(!overlay.docs_focused);
     Ok(())
 }
 
@@ -4263,12 +4306,51 @@ fn workspace_dashboard_command_opens_picker() -> Result<(), String> {
         .runtime
         .execute_command("workspace.dashboard")
         .map_err(|error| error.to_string())?;
+    wait_for_workspace_dashboard_ready(&mut state.runtime)?;
 
     let picker = shell_ui(&state.runtime)?
         .picker()
         .ok_or_else(|| "workspace dashboard picker did not open".to_owned())?;
     assert_eq!(picker.session.title(), "Worktrees");
     assert!(picker.session.item_count() > 0);
+    Ok(())
+}
+
+#[test]
+fn workspace_dashboard_lists_worktrees_sync_on_ui_thread() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let repo = init_git_repo_with_commit("dashboard-ui-thread-git")?;
+    open_workspace_from_project(&mut state.runtime, "dashboard-ui", &repo)?;
+
+    editor_jobs::mark_current_thread_as_ui();
+    let opened: Result<(), String> = (|| {
+        state
+            .runtime
+            .execute_command("workspace.dashboard")
+            .map_err(|error| error.to_string())?;
+        let picker = shell_ui(&state.runtime)?
+            .picker()
+            .ok_or_else(|| "workspace dashboard picker missing".to_owned())?;
+        assert!(
+            picker
+                .session
+                .matches()
+                .iter()
+                .any(|matched| matched.item().id() == "git-worktree-dashboard:create"),
+            "expected sync worktree rows on UI thread, got {:?}",
+            picker
+                .session
+                .matches()
+                .iter()
+                .map(|matched| matched.item().id().to_owned())
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    })();
+    editor_jobs::clear_ui_thread_mark();
+    opened?;
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -4305,26 +4387,44 @@ fn workspace_dashboard_enter_still_switches_and_creates() -> Result<(), String> 
     assert_eq!(shell_ui(&state.runtime)?.active_workspace(), opened);
 
     // Create affordance: Enter on `+ new worktree` still starts create flow.
-    open_workspace_dashboard(&mut state.runtime)?;
-    select_dashboard_create_row(&mut state.runtime)?;
-    state
-        .runtime
-        .execute_command("picker.submit")
-        .map_err(|error| error.to_string())?;
-    let buffer_id = active_shell_buffer_id(&state.runtime)?;
-    assert!(
-        shell_buffer(&state.runtime, buffer_id)?
-            .directory_state()
-            .is_some(),
-        "`+ new worktree` Enter should open oil directory"
-    );
-    assert_eq!(
-        shell_ui(&state.runtime)?
-            .picker()
-            .map(|picker| picker.session.title().to_owned()),
-        Some("Git Worktree Branch".to_owned()),
-        "`+ new worktree` Enter should open the branch picker"
-    );
+    // UI thread rejects direct git, so branch list must load asynchronously.
+    editor_jobs::mark_current_thread_as_ui();
+    let create_flow: Result<(), String> = (|| {
+        open_workspace_dashboard(&mut state.runtime)?;
+        select_dashboard_create_row(&mut state.runtime)?;
+        state
+            .runtime
+            .execute_command("picker.submit")
+            .map_err(|error| error.to_string())?;
+        let buffer_id = active_shell_buffer_id(&state.runtime)?;
+        assert!(
+            shell_buffer(&state.runtime, buffer_id)?
+                .directory_state()
+                .is_some(),
+            "`+ new worktree` Enter should open oil directory"
+        );
+        wait_for_worktree_branch_picker_ready(&mut state.runtime)?;
+        assert_eq!(
+            shell_ui(&state.runtime)?
+                .picker()
+                .map(|picker| picker.session.title().to_owned()),
+            Some("Git Worktree Branch".to_owned()),
+            "`+ new worktree` Enter should open the branch picker"
+        );
+        assert!(
+            shell_ui(&state.runtime)?.picker().is_some_and(|picker| {
+                picker
+                    .session
+                    .matches()
+                    .iter()
+                    .any(|matched| matched.item().label() == "New Branch")
+            }),
+            "branch picker should include New Branch"
+        );
+        Ok(())
+    })();
+    editor_jobs::clear_ui_thread_mark();
+    create_flow?;
 
     let _ = std::fs::remove_dir_all(&main);
     let _ = std::fs::remove_dir_all(&feature);

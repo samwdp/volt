@@ -72,6 +72,7 @@ pub(super) struct AutocompleteEntry {
     pub(super) replacement: String,
     pub(super) replace_range: Option<TextRange>,
     pub(super) detail: Option<String>,
+    pub(super) kind_label: Option<String>,
     pub(super) documentation: Option<String>,
     pub(super) resolve: Option<LspCompletionResolvePayload>,
 }
@@ -164,9 +165,10 @@ impl AutocompleteOverlay {
         }
         self.loading = false;
         self.selected_index = previous
+            .as_ref()
             .and_then(|(provider_id, replacement)| {
                 self.entries.iter().position(|entry| {
-                    entry.provider_id == provider_id && entry.replacement == replacement
+                    entry.provider_id == *provider_id && entry.replacement == *replacement
                 })
             })
             .unwrap_or(0);
@@ -175,28 +177,38 @@ impl AutocompleteOverlay {
         } else {
             self.selected_index = self.selected_index.min(self.entries.len() - 1);
         }
+        let still_same = previous.as_ref().is_some_and(|(provider_id, replacement)| {
+            self.selected().is_some_and(|entry| {
+                entry.provider_id == *provider_id && entry.replacement == *replacement
+            })
+        });
+        if !still_same {
+            self.blur_docs();
+        }
         self.docs_scroll_offset = 0;
     }
 
     pub(super) fn select_next(&mut self) {
         if self.entries.is_empty() {
             self.selected_index = 0;
+            self.blur_docs();
             return;
         }
         self.selected_index = (self.selected_index + 1) % self.entries.len();
-        self.docs_scroll_offset = 0;
+        self.blur_docs();
     }
 
     pub(super) fn select_previous(&mut self) {
         if self.entries.is_empty() {
             self.selected_index = 0;
+            self.blur_docs();
             return;
         }
         self.selected_index = self
             .selected_index
             .checked_sub(1)
             .unwrap_or(self.entries.len() - 1);
-        self.docs_scroll_offset = 0;
+        self.blur_docs();
     }
 
     pub(super) fn focus_docs(&mut self) {

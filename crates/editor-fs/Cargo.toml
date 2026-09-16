@@ -25,3 +25,6 @@ path = "src/lib.rs"
 name = "editor_fs"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

@@ -860,6 +860,7 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
             replacement: "alpha".to_owned(),
             replace_range: None,
             detail: Some("detail".to_owned()),
+            kind_label: None,
             documentation: Some("documentation".to_owned()),
             resolve: None,
         }],
@@ -1082,6 +1083,7 @@ fn autocomplete_docs_panel_width_tracks_content_and_clamps_to_pane() {
         replacement: "foo".to_owned(),
         replace_range: None,
         detail: Some("fn foo()".to_owned()),
+        kind_label: None,
         documentation: Some("short".to_owned()),
         resolve: None,
     };
@@ -1090,6 +1092,7 @@ fn autocomplete_docs_panel_width_tracks_content_and_clamps_to_pane() {
     assert_eq!(short_width, 24 * cell_width as u32);
 
     let long = AutocompleteEntry {
+        kind_label: None,
         documentation: Some("x".repeat(100)),
         ..short.clone()
     };
@@ -1106,6 +1109,85 @@ fn autocomplete_docs_panel_width_tracks_content_and_clamps_to_pane() {
 }
 
 #[test]
+fn autocomplete_list_row_shows_type_and_kind() {
+    let entry = AutocompleteEntry {
+        provider_id: "lsp".to_owned(),
+        provider_label: "LSP".to_owned(),
+        provider_icon: "L".to_owned(),
+        item_icon: "ƒ".to_owned(),
+        label: "len".to_owned(),
+        replacement: "len".to_owned(),
+        replace_range: None,
+        detail: Some("(&self) -> usize  alloc::vec::Vec".to_owned()),
+        kind_label: Some("Method".to_owned()),
+        documentation: None,
+        resolve: None,
+    };
+    let row = autocomplete_list_row(&entry);
+    assert!(row.head.contains("len"));
+    assert_eq!(
+        row.annotation.as_deref(),
+        Some("(&self) -> usize  alloc::vec::Vec")
+    );
+    assert_eq!(row.kind.as_deref(), Some("(Method)"));
+
+    let class = AutocompleteEntry {
+        label: "ArrayType".to_owned(),
+        replacement: "ArrayType".to_owned(),
+        detail: Some("javax.lang.model.type.ArrayType".to_owned()),
+        kind_label: Some("Interface".to_owned()),
+        ..entry.clone()
+    };
+    let class_row = autocomplete_list_row(&class);
+    assert_eq!(
+        class_row.annotation.as_deref(),
+        Some("javax.lang.model.type.ArrayType")
+    );
+    assert_eq!(class_row.kind.as_deref(), Some("(Interface)"));
+
+    let cell_width = 8;
+    let class_content = format!(
+        "{} {} {} {}",
+        class.item_icon,
+        class.label,
+        class.detail.as_deref().unwrap_or_default(),
+        class_row.kind.as_deref().unwrap_or_default()
+    );
+    let expected_class_width =
+        monospace_text_width(class_content.trim_end(), cell_width).saturating_add(28);
+    let hidden_docs_width =
+        autocomplete_list_panel_width(std::slice::from_ref(&class), 4000, cell_width, false);
+    let shown_docs_width =
+        autocomplete_list_panel_width(std::slice::from_ref(&class), 4000, cell_width, true);
+    assert_eq!(hidden_docs_width, expected_class_width);
+    assert_eq!(shown_docs_width, expected_class_width);
+
+    let short = AutocompleteEntry {
+        label: "a".to_owned(),
+        replacement: "a".to_owned(),
+        detail: None,
+        kind_label: None,
+        ..entry.clone()
+    };
+    let long = AutocompleteEntry {
+        label: "very_long_completion_identifier_name".to_owned(),
+        replacement: "very_long_completion_identifier_name".to_owned(),
+        detail: Some(
+            "crate::module::path::VeryLongCompletionIdentifierName :: TypeSignature".to_owned(),
+        ),
+        kind_label: Some("Struct".to_owned()),
+        ..entry.clone()
+    };
+    // Old 56-cell cap would truncate this; width must follow the longest entry.
+    let mixed_width =
+        autocomplete_list_panel_width(&[short, long.clone()], 4000, cell_width, false);
+    let long_only_width =
+        autocomplete_list_panel_width(std::slice::from_ref(&long), 4000, cell_width, false);
+    assert_eq!(mixed_width, long_only_width);
+    assert!(mixed_width > 56 * cell_width as u32);
+}
+
+#[test]
 fn autocomplete_docs_wrap_caps_huge_lsp_documentation() {
     let entry = AutocompleteEntry {
         provider_id: "lsp".to_owned(),
@@ -1116,6 +1198,7 @@ fn autocomplete_docs_wrap_caps_huge_lsp_documentation() {
         replacement: "foo".to_owned(),
         replace_range: None,
         detail: Some("fn foo()".to_owned()),
+        kind_label: None,
         documentation: Some(
             (0..5_000)
                 .map(|i| format!("docs line {i} with extra padding text"))
@@ -1154,6 +1237,7 @@ fn autocomplete_docs_focus_and_scroll_update_overlay_state() -> Result<(), Strin
             replacement: "alpha".to_owned(),
             replace_range: None,
             detail: Some("detail".to_owned()),
+            kind_label: None,
             documentation: Some(
                 (0..40)
                     .map(|i| format!("line {i}"))
@@ -1179,7 +1263,105 @@ fn autocomplete_docs_focus_and_scroll_update_overlay_state() -> Result<(), Strin
         autocomplete.blur_docs();
         assert!(!autocomplete.docs_focused);
         assert_eq!(autocomplete.docs_scroll_offset, 0);
+        autocomplete.focus_docs();
+        autocomplete.select_next();
+        assert!(!autocomplete.docs_focused);
+        assert_eq!(autocomplete.docs_scroll_offset, 0);
     }
+    Ok(())
+}
+
+#[test]
+fn autocomplete_docs_stay_hidden_until_tab_focus() -> Result<(), String> {
+    let mut registry = ThemeRegistry::new();
+    registry
+        .register(editor_theme::Theme::new("test-theme", "Test Theme"))
+        .unwrap_or_else(|error| panic!("unexpected error: {error}"));
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id = install_text_test_buffer(
+        &mut state,
+        "*autocomplete-docs-hidden*",
+        vec!["alpha".to_owned()],
+    )?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 5));
+    let entry = AutocompleteEntry {
+        provider_id: "manual".to_owned(),
+        provider_label: "Manual".to_owned(),
+        provider_icon: "M".to_owned(),
+        item_icon: "•".to_owned(),
+        label: "alpha".to_owned(),
+        replacement: "alpha".to_owned(),
+        replace_range: None,
+        detail: Some("detail".to_owned()),
+        kind_label: None,
+        documentation: Some("x".repeat(80)),
+        resolve: None,
+    };
+    let overlay = |docs_focused: bool| AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: String::new(),
+            token: "alpha".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 5)),
+        },
+        entries: vec![entry.clone()],
+        selected_index: 0,
+        loading: false,
+        docs_focused,
+        docs_scroll_offset: 0,
+    };
+
+    let mut hidden_scene = Vec::new();
+    render_autocomplete_overlay(
+        &mut DrawTarget::Scene(&mut hidden_scene),
+        shell_ui(&state.runtime)?,
+        &overlay(false),
+        OverlayAnchorContext {
+            pane_rect: PixelRectToRect::rect(0, 0, 640, 360),
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 16,
+            },
+            typing_active: false,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let mut shown_scene = Vec::new();
+    render_autocomplete_overlay(
+        &mut DrawTarget::Scene(&mut shown_scene),
+        shell_ui(&state.runtime)?,
+        &overlay(true),
+        OverlayAnchorContext {
+            pane_rect: PixelRectToRect::rect(0, 0, 640, 360),
+            user_library: &NullUserLibrary,
+            theme_registry: Some(&registry),
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 16,
+            },
+            typing_active: false,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let max_width = |scene: &[DrawCommand]| {
+        scene
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::FillRoundedRect { rect, .. } => Some(rect.width),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    };
+    assert!(
+        max_width(&shown_scene) > max_width(&hidden_scene),
+        "docs panel must stay closed until Tab focuses the selected item"
+    );
     Ok(())
 }
 

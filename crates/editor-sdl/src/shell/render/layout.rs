@@ -270,6 +270,71 @@ pub(super) fn render_pdf_buffer_body(
 /// LSP resolve docs can be huge; wrapping tens of thousands of lines on every
 /// selection/render made Ctrl+n/Ctrl+p feel like the completion list ran on UI.
 pub(super) const AUTOCOMPLETE_DOCS_MAX_WRAP_LINES: usize = 128;
+const AUTOCOMPLETE_LIST_MIN_CELLS: u32 = 12;
+const AUTOCOMPLETE_DOCS_MIN_CELLS: u32 = 24;
+const AUTOCOMPLETE_LIST_HORIZONTAL_PADDING: u32 = 28;
+
+pub(super) struct AutocompleteListRow {
+    pub(super) head: String,
+    pub(super) annotation: Option<String>,
+    pub(super) kind: Option<String>,
+}
+
+pub(super) fn autocomplete_list_row(entry: &AutocompleteEntry) -> AutocompleteListRow {
+    AutocompleteListRow {
+        head: format!("{} {}", entry.item_icon, entry.label),
+        annotation: entry
+            .detail
+            .as_deref()
+            .map(str::trim)
+            .filter(|detail| !detail.is_empty() && *detail != entry.label)
+            .map(str::to_owned),
+        kind: entry
+            .kind_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|kind| !kind.is_empty())
+            .map(|kind| format!("({kind})")),
+    }
+}
+
+fn autocomplete_list_row_content_width(row: &AutocompleteListRow, cell_width: i32) -> u32 {
+    let mut content = row.head.clone();
+    if let Some(annotation) = &row.annotation {
+        content.push(' ');
+        content.push_str(annotation);
+    }
+    if let Some(kind) = &row.kind {
+        content.push(' ');
+        content.push_str(kind);
+    }
+    monospace_text_width(&content, cell_width).saturating_add(AUTOCOMPLETE_LIST_HORIZONTAL_PADDING)
+}
+
+pub(super) fn autocomplete_list_panel_width(
+    entries: &[AutocompleteEntry],
+    pane_width: u32,
+    cell_width: i32,
+    docs_visible: bool,
+) -> u32 {
+    let cell = cell_width.max(1) as u32;
+    let pane_budget = pane_width.saturating_sub(48).max(1);
+    let max_width = if docs_visible {
+        let docs_floor = (cell * AUTOCOMPLETE_DOCS_MIN_CELLS).saturating_add(1);
+        pane_budget.saturating_sub(docs_floor).max(1)
+    } else {
+        pane_budget
+    };
+    let min_width = (cell * AUTOCOMPLETE_LIST_MIN_CELLS).min(max_width);
+    let mut width = min_width;
+    for entry in entries {
+        width = width.max(autocomplete_list_row_content_width(
+            &autocomplete_list_row(entry),
+            cell_width,
+        ));
+    }
+    width.clamp(min_width, max_width)
+}
 
 pub(super) fn autocomplete_preview_lines(
     entry: Option<&AutocompleteEntry>,
@@ -377,7 +442,8 @@ pub(super) fn autocomplete_docs_panel_width(
 ) -> u32 {
     let available = pane_width.saturating_sub(16);
     let docs_available = available.saturating_sub(list_width).saturating_sub(1);
-    let min_width = ((cell_width.max(1) as u32) * 24).min(docs_available.max(1));
+    let min_width =
+        ((cell_width.max(1) as u32) * AUTOCOMPLETE_DOCS_MIN_CELLS).min(docs_available.max(1));
     let mut content_width = min_width;
     // Width probe must stay O(visible metadata), not full markdown wrap.
     // Header/meta lines are enough plus a capped scan of raw doc lines.

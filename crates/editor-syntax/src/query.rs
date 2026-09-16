@@ -1,7 +1,6 @@
 use std::{
     collections::BTreeMap,
     fs,
-    mem::ManuallyDrop,
     ops::ControlFlow,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,7 +12,7 @@ use tree_sitter::{
     Node, Point, Query, QueryCursor, QueryCursorOptions, QueryPredicateArg, QueryProperty,
     StreamingIterator,
 };
-use tree_sitter_language::LanguageFn;
+use tree_sitter_loader::Loader;
 
 use crate::highlight::*;
 use crate::install::*;
@@ -47,7 +46,6 @@ pub(crate) fn load_language(
             let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
             let (capture_names, capture_tokens) = intern_query_captures(&query, &capture_mappings);
             Ok(LoadedLanguage {
-                _library: None,
                 language,
                 query,
                 indent_query: DeferredQuery::from_source(
@@ -87,36 +85,16 @@ pub(crate) fn load_language(
                 "highlight",
                 config.extra_highlight_query(),
             )?;
-            let library = unsafe {
-                // SAFETY: The library path is chosen by the installer for a tree-sitter grammar
-                // compiled from generated parser sources. We keep the `Library` alive for at least
-                // as long as the loaded `Language` is cached in `LoadedLanguage`.
-                libloading::Library::new(&library_path)
-            }
-            .map_err(|error| SyntaxError::LibraryLoad {
-                language_id: config.id().to_owned(),
-                message: error.to_string(),
-            })?;
-            let symbol_name = format!("{}\0", grammar.symbol_name());
-            let symbol = unsafe {
-                // SAFETY: The symbol name comes from the language configuration and points to the
-                // standard tree-sitter exported language constructor for the compiled grammar.
-                library.get::<unsafe extern "C" fn() -> *const ()>(symbol_name.as_bytes())
-            }
-            .map_err(|error| SyntaxError::LibraryLoad {
-                language_id: config.id().to_owned(),
-                message: error.to_string(),
-            })?;
-            let language_fn = unsafe {
-                // SAFETY: Tree-sitter generated grammar libraries export functions matching the
-                // `LanguageFn` ABI. The symbol was resolved from the configured exported name above.
-                LanguageFn::from_raw(*symbol)
-            };
-            let language = Language::new(language_fn);
+            let language =
+                Loader::load_language(&library_path, grammar.symbol_name()).map_err(|error| {
+                    SyntaxError::LibraryLoad {
+                        language_id: config.id().to_owned(),
+                        message: error.to_string(),
+                    }
+                })?;
             let query = compile_query_source(&language, config.id(), "highlight", &query_source)?;
             let (capture_names, capture_tokens) = intern_query_captures(&query, &capture_mappings);
             Ok(LoadedLanguage {
-                _library: Some(ManuallyDrop::new(library)),
                 language,
                 query,
                 indent_query: DeferredQuery::from_source(
@@ -466,14 +444,14 @@ pub(crate) fn desired_indent_for_loaded_language(
         if !general_predicates_match(
             indent_query,
             query_match.pattern_index,
-            query_match.captures,
+            query_match.captures(),
             buffer,
         ) {
             continue;
         }
 
         let properties = indent_query.property_settings(query_match.pattern_index);
-        for capture in query_match.captures {
+        for capture in query_match.captures() {
             let Some(capture_name) = capture_names.get(capture.index as usize).copied() else {
                 continue;
             };

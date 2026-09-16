@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    mem::ManuallyDrop,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
@@ -25,8 +24,6 @@ pub(crate) struct LoadedLanguage {
     pub(crate) capture_tokens: Vec<Arc<str>>,
     // Query values must drop before their language handle.
     pub(crate) language: Language,
-    // Must drop after every tree-sitter value above; destructors may still access grammar data.
-    pub(crate) _library: Option<ManuallyDrop<libloading::Library>>,
 }
 
 pub(crate) struct DeferredQuery {

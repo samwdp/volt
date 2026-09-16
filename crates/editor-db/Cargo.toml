@@ -70,3 +70,6 @@ path = "src/lib.rs"
 name = "editor_db"
 required-features = []
 crate-type = ["lib"]
+
+[lints]
+workspace = true

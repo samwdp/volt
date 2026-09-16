@@ -84,6 +84,10 @@ _Avoid_: user package (when meaning this library), volt-user (crate name as spok
 The staged copy of User Library sources shipped with a release build (under the profile dir as `user/`) so that library can be rebuilt and replaced without the full Volt repository.
 _Avoid_: user package (when meaning these sources), release user folder (as the spoken term), plugin project (vague)
 
+**Volt API**:
+The nvim-style function table Builtin Plugins call (`volt::buf`, `volt::lsp`, `volt::ui`, `volt::hook`) through handles such as `BufHandle` and `ClientId`. The host installs this table in-process. New host capabilities extend this table; they do not add User Library ABI prefix fields (`UserLibraryModule` is at the prefix-field limit).
+_Avoid_: editor-lsp types in user/, new Abi* prefix fields for new Plugin Package features
+
 **Plugin Package**:
 One extension unit declared as `PluginPackage` metadata (commands, hooks, buffers, keybindings, and related exports). Lives as a module under the User Library sources (for example `user/calculator.rs`).
 _Avoid_: user package (as the umbrella term), crate, plugin host package

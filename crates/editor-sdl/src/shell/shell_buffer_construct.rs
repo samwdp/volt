@@ -281,6 +281,13 @@ impl ShellBuffer {
         {
             return snapshot;
         }
+        if typing_active {
+            return Arc::new(BufferContextOverlaySnapshot {
+                key,
+                headerline_lines: Vec::new(),
+                ghost_text_by_line: BTreeMap::new(),
+            });
+        }
 
         let buffer_text = self.text.text();
         let buffer_name = key.buffer_name.clone();

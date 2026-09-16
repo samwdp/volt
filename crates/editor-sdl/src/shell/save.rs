@@ -28,16 +28,21 @@ fn save_buffer(
     if theme_lang_format_on_save(
         runtime.services().get::<ThemeRegistry>(),
         language_id.as_deref(),
-    ) && let Err(error) = format_buffer_on_save(runtime, workspace_id, buffer_id, &path)
-    {
-        record_runtime_error(
-            runtime,
-            "buffer.save.format-on-save",
-            format!(
-                "format-on-save failed for `{}`: {error}; saving without formatting",
-                path.display()
-            ),
-        );
+    ) {
+        match format_buffer_on_save(runtime, workspace_id, buffer_id, &path) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(error) => {
+                record_runtime_error(
+                    runtime,
+                    "buffer.save.format-on-save",
+                    format!(
+                        "format-on-save failed for `{}`: {error}; saving without formatting",
+                        path.display()
+                    ),
+                );
+            }
+        }
     }
     normalize_mark_list_buffer_before_save(runtime, buffer_id, &path)?;
     save_buffer_inner(runtime, workspace_id, buffer_id, &path)?;
@@ -311,15 +316,21 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
 
     if let Some((selection, anchor, head, kind)) = selection {
         store_last_visual_selection(runtime, anchor, head, kind)?;
-        if try_format_visual_selection_with_lsp(
-            runtime,
-            workspace_id,
-            buffer_id,
-            &path,
-            selection,
-            original_cursor,
-        )? {
-            finish_format_command(runtime)?;
+        let range = match selection {
+            VisualSelection::Range(range) => Some(range),
+            VisualSelection::Block(_) => None,
+        };
+        if let Some(range) = range
+            && schedule_lsp_format(
+                runtime,
+                workspace_id,
+                buffer_id,
+                &path,
+                Some(range),
+                original_cursor,
+                false,
+            )?
+        {
             return Ok(());
         }
         let formatter = formatter_for_path(runtime, &path)?;
@@ -332,14 +343,15 @@ fn format_workspace(runtime: &mut EditorRuntime) -> Result<(), String> {
             original_cursor,
         )?;
     } else {
-        if try_format_buffer_entire_with_lsp(
+        if schedule_lsp_format(
             runtime,
             workspace_id,
             buffer_id,
             &path,
+            None,
             original_cursor,
+            false,
         )? {
-            finish_format_command(runtime)?;
             return Ok(());
         }
         let formatter = formatter_for_path(runtime, &path)?;
@@ -360,29 +372,23 @@ fn format_buffer_on_save(
     workspace_id: WorkspaceId,
     buffer_id: BufferId,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let original_cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
-    if try_format_buffer_entire_with_lsp(runtime, workspace_id, buffer_id, path, original_cursor)? {
-        return Ok(());
+    if schedule_lsp_format(
+        runtime,
+        workspace_id,
+        buffer_id,
+        path,
+        None,
+        original_cursor,
+        true,
+    )? {
+        return Ok(true);
     }
 
-    let formatter = formatter_for_path(runtime, path)?;
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_owned);
-    let cwd = path
-        .parent()
-        .map(Path::to_path_buf)
-        .or_else(|| active_workspace_root(runtime).ok().flatten());
-    format_buffer_entire_with_formatter(
-        runtime,
-        buffer_id,
-        &formatter,
-        extension.as_deref(),
-        cwd.as_deref(),
-        original_cursor,
-    )
+    // Never run an external formatter synchronously on the UI/save path.
+    // Without an async LSP format session, save proceeds unformatted.
+    Ok(false)
 }
 
 fn formatter_for_path(runtime: &EditorRuntime, path: &Path) -> Result<FormatterSpec, String> {
@@ -474,91 +480,56 @@ fn format_visual_selection_with_formatter(
     Ok(())
 }
 
-fn try_format_buffer_entire_with_lsp(
+fn schedule_lsp_format(
     runtime: &mut EditorRuntime,
     workspace_id: WorkspaceId,
     buffer_id: BufferId,
     path: &Path,
+    range: Option<TextRange>,
     original_cursor: TextPoint,
+    then_save: bool,
 ) -> Result<bool, String> {
     let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
         return Ok(false);
     };
     let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
+    if !lsp_client.supports_path_in_workspace(&context.path, context.root.as_deref())
+        || !lsp_client.has_live_sessions_for_path(&context.path)
+    {
+        return Ok(false);
+    }
     let language_id = language_id_for_path(runtime, path).ok();
     let options = lsp_formatting_options(runtime, language_id.as_deref());
     cancel_lsp_sync_for_path(runtime, &context.path)?;
     apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
-    let (labels, edits) = {
-        if !lsp_client.supports_path_in_workspace(&context.path, context.root.as_deref()) {
-            return Ok(false);
-        }
-        let labels = lsp_client
-            .sync_buffer(
-                &context.path,
-                &context.text,
-                context.revision,
-                context.root.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
-        let edits = lsp_client
-            .formatting(&context.path, options)
-            .map_err(|error| error.to_string())?;
-        (labels, edits)
-    };
-    sync_lsp_buffer_state(runtime, workspace_id, buffer_id, &labels)?;
-    let Some(edits) = edits else {
-        return Ok(false);
-    };
-    let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    apply_lsp_text_edits(buffer, &edits);
-    buffer.set_cursor(original_cursor);
-    Ok(true)
-}
-
-fn try_format_visual_selection_with_lsp(
-    runtime: &mut EditorRuntime,
-    workspace_id: WorkspaceId,
-    buffer_id: BufferId,
-    path: &Path,
-    selection: VisualSelection,
-    original_cursor: TextPoint,
-) -> Result<bool, String> {
-    let VisualSelection::Range(range) = selection else {
-        return Ok(false);
-    };
-    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
-        return Ok(false);
-    };
-    let context = lsp_buffer_context(runtime, workspace_id, buffer_id)?;
-    let language_id = language_id_for_path(runtime, path).ok();
-    let options = lsp_formatting_options(runtime, language_id.as_deref());
-    cancel_lsp_sync_for_path(runtime, &context.path)?;
-    apply_sqls_workspace_settings_for_active_buffer_context(runtime, &lsp_client, &context)?;
-    let (labels, edits) = {
-        if !lsp_client.supports_path_in_workspace(&context.path, context.root.as_deref()) {
-            return Ok(false);
-        }
-        let labels = lsp_client
-            .sync_buffer(
-                &context.path,
-                &context.text,
-                context.revision,
-                context.root.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
-        let edits = lsp_client
-            .range_formatting(&context.path, range, options)
-            .map_err(|error| error.to_string())?;
-        (labels, edits)
-    };
-    sync_lsp_buffer_state(runtime, workspace_id, buffer_id, &labels)?;
-    let Some(edits) = edits else {
-        return Ok(false);
-    };
-    let buffer = shell_buffer_mut(runtime, buffer_id)?;
-    apply_lsp_text_edits(buffer, &edits);
-    buffer.set_cursor(original_cursor);
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_owned);
+    let cwd = path
+        .parent()
+        .map(Path::to_path_buf)
+        .or_else(|| active_workspace_root(runtime).ok().flatten());
+    let ui = shell_ui_mut(runtime)?;
+    ui.lsp_ui_worker.schedule(LspUiWorkerRequest {
+        buffer_id: context.buffer_id,
+        buffer_revision: context.revision,
+        path: context.path,
+        text: context.text,
+        root: context.root,
+        cursor: original_cursor,
+        kind: LspUiRequestKind::Format {
+            options,
+            range,
+            original_cursor,
+            then_save,
+            workspace_id,
+            extension,
+            cwd,
+        },
+        lsp_client,
+        edits: None,
+    });
     Ok(true)
 }
 

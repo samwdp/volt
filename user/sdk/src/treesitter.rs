@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use tree_sitter::{Language, Parser};
-use tree_sitter_language::LanguageFn;
+use tree_sitter_loader::Loader;
 
 use crate::path::grammar_install_root;
 use crate::syntax::{LanguageConfiguration, LanguageLoader, SyntaxNodeContext, SyntaxPoint};
@@ -18,7 +18,6 @@ struct AncestorContextQuery {
 struct LoadedGrammar {
     language_id: String,
     language: Language,
-    _library: Option<libloading::Library>,
 }
 
 #[derive(Default)]
@@ -129,33 +128,16 @@ fn load_language(config: &LanguageConfiguration) -> Option<LoadedGrammar> {
         } => Some(LoadedGrammar {
             language_id: config.id().to_owned(),
             language: language_provider(),
-            _library: None,
         }),
         LanguageLoader::Grammar { grammar } => {
             let library_path = grammar.installed_library_path(&grammar_install_root());
             if !library_path.exists() {
                 return None;
             }
-            let library = unsafe {
-                // SAFETY: Path comes from GrammarSource::installed_library_path under the
-                // configured grammar install root for a tree-sitter grammar shared library.
-                libloading::Library::new(&library_path)
-            }
-            .ok()?;
-            let symbol_name = format!("{}\0", grammar.symbol_name());
-            let symbol = unsafe {
-                // SAFETY: Symbol name is the configured tree-sitter language constructor.
-                library.get::<unsafe extern "C" fn() -> *const ()>(symbol_name.as_bytes())
-            }
-            .ok()?;
-            let language_fn = unsafe {
-                // SAFETY: Tree-sitter grammar libraries export LanguageFn-compatible constructors.
-                LanguageFn::from_raw(*symbol)
-            };
+            let language = Loader::load_language(&library_path, grammar.symbol_name()).ok()?;
             Some(LoadedGrammar {
                 language_id: config.id().to_owned(),
-                language: Language::new(language_fn),
-                _library: Some(library),
+                language,
             })
         }
     }

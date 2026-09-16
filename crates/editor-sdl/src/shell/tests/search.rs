@@ -30,7 +30,7 @@ fn workspace_search_char_column_handles_utf8_offsets() {
 #[test]
 fn collect_search_output_stops_after_limit() {
     let (output, reached_limit) =
-        collect_search_output(std::io::Cursor::new("one\ntwo\nthree\n"), 2)
+        collect_search_output_cancellable(std::io::Cursor::new("one\ntwo\nthree\n"), 2, None)
             .expect("search output should be collected");
     assert_eq!(output, "one\ntwo\n");
     assert!(reached_limit);

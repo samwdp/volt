@@ -132,6 +132,10 @@ pub const fn lsp_kind_icon(kind: Option<LspCompletionKind>) -> &'static str {
     }
 }
 
+pub fn lsp_kind_label(kind: Option<LspCompletionKind>) -> Option<&'static str> {
+    kind.map(LspCompletionKind::label)
+}
+
 /// Returns the metadata for autocomplete commands and keybindings.
 pub fn package() -> PluginPackage {
     PluginPackage::new(
@@ -290,5 +294,14 @@ mod tests {
             cod::COD_SYMBOL_CLASS
         );
         assert_eq!(lsp_kind_icon(None), LSP_ITEM_ICON);
+        assert_eq!(
+            lsp_kind_label(Some(LspCompletionKind::Interface)),
+            Some("Interface")
+        );
+        assert_eq!(
+            lsp_kind_label(Some(LspCompletionKind::Function)),
+            Some("Function")
+        );
+        assert_eq!(lsp_kind_label(None), None);
     }
 }

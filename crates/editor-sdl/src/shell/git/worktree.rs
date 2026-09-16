@@ -5,33 +5,13 @@ use super::pickers::*;
 use super::process::*;
 use super::status::*;
 
+const WORKTREE_BRANCH_PICKER_TITLE: &str = "Git Worktree Branch";
+const WORKTREE_BRANCH_PROVIDER_ID: &str = "git.worktree.branch";
+const OIL_WORKTREE_BRANCH_PROVIDER_ID: &str = "git.worktree.oil-branch";
+const WORKTREE_BRANCH_LOADING_ID: &str = "git-worktree-branch-loading";
+
 pub(crate) fn open_git_worktree_branch_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let root = git_root(runtime)?;
-    let entries = git_remote_worktree_branch_list(runtime, &root)?
-        .into_iter()
-        .map(|(remote_branch, local_branch)| {
-            let item_id = format!("git-worktree-branch:{remote_branch}");
-            let action = PickerAction::GitWorktreeBranch {
-                remote_branch: remote_branch.clone(),
-                local_branch: local_branch.clone(),
-            };
-            PickerEntry {
-                item: PickerItem::new(
-                    item_id,
-                    remote_branch,
-                    format!("create local branch {local_branch}"),
-                    None::<String>,
-                ),
-                action,
-                quickfix: None,
-            }
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        return Err("no remote-only branches found".to_owned());
-    }
-    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Git Worktree Branch", entries));
-    Ok(())
+    begin_worktree_branch_picker(runtime, WorktreeBranchPickerKind::Plain)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +122,14 @@ pub(crate) fn git_worktree_dashboard_picker_overlay_at(
     base_dir: &Path,
 ) -> Result<PickerOverlay, String> {
     let worktrees = git_worktree_list(base_dir)?;
+    workspace_dashboard_overlay_from_worktrees(runtime, base_dir, worktrees)
+}
+
+fn workspace_dashboard_overlay_from_worktrees(
+    runtime: &EditorRuntime,
+    base_dir: &Path,
+    worktrees: Vec<GitWorktreeListEntry>,
+) -> Result<PickerOverlay, String> {
     let mut entries = worktrees
         .into_iter()
         .filter(|entry| !entry.bare)
@@ -320,7 +308,19 @@ pub(crate) fn worktree_remove_repo_cwd(
     })
 }
 
+fn repo_root_from_git_common_dir(path: PathBuf) -> PathBuf {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name == ".git")
+        .and_then(|_| path.parent().map(Path::to_path_buf))
+        .unwrap_or(path)
+}
+
 pub(crate) fn git_common_dir(root: &Path) -> Result<PathBuf, String> {
+    // Prefer FS resolve so dashboard base-dir never needs a UI-thread git spawn.
+    if let Some((_, common_dir)) = resolve_git_dirs(root) {
+        return Ok(repo_root_from_git_common_dir(common_dir));
+    }
     let output = git_read_command_output(
         root,
         "rev-parse --git-common-dir",
@@ -339,12 +339,7 @@ pub(crate) fn git_common_dir(root: &Path) -> Result<PathBuf, String> {
     } else {
         root.join(path)
     };
-    Ok(path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| *name == ".git")
-        .and_then(|_| path.parent().map(Path::to_path_buf))
-        .unwrap_or(path))
+    Ok(repo_root_from_git_common_dir(path))
 }
 
 pub(crate) fn git_worktree_list(root: &Path) -> Result<Vec<GitWorktreeListEntry>, String> {
@@ -400,17 +395,132 @@ pub(crate) fn parse_git_worktree_list(output: &str) -> Result<Vec<GitWorktreeLis
     Ok(entries)
 }
 
-pub(crate) fn begin_oil_worktree_request(
-    runtime: &mut EditorRuntime,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorktreeBranchPickerKind {
+    Plain,
+    Oil { buffer_id: BufferId },
+}
+
+impl WorktreeBranchPickerKind {
+    fn provider_id(self) -> &'static str {
+        match self {
+            Self::Plain => WORKTREE_BRANCH_PROVIDER_ID,
+            Self::Oil { .. } => OIL_WORKTREE_BRANCH_PROVIDER_ID,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingWorktreeBranchReady {
+    kind: WorktreeBranchPickerKind,
+    branches: Vec<(String, String)>,
+}
+
+pub(crate) struct PendingWorktreeBranchLoad {
+    token: u64,
+    outcome: Result<PendingWorktreeBranchReady, String>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WorktreeBranchLoadState {
+    results: Arc<Mutex<Option<PendingWorktreeBranchLoad>>>,
+    active_token: Arc<AtomicU64>,
+    next_token: Arc<AtomicU64>,
+}
+
+impl WorktreeBranchLoadState {
+    pub(crate) fn new() -> Self {
+        Self {
+            results: Arc::new(Mutex::new(None)),
+            active_token: Arc::new(AtomicU64::new(0)),
+            next_token: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    pub(crate) fn begin_load(&self) -> u64 {
+        let token = self.next_token.fetch_add(1, Ordering::AcqRel);
+        self.active_token.store(token, Ordering::Release);
+        if let Ok(mut results) = self.results.lock() {
+            *results = None;
+        }
+        token
+    }
+
+    pub(crate) fn finish(&self, token: u64, outcome: Result<PendingWorktreeBranchReady, String>) {
+        if self.active_token.load(Ordering::Acquire) != token {
+            return;
+        }
+        if let Ok(mut results) = self.results.lock() {
+            *results = Some(PendingWorktreeBranchLoad { token, outcome });
+        }
+    }
+
+    pub(crate) fn take_ready(&self) -> Option<PendingWorktreeBranchLoad> {
+        let active = self.active_token.load(Ordering::Acquire);
+        self.results
+            .lock()
+            .ok()
+            .and_then(|mut results| match results.as_ref() {
+                Some(pending) if pending.token == active => results.take(),
+                _ => None,
+            })
+    }
+}
+
+fn worktree_branch_loading_picker(kind: WorktreeBranchPickerKind) -> PickerOverlay {
+    PickerOverlay::from_entries(
+        WORKTREE_BRANCH_PICKER_TITLE,
+        vec![PickerEntry {
+            item: PickerItem::new(
+                WORKTREE_BRANCH_LOADING_ID,
+                "Loading branches…",
+                "Fetching remote branches off the UI thread.",
+                None::<String>,
+            ),
+            action: PickerAction::NoOp,
+            quickfix: None,
+        }],
+    )
+    .with_provider_id(kind.provider_id())
+    .with_result_order(PickerResultOrder::Source)
+}
+
+fn plain_worktree_branch_picker_overlay(
+    branches: Vec<(String, String)>,
+) -> Result<PickerOverlay, String> {
+    let entries = branches
+        .into_iter()
+        .map(|(remote_branch, local_branch)| {
+            let item_id = format!("git-worktree-branch:{remote_branch}");
+            let action = PickerAction::GitWorktreeBranch {
+                remote_branch: remote_branch.clone(),
+                local_branch: local_branch.clone(),
+            };
+            PickerEntry {
+                item: PickerItem::new(
+                    item_id,
+                    remote_branch,
+                    format!("create local branch {local_branch}"),
+                    None::<String>,
+                ),
+                action,
+                quickfix: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Err("no remote-only branches found".to_owned());
+    }
+    Ok(
+        PickerOverlay::from_entries(WORKTREE_BRANCH_PICKER_TITLE, entries)
+            .with_provider_id(WORKTREE_BRANCH_PROVIDER_ID),
+    )
+}
+
+fn oil_worktree_branch_picker_overlay(
     buffer_id: BufferId,
-) -> Result<(), String> {
-    trace_oil_worktree(
-        runtime,
-        format!("begin oil worktree request for buffer `{buffer_id}`"),
-    );
-    let root = git_root(runtime)?;
-    trace_oil_worktree(runtime, format!("resolved git root `{}`", root.display()));
-    let branches = git_remote_worktree_branch_list(runtime, &root)?;
+    branches: Vec<(String, String)>,
+) -> PickerOverlay {
     let mut entries = branches
         .into_iter()
         .map(|(remote_branch, local_branch)| {
@@ -445,16 +555,117 @@ pub(crate) fn begin_oil_worktree_request(
             quickfix: None,
         },
     );
-    let entry_count = entries.len();
-    shell_ui_mut(runtime)?.set_picker(
-        PickerOverlay::from_entries("Git Worktree Branch", entries)
-            .with_result_order(PickerResultOrder::Source),
-    );
-    trace_oil_worktree(
-        runtime,
-        format!("set git worktree picker with {entry_count} entries"),
-    );
+    PickerOverlay::from_entries(WORKTREE_BRANCH_PICKER_TITLE, entries)
+        .with_provider_id(OIL_WORKTREE_BRANCH_PROVIDER_ID)
+        .with_result_order(PickerResultOrder::Source)
+}
+
+fn worktree_branch_unavailable_picker(error: String) -> PickerOverlay {
+    PickerOverlay::from_entries(
+        WORKTREE_BRANCH_PICKER_TITLE,
+        vec![PickerEntry {
+            item: PickerItem::new(
+                "git-worktree-branch-unavailable",
+                "Branch list unavailable",
+                error,
+                Some("Retry after network/git remotes are available.".to_owned()),
+            ),
+            action: PickerAction::NoOp,
+            quickfix: None,
+        }],
+    )
+    .with_provider_id(WORKTREE_BRANCH_PROVIDER_ID)
+}
+
+fn begin_worktree_branch_picker(
+    runtime: &mut EditorRuntime,
+    kind: WorktreeBranchPickerKind,
+) -> Result<(), String> {
+    let root = git_root(runtime)?;
+    if let WorktreeBranchPickerKind::Oil { buffer_id } = kind {
+        trace_oil_worktree(
+            runtime,
+            format!("begin oil worktree request for buffer `{buffer_id}`"),
+        );
+        trace_oil_worktree(runtime, format!("resolved git root `{}`", root.display()));
+    }
+
+    if !editor_jobs::current_thread_is_ui() {
+        let branches = git_remote_worktree_branch_list(runtime, &root)?;
+        let picker = match kind {
+            WorktreeBranchPickerKind::Plain => plain_worktree_branch_picker_overlay(branches)?,
+            WorktreeBranchPickerKind::Oil { buffer_id } => {
+                let picker = oil_worktree_branch_picker_overlay(buffer_id, branches);
+                trace_oil_worktree(
+                    runtime,
+                    format!(
+                        "set git worktree picker with {} entries",
+                        picker.session.item_count()
+                    ),
+                );
+                picker
+            }
+        };
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
+    }
+
+    let load = shell_ui(runtime)?.worktree_branch_load_state();
+    let token = load.begin_load();
+    shell_ui_mut(runtime)?.set_picker(worktree_branch_loading_picker(kind));
+    std::thread::spawn(move || {
+        let outcome = git_remote_worktree_branch_list_at(&root)
+            .map(|(branches, _)| PendingWorktreeBranchReady { kind, branches });
+        load.finish(token, outcome);
+        ping_shell_wakeup();
+    });
     Ok(())
+}
+
+pub(crate) fn apply_pending_worktree_branch_loads(
+    runtime: &mut EditorRuntime,
+) -> Result<bool, String> {
+    let Some(PendingWorktreeBranchLoad { outcome, .. }) =
+        shell_ui(runtime)?.worktree_branch_load_state().take_ready()
+    else {
+        return Ok(false);
+    };
+
+    let replace = shell_ui(runtime)?.picker().is_some_and(|picker| {
+        picker.provider_id() == Some(WORKTREE_BRANCH_PROVIDER_ID)
+            || picker.provider_id() == Some(OIL_WORKTREE_BRANCH_PROVIDER_ID)
+            || picker
+                .session
+                .matches()
+                .iter()
+                .any(|matched| matched.item().id() == WORKTREE_BRANCH_LOADING_ID)
+    });
+    if !replace {
+        return Ok(false);
+    }
+
+    let overlay = match outcome {
+        Ok(PendingWorktreeBranchReady { kind, branches }) => match kind {
+            WorktreeBranchPickerKind::Plain => match plain_worktree_branch_picker_overlay(branches)
+            {
+                Ok(picker) => picker,
+                Err(error) => worktree_branch_unavailable_picker(error),
+            },
+            WorktreeBranchPickerKind::Oil { buffer_id } => {
+                oil_worktree_branch_picker_overlay(buffer_id, branches)
+            }
+        },
+        Err(error) => worktree_branch_unavailable_picker(error),
+    };
+    shell_ui_mut(runtime)?.set_picker(overlay);
+    Ok(true)
+}
+
+pub(crate) fn begin_oil_worktree_request(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    begin_worktree_branch_picker(runtime, WorktreeBranchPickerKind::Oil { buffer_id })
 }
 
 pub(crate) fn open_git_worktree_new_branch_prompt(

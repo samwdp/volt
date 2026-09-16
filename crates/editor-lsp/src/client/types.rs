@@ -93,6 +93,8 @@ pub struct LspCompletionItem {
     pub(crate) insert_text: String,
     pub(crate) edit_range: Option<TextRange>,
     pub(crate) detail: Option<String>,
+    pub(crate) label_detail: Option<String>,
+    pub(crate) label_description: Option<String>,
     pub(crate) documentation: Option<String>,
     /// True when the completion response included a real `documentation` field.
     pub(crate) has_documentation: bool,
@@ -157,6 +159,8 @@ impl LspCompletionItem {
             insert_text: insert_text.into(),
             edit_range,
             detail,
+            label_detail: None,
+            label_description: None,
             documentation,
             has_documentation: false,
             raw_item: Value::Null,
@@ -171,6 +175,16 @@ impl LspCompletionItem {
 
     pub(crate) fn with_root(mut self, root: Option<PathBuf>) -> Self {
         self.root = root;
+        self
+    }
+
+    pub(crate) fn with_label_details(
+        mut self,
+        label_detail: Option<String>,
+        label_description: Option<String>,
+    ) -> Self {
+        self.label_detail = label_detail;
+        self.label_description = label_description;
         self
     }
 
@@ -200,6 +214,25 @@ impl LspCompletionItem {
 
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
+    }
+
+    pub fn label_detail(&self) -> Option<&str> {
+        self.label_detail.as_deref()
+    }
+
+    pub fn label_description(&self) -> Option<&str> {
+        self.label_description.as_deref()
+    }
+
+    /// Type, signature, or module text for the completion list row.
+    /// Uses `labelDetails` when present so return types show without resolve.
+    pub fn list_type_text(&self) -> Option<String> {
+        completion_list_type_text(
+            self.label(),
+            self.label_detail(),
+            self.label_description(),
+            self.detail(),
+        )
     }
 
     pub fn documentation(&self) -> Option<&str> {
@@ -397,6 +430,17 @@ impl LspLocation {
 
     pub fn is_file_path(&self) -> bool {
         self.file_path.is_some()
+    }
+
+    /// Builds a location from a document URI and a 0-based start position.
+    pub fn from_uri_position(
+        server_id: impl Into<String>,
+        uri: impl Into<String>,
+        line: usize,
+        column: usize,
+    ) -> Self {
+        let point = TextPoint::new(line, column);
+        Self::from_uri(server_id, uri, TextRange::new(point, point))
     }
 
     pub const fn range(&self) -> TextRange {
@@ -997,6 +1041,44 @@ pub struct LspClientManager {
     pub(crate) dirty_diagnostic_paths: Arc<Mutex<BTreeSet<PathBuf>>>,
     pub(crate) sessions_generation: Arc<AtomicU64>,
     pub(crate) diagnostics_lookups: Arc<AtomicU64>,
+}
+
+/// Arguments for starting/syncing a buffer onto an exact language server.
+#[derive(Debug)]
+pub struct LspStartBufferServerRequest<'a> {
+    /// Document path.
+    pub path: &'a Path,
+    /// Full buffer text.
+    pub text: String,
+    /// Buffer revision paired with `text`.
+    pub revision: u64,
+    /// Workspace root hint for session selection.
+    pub root: Option<&'a Path>,
+    /// Language server id from the registry.
+    pub server_id: &'a str,
+    /// Optional incremental edits for `textDocument/didChange`.
+    pub edits: Option<&'a [editor_buffer::TextEdit]>,
+    /// Optional editor workspace id tagged onto the session.
+    pub workspace_id: Option<u64>,
+}
+
+/// Arguments for [`LspClientManager::json_rpc_request`].
+#[derive(Debug)]
+pub struct LspJsonRpcRequest<'a> {
+    /// Language server id from the registry.
+    pub server_id: &'a str,
+    /// Document path used for session lookup / optional sync.
+    pub path: &'a Path,
+    /// JSON-RPC method name.
+    pub method: &'a str,
+    /// JSON-RPC params object.
+    pub params: Value,
+    /// Workspace root hint for session selection.
+    pub root: Option<&'a Path>,
+    /// Optional buffer text to sync before the request.
+    pub text: Option<&'a str>,
+    /// Optional buffer revision paired with `text`.
+    pub revision: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -1877,7 +1959,6 @@ pub(crate) fn note_session_disconnect_diagnostics(
     }
 }
 
-#[cfg(test)]
 pub(crate) fn spawn_inert_child() -> std::io::Result<(std::process::Child, ChildStdin)> {
     #[cfg(windows)]
     let mut child = {
@@ -3456,6 +3537,19 @@ pub(crate) fn parse_completion_item(server_id: &str, value: &Value) -> Option<Ls
         .get("detail")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let label_details = value.get("labelDetails");
+    let label_detail = label_details
+        .and_then(|details| details.get("detail"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
+    let label_description = label_details
+        .and_then(|details| details.get("description"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned);
     let resolved_documentation = value
         .get("documentation")
         .and_then(completion_documentation);
@@ -3473,11 +3567,45 @@ pub(crate) fn parse_completion_item(server_id: &str, value: &Value) -> Option<Ls
             detail,
             documentation,
         )
+        .with_label_details(label_detail, label_description)
         .with_raw_item(
             completion_item_value_without_documentation(value),
             has_documentation,
         ),
     )
+}
+
+pub(crate) fn completion_list_type_text(
+    label: &str,
+    label_detail: Option<&str>,
+    label_description: Option<&str>,
+    detail: Option<&str>,
+) -> Option<String> {
+    let label = label.trim();
+    let signature = label_detail
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != label)
+        .map(str::to_owned)
+        .or_else(|| {
+            detail
+                .map(str::trim)
+                .filter(|text| !text.is_empty() && *text != label)
+                .map(str::to_owned)
+        });
+    let description = label_description
+        .map(str::trim)
+        .filter(|text| !text.is_empty() && *text != label)
+        .map(str::to_owned);
+    match (signature, description) {
+        (Some(signature), Some(description))
+            if !signature.contains(&description) && !description.contains(&signature) =>
+        {
+            Some(format!("{signature}  {description}"))
+        }
+        (Some(signature), _) => Some(signature),
+        (None, Some(description)) => Some(description),
+        (None, None) => None,
+    }
 }
 
 pub(crate) fn completion_item_value_without_documentation(value: &Value) -> Value {

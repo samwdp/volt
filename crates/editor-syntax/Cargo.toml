@@ -14,9 +14,8 @@ workspace = true
 workspace = true
 
 [dependencies]
-libloading = "0.8.9"
-tree-sitter = "0.26.7"
-tree-sitter-language = "0.1.7"
+tree-sitter = "0.27.0"
+tree-sitter-loader = "0.27.0"
 
 [dependencies.editor-buffer]
 path = "../editor-buffer"
@@ -64,3 +63,6 @@ crate-type = ["lib"]
 [[bench]]
 name = "highlight"
 harness = false
+
+[lints]
+workspace = true

@@ -16,7 +16,7 @@ pub(crate) fn git_command_output_background(
     args: &[&str],
     allowed_exit_codes: &[i32],
 ) -> Option<String> {
-    let output = run_direct_git_command(root, args).ok()?;
+    let output = run_direct_git_command_raw(root, args).ok()?;
     let exit_code = output.exit_code?;
     if exit_code != 0 && !allowed_exit_codes.contains(&exit_code) {
         return None;
@@ -61,16 +61,6 @@ pub(crate) fn git_command_output(
     Ok(result.stdout().to_owned())
 }
 
-pub(crate) fn git_command_output_owned(
-    runtime: &mut EditorRuntime,
-    root: &Path,
-    label: &str,
-    args: &[String],
-) -> Result<String, String> {
-    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    git_command_output(runtime, root, label, &refs)
-}
-
 pub(crate) fn git_read_command_output(
     root: &Path,
     label: &str,
@@ -98,13 +88,24 @@ pub(crate) fn git_read_log_oneline_optional(
         .unwrap_or_default()
 }
 
+pub(crate) fn git_command_output_owned(
+    runtime: &mut EditorRuntime,
+    root: &Path,
+    label: &str,
+    args: &[String],
+) -> Result<String, String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_command_output(runtime, root, label, &refs)
+}
+
 pub(crate) fn git_read_command_output_allow_exit_codes(
     root: &Path,
     label: &str,
     args: &[&str],
     allowed_exit_codes: &[i32],
 ) -> Result<String, String> {
-    let output = run_direct_git_command(root, args)?;
+    // Reads stay allowed on the UI thread so git.status / dashboard stay sync.
+    let output = run_direct_git_command_raw(root, args)?;
     let exit_code = output.exit_code.ok_or_else(|| {
         format!(
             "git {label} failed to return an exit code: {}",
@@ -120,7 +121,7 @@ pub(crate) fn git_read_command_output_allow_exit_codes(
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-pub(crate) fn run_direct_git_command(
+fn run_direct_git_command_raw(
     root: &Path,
     args: &[&str],
 ) -> Result<editor_jobs::CapturedProcessOutput, String> {
@@ -146,6 +147,18 @@ pub(crate) fn run_direct_git_command(
     }
 }
 
+pub(crate) fn run_direct_git_command(
+    root: &Path,
+    args: &[&str],
+) -> Result<editor_jobs::CapturedProcessOutput, String> {
+    if editor_jobs::current_thread_is_ui() {
+        return Err(editor_jobs::git_process_on_ui_thread_error(
+            "run_direct_git_command",
+        ));
+    }
+    run_direct_git_command_raw(root, args)
+}
+
 pub(crate) fn command_output_transcript(output: &editor_jobs::CapturedProcessOutput) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -159,30 +172,22 @@ pub(crate) fn command_output_transcript(output: &editor_jobs::CapturedProcessOut
 }
 
 pub(crate) fn git_dir_path(_runtime: &mut EditorRuntime, root: &Path) -> Option<PathBuf> {
-    let probe = git_probe_snapshot(root);
-    if let Some(git_dir) = probe.git_dir() {
-        return Some(git_dir.to_path_buf());
-    }
-    if !probe.present() {
-        return None;
-    }
-    let output =
-        git_read_command_output_optional(root, "rev-parse --git-dir", &["rev-parse", "--git-dir"])?;
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let path = normalize_git_output_path(trimmed);
-    if path.is_absolute() {
-        Some(path)
-    } else {
-        Some(root.join(path))
-    }
+    git_dir_path_at(root)
+}
+
+pub(crate) fn git_dir_path_at(root: &Path) -> Option<PathBuf> {
+    resolve_git_dirs(root).map(|(git_dir, _)| git_dir)
 }
 
 pub(crate) fn invalidate_git_identity_for_active_workspace(runtime: &mut EditorRuntime) {
     if let Ok(Some(root)) = active_workspace_root(runtime) {
         invalidate_git_probe_cache_for(&root);
+        // Warm probe off the UI thread so the next dock/render frame stays spawn-free.
+        let warm_root = root.clone();
+        std::thread::spawn(move || {
+            let _ = git_probe_snapshot(&warm_root);
+            ping_shell_wakeup();
+        });
     }
     if let Ok(ui) = shell_ui_mut(runtime) {
         ui.mark_git_summary_stale();

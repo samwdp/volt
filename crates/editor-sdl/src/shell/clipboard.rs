@@ -1,5 +1,5 @@
 use super::*;
-use std::{cell::RefCell, ffi::CString, path::Path};
+use std::{cell::RefCell, io::Cursor, path::Path};
 
 struct ClipboardContext {
     video: sdl3::VideoSubsystem,
@@ -8,17 +8,9 @@ struct ClipboardContext {
 thread_local! {
     static CLIPBOARD_CONTEXT: RefCell<Option<ClipboardContext>> = const { RefCell::new(None) };
     static CLIPBOARD_TEXT_OVERRIDE_FOR_TEST: RefCell<Option<String>> = const { RefCell::new(None) };
+    static CLIPBOARD_IMAGE_OVERRIDE_FOR_TEST: RefCell<Option<ClipboardImage>> =
+        const { RefCell::new(None) };
 }
-
-const CLIPBOARD_IMAGE_MIME_TYPES: &[&str] = &[
-    "image/png",
-    "image/jpeg",
-    "image/jpg",
-    "image/webp",
-    "image/gif",
-    "image/bmp",
-    "image/tiff",
-];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ClipboardImage {
@@ -49,10 +41,6 @@ fn with_clipboard_util<T>(f: impl FnOnce(&sdl3::clipboard::ClipboardUtil) -> T) 
     })
 }
 
-fn clipboard_video_ready() -> bool {
-    CLIPBOARD_CONTEXT.with(|context| context.borrow().is_some())
-}
-
 pub(super) fn configure_background_command(_command: &mut Command) {
     #[cfg(windows)]
     {
@@ -75,6 +63,13 @@ pub(super) fn write_system_clipboard(text: &str) {
 pub(super) fn set_clipboard_text_override_for_test(text: Option<&str>) {
     CLIPBOARD_TEXT_OVERRIDE_FOR_TEST.with(|override_text| {
         *override_text.borrow_mut() = text.map(str::to_owned);
+    });
+}
+
+#[cfg(test)]
+pub(super) fn set_clipboard_image_override_for_test(image: Option<ClipboardImage>) {
+    CLIPBOARD_IMAGE_OVERRIDE_FOR_TEST.with(|override_image| {
+        *override_image.borrow_mut() = image;
     });
 }
 
@@ -115,45 +110,29 @@ pub(super) fn read_system_clipboard_paste() -> ClipboardPaste {
 }
 
 fn read_system_clipboard_image() -> Option<ClipboardImage> {
-    if !clipboard_video_ready() {
-        return None;
-    }
-    for mime in CLIPBOARD_IMAGE_MIME_TYPES {
-        if let Some(bytes) = clipboard_data_for_mime(mime)
-            && let Some(image) = normalize_clipboard_image(bytes, Some(mime), "Image")
-        {
-            return Some(image);
-        }
-    }
-    if let Some(uris) = clipboard_text_for_mime("text/uri-list")
-        && let Some(image) = clipboard_image_from_uri_list(&uris)
+    #[cfg(test)]
     {
-        return Some(image);
+        // Prefer the test override; never read the live OS clipboard in unit tests.
+        let _ = std::mem::size_of::<arboard::Clipboard>();
+        CLIPBOARD_IMAGE_OVERRIDE_FOR_TEST.with(|override_image| override_image.borrow().clone())
     }
-    None
-}
-
-fn clipboard_data_for_mime(mime: &str) -> Option<Vec<u8>> {
-    let c_mime = CString::new(mime).ok()?;
-    unsafe {
-        if !sdl3::sys::clipboard::SDL_HasClipboardData(c_mime.as_ptr()) {
-            return None;
-        }
-        let mut size = 0usize;
-        let ptr = sdl3::sys::clipboard::SDL_GetClipboardData(c_mime.as_ptr(), &mut size);
-        if ptr.is_null() || size == 0 {
-            return None;
-        }
-        let bytes = std::slice::from_raw_parts(ptr.cast::<u8>(), size).to_vec();
-        sdl3::sys::stdinc::SDL_free(ptr);
-        Some(bytes)
+    #[cfg(not(test))]
+    {
+        let mut clipboard = arboard::Clipboard::new().ok()?;
+        let image = clipboard.get_image().ok()?;
+        clipboard_image_from_rgba(image.width, image.height, image.bytes.as_ref())
     }
 }
 
-fn clipboard_text_for_mime(mime: &str) -> Option<String> {
-    let bytes = clipboard_data_for_mime(mime)?;
-    let text = std::str::from_utf8(&bytes).ok()?.trim_end_matches('\0');
-    (!text.is_empty()).then(|| text.to_owned())
+fn clipboard_image_from_rgba(width: usize, height: usize, rgba: &[u8]) -> Option<ClipboardImage> {
+    let width = u32::try_from(width).ok()?;
+    let height = u32::try_from(height).ok()?;
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, rgba.to_vec())?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    normalize_clipboard_image(png, Some("image/png"), "Image")
 }
 
 pub(super) fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
@@ -243,20 +222,6 @@ fn clipboard_image_from_path_text(text: &str) -> Option<ClipboardImage> {
     } else {
         None
     }
-}
-
-fn clipboard_image_from_uri_list(uris: &str) -> Option<ClipboardImage> {
-    for line in uris.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let path = path_from_file_uri(line).unwrap_or_else(|| PathBuf::from(line));
-        if let Some(image) = clipboard_image_from_path(&path) {
-            return Some(image);
-        }
-    }
-    None
 }
 
 fn path_from_file_uri(value: &str) -> Option<PathBuf> {

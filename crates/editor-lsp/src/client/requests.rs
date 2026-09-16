@@ -28,6 +28,83 @@ impl LspClientManager {
         }
     }
 
+    /// Installs an inert session that accepts writes and never replies.
+    ///
+    /// Tests use this to prove UI code does not wait on JSON-RPC.
+    pub fn install_silent_session(
+        &self,
+        server_id: &str,
+        path: &Path,
+        workspace_root: Option<&Path>,
+    ) -> Result<(), LspClientError> {
+        let session = self
+            .registry
+            .prepare_session_for_path(server_id, path, workspace_root)?;
+        let workspace_configuration = Arc::new(Mutex::new(SessionWorkspaceConfiguration::new(
+            &session, None,
+        )));
+        let (child, writer) = spawn_inert_child()?;
+        let handle = Arc::new(LspSessionHandle {
+            key: SessionKey::new(server_id, session.root().map(PathBuf::as_path)),
+            session,
+            child: Some(Mutex::new(child)),
+            owned_process_id: None,
+            process_registry: None,
+            writer: Arc::new(Mutex::new(writer)),
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostics: Arc::new(Mutex::new(BTreeMap::new())),
+            open_documents: Mutex::new(BTreeMap::new()),
+            text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
+            workspace_configuration,
+            initialization_options: None,
+            transport_log: Arc::clone(&self.transport_log),
+            next_request_id: AtomicU64::new(1),
+            next_progress_token: AtomicU64::new(1),
+            disconnected: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_next_send: AtomicBool::new(false),
+            needs_full_document: Mutex::new(BTreeSet::new()),
+            completion_resolve_supported: AtomicBool::new(false),
+        });
+        let key = handle.key.clone();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+            state.sessions.insert(key.clone(), Arc::clone(&handle));
+            let tracked = state.tracked_buffers.entry(path.to_path_buf()).or_default();
+            tracked.sessions.insert(key);
+            if tracked.revision == 0 {
+                tracked.revision = 1;
+                tracked.version = 1;
+            }
+        }
+        self.sessions_generation.fetch_add(1, Ordering::Release);
+        Ok(())
+    }
+
+    /// Runs a JSON-RPC request on a live session. Call this from a worker thread only.
+    pub fn json_rpc_request(
+        &self,
+        request: LspJsonRpcRequest<'_>,
+    ) -> Result<Value, LspClientError> {
+        if let (Some(text), Some(revision)) = (request.text, request.revision) {
+            let _ = self.sync_buffer(request.path, text.to_owned(), revision, request.root);
+        }
+        let session = self
+            .live_session_for_server(request.server_id, request.root)?
+            .ok_or_else(|| {
+                LspClientError::Protocol(format!("no live `{}` session", request.server_id))
+            })?;
+        session.request(request.method, request.params)
+    }
+
+    /// File URI used as the LSP document identifier for `path`.
+    pub fn document_uri_for_path(path: &Path) -> String {
+        path_to_file_uri(path)
+    }
+
     pub fn log_snapshot(&self) -> LspLogSnapshot {
         self.transport_log
             .lock()
@@ -305,27 +382,37 @@ impl LspClientManager {
         server_id: &str,
         edits: Option<&[editor_buffer::TextEdit]>,
     ) -> Result<Vec<String>, LspClientError> {
-        self.start_buffer_server_with_edits_for_workspace(
-            path, text, revision, root, server_id, edits, None,
-        )
+        self.start_buffer_server_with_edits_for_workspace(LspStartBufferServerRequest {
+            path,
+            text: text.into(),
+            revision,
+            root,
+            server_id,
+            edits,
+            workspace_id: None,
+        })
     }
 
     /// Starts/syncs onto an exact server and tags the Session for the editor Workspace.
-    #[allow(clippy::too_many_arguments)]
     pub fn start_buffer_server_with_edits_for_workspace(
         &self,
-        path: &Path,
-        text: impl Into<String>,
-        revision: u64,
-        root: Option<&Path>,
-        server_id: &str,
-        edits: Option<&[editor_buffer::TextEdit]>,
-        workspace_id: Option<u64>,
+        request: LspStartBufferServerRequest<'_>,
     ) -> Result<Vec<String>, LspClientError> {
-        let workspace_id = workspace_id.map(WorkspaceId::from_raw);
-        let sessions =
-            self.ensure_sessions_for_path(path, root, Some(server_id), true, workspace_id)?;
-        self.sync_buffer_to_sessions(path, text.into(), revision, sessions, edits)
+        let workspace_id = request.workspace_id.map(WorkspaceId::from_raw);
+        let sessions = self.ensure_sessions_for_path(
+            request.path,
+            request.root,
+            Some(request.server_id),
+            true,
+            workspace_id,
+        )?;
+        self.sync_buffer_to_sessions(
+            request.path,
+            request.text,
+            request.revision,
+            sessions,
+            request.edits,
+        )
     }
 
     pub fn save_buffer(&self, path: &Path) -> Result<(), LspClientError> {

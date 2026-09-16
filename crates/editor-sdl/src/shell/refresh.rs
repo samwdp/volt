@@ -228,6 +228,7 @@ fn refresh_pending_git(
     now: Instant,
     typing_active: bool,
 ) -> Result<(), String> {
+    let _ = apply_pending_worktree_branch_loads(runtime)?;
     refresh_pending_git_summary(runtime, now, typing_active)?;
     refresh_pending_git_fringe(runtime, now, typing_active)?;
     Ok(())
@@ -368,7 +369,10 @@ fn apply_pending_lsp_state(runtime: &mut EditorRuntime) -> Result<bool, String> 
                     if !dirty.is_empty() && !dirty.iter().any(|dirty_path| dirty_path == path) {
                         return None;
                     }
-                    Some((buffer.id(), lsp_client.diagnostics_for_path(path)))
+                    Some((
+                        buffer.id(),
+                        cap_diagnostics_for_paint(lsp_client.diagnostics_for_path(path)),
+                    ))
                 })
                 .collect::<Vec<_>>()
         } else {

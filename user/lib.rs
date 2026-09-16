@@ -596,6 +596,10 @@ impl UserLibrary for UserLibraryImpl {
     fn default_build_command(&self, language: &str) -> Option<String> {
         compile::default_build_command(language).map(str::to_owned)
     }
+
+    fn run_volt_command(&self, name: &str) -> bool {
+        crate::lsp::run_volt_command(name)
+    }
 }
 
 extern "C" fn exported_packages() -> RVec<PluginPackage> {

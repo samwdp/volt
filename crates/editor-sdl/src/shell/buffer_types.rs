@@ -154,7 +154,7 @@ struct AcpPaneState {
 enum AcpOutputItem {
     UserPrompt(String),
     AgentBlocks(Vec<ContentBlock>),
-    ToolCall(ToolCall),
+    ToolCall(Box<ToolCall>),
     SystemMessage(String),
 }
 

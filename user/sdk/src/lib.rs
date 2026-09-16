@@ -14,6 +14,7 @@ pub mod sections;
 pub mod syntax;
 pub mod theme;
 pub mod treesitter;
+pub mod volt;
 
 use abi_stable::{
     StableAbi,
@@ -2192,6 +2193,11 @@ pub trait UserLibrary: Send + Sync {
     }
     fn default_build_command(&self, _language: &str) -> Option<String> {
         None
+    }
+
+    /// Handles a command through [`crate::volt`]. Returns `true` when the library claimed it.
+    fn run_volt_command(&self, _name: &str) -> bool {
+        false
     }
 }
 
