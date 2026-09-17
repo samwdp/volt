@@ -118,8 +118,9 @@ use editor_db::{
 };
 use editor_fs::{
     DirectoryBuffer, DirectoryEntry, DirectoryEntryKind, ProjectSearchRoot,
-    project_discovery_background_tick, project_discovery_forget_candidate,
-    project_discovery_rescan_cached_roots, project_discovery_snapshot,
+    project_discovery_background_tick, project_discovery_for_picker,
+    project_discovery_forget_candidate, project_discovery_rescan_cached_roots,
+    project_discovery_snapshot,
 };
 use editor_git::{
     GitLogEntry, GitStatusSnapshot, detect_in_progress, git_probe_snapshot,
@@ -145,11 +146,11 @@ use editor_plugin_api::{
     LspDiagnosticsInfo as PluginLspDiagnosticsInfo, ModelineAlignment, ModelineSegment,
     OilDefaults, OilKeyAction, PdfOpenMode, PickerAcpClientContext, PickerActionSpec,
     PickerBufferContext, PickerCommandContext, PickerIconContext, PickerKeybindingContext,
-    PickerProviderContext, PickerProviderSpec, PickerSource, PickerSyntaxLanguageContext,
-    PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext, PickerWorkspaceContext,
-    PickerWorkspaceFileContext, PluginBufferLayout, PluginBufferLayoutAxis, PluginBufferLayoutNode,
-    PluginBufferSectionUpdate, PluginBufferSections, StatuslineSpan, VimEditAction,
-    WorkspaceDockSide,
+    PickerProjectContext, PickerProviderContext, PickerProviderSpec, PickerSource,
+    PickerSyntaxLanguageContext, PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext,
+    PickerWorkspaceContext, PickerWorkspaceFileContext, PluginBufferLayout, PluginBufferLayoutAxis,
+    PluginBufferLayoutNode, PluginBufferSectionUpdate, PluginBufferSections, StatuslineSpan,
+    VimEditAction, WorkspaceDockSide,
     abi::{
         AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
         UserLibraryModuleRef,

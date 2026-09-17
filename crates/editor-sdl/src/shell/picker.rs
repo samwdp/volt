@@ -76,7 +76,9 @@ fn picker_overlay_from_spec(
         return Ok(with_provider_extras(
             git_worktree_dashboard_picker_overlay(runtime)
                 .unwrap_or_else(workspace_dashboard_unavailable_overlay)
-                .with_title(spec.title()),
+                .with_title(spec.title())
+                .with_source(PickerSource::WorkspaceDashboard)
+                .with_provider_id(spec.id()),
             spec,
         ));
     }
@@ -295,9 +297,11 @@ fn picker_provider_context(
         }
         PickerSource::WorkspaceProjects => {
             context.workspaces = workspace_contexts(runtime, None)?.into();
+            attach_project_discovery_to_picker_context(runtime, &mut context);
         }
         PickerSource::WorkspaceSwitch => {
             context.workspaces = workspace_contexts(runtime, None)?.into();
+            attach_project_discovery_to_picker_context(runtime, &mut context);
         }
         PickerSource::WorkspaceDelete => {
             context.workspaces =
@@ -400,6 +404,21 @@ fn picker_provider_context(
         }
     }
     Ok(context)
+}
+
+fn attach_project_discovery_to_picker_context(
+    runtime: &EditorRuntime,
+    context: &mut PickerProviderContext,
+) {
+    let roots = project_search_roots_from_user_library(&*shell_user_library(runtime));
+    let snapshot = project_discovery_for_picker(&roots);
+    context.projects = snapshot
+        .candidates()
+        .iter()
+        .map(PickerProjectContext::from_candidate)
+        .collect::<Vec<_>>()
+        .into();
+    context.project_discovery_in_progress = snapshot.in_progress();
 }
 
 fn workspace_contexts(

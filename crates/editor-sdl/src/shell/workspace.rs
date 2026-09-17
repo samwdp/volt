@@ -1034,6 +1034,52 @@ pub(crate) fn delete_runtime_workspace(
     switch_runtime_workspace(runtime, next_workspace)
 }
 
+/// Handles `workspace.delete`: picker one-shot, dock focus, or open delete picker.
+pub(crate) fn workspace_delete_from_command(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if let Some(context) = shell_ui_mut(runtime)?.take_picker_one_shot() {
+        let Some(selected) = context.selected() else {
+            return Ok(());
+        };
+        let Ok(raw_id) = selected.id().parse::<u64>() else {
+            return Ok(());
+        };
+        let Some(workspace_id) = find_open_workspace_id(runtime, raw_id)? else {
+            return Ok(());
+        };
+        delete_runtime_workspace(runtime, workspace_id)?;
+        sync_active_buffer(runtime)?;
+        return Ok(());
+    }
+
+    let dock_focused = {
+        let ui = shell_ui(runtime)?;
+        ui.workspace_dock_focus_active(&*shell_user_library(runtime))
+    };
+    if dock_focused {
+        let active = shell_ui(runtime)?.active_workspace();
+        delete_runtime_workspace(runtime, active)?;
+        sync_active_buffer(runtime)?;
+        return Ok(());
+    }
+
+    let picker = picker::picker_overlay(runtime, "workspace.delete")?;
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+fn find_open_workspace_id(
+    runtime: &EditorRuntime,
+    id: u64,
+) -> Result<Option<WorkspaceId>, String> {
+    Ok(runtime
+        .model()
+        .active_window()
+        .map_err(|error| error.to_string())?
+        .workspaces()
+        .map(|workspace| workspace.id())
+        .find(|workspace_id| workspace_id.get() == id))
+}
+
 fn active_runtime_popup(runtime: &EditorRuntime) -> Result<Option<RuntimePopupSnapshot>, String> {
     let workspace_id = runtime
         .model()

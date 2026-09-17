@@ -4,12 +4,10 @@ use std::{
 };
 
 use editor_plugin_api::{
-    PickerActionSpec, PickerItemSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
-    PickerWorkspaceFileContext, PluginAction, PluginCommand, PluginPackage,
+    PickerActionSpec, PickerItemSpec, PickerProjectContext, PickerProviderContext, PickerSource,
+    PickerWorkspaceContext, PickerWorkspaceFileContext, PluginAction, PluginCommand, PluginPackage,
 };
-use editor_plugin_api::{
-    ProjectCandidate, ProjectKind, ProjectSearchRoot, project_discovery_for_picker,
-};
+use editor_plugin_api::{ProjectCandidate, ProjectKind, ProjectSearchRoot};
 
 /// Returns the metadata for the workspace management package.
 pub fn package() -> PluginPackage {
@@ -29,9 +27,9 @@ pub fn package() -> PluginPackage {
             "Switches to an open workspace or opens a discovered project.",
             "workspace.switch",
         ),
-        picker_command(
+        hook_command(
             "workspace.delete",
-            "Deletes one of the open workspaces.",
+            "Deletes the selected or focused workspace, or opens the delete picker.",
             "workspace.delete",
         ),
         picker_command(
@@ -183,12 +181,15 @@ pub fn picker_items(context: &PickerProviderContext) -> Option<Vec<PickerItemSpe
 fn workspace_project_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
-    let snapshot = project_discovery_for_picker(&project_search_roots());
-    if snapshot.candidates().is_empty() && snapshot.in_progress() {
+    if context.projects.is_empty() && context.project_discovery_in_progress {
         return Ok(vec![project_discovery_scanning_item()]);
     }
 
-    let mut projects = snapshot.candidates().to_vec();
+    let mut projects = context
+        .projects
+        .iter()
+        .map(PickerProjectContext::to_candidate)
+        .collect::<Vec<_>>();
     projects.sort_by_key(|project| {
         (
             existing_workspace_for_project(context, project).is_none(),
@@ -205,13 +206,12 @@ fn workspace_project_picker_items(
 fn workspace_switch_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
-    let snapshot = project_discovery_for_picker(&project_search_roots());
-    let scanning = snapshot.candidates().is_empty() && snapshot.in_progress();
-    let mut projects = snapshot
-        .candidates()
+    let scanning = context.projects.is_empty() && context.project_discovery_in_progress;
+    let mut projects = context
+        .projects
         .iter()
+        .map(PickerProjectContext::to_candidate)
         .filter(|project| existing_workspace_for_project(context, project).is_none())
-        .cloned()
         .collect::<Vec<_>>();
     projects.sort_by_key(|project| project.display_name().to_ascii_lowercase());
 
@@ -429,13 +429,13 @@ mod tests {
     use super::*;
     use abi_stable::std_types::ROption;
     use editor_plugin_api::{
-        PickerActionSpec, PickerProviderContext, PickerSource, PickerWorkspaceContext,
-        PickerWorkspaceFileContext,
+        PickerActionSpec, PickerProjectContext, PickerProviderContext, PickerSource,
+        PickerWorkspaceContext, PickerWorkspaceFileContext,
     };
     use editor_plugin_api::{
-        ProjectSearchRoot, project_discovery_snapshot, reset_project_discovery_cache,
-        set_project_discovery_persist_path_for_test, set_project_discovery_worker_blocked_for_test,
-        wait_for_project_discovery,
+        ProjectSearchRoot, project_discovery_for_picker, project_discovery_snapshot,
+        reset_project_discovery_cache, set_project_discovery_persist_path_for_test,
+        set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
     };
     use std::{
         fs,
@@ -555,6 +555,24 @@ mod tests {
     }
 
     #[test]
+    fn package_exports_delete_command_as_hook() {
+        let package = package();
+        let command = package
+            .commands()
+            .iter()
+            .find(|command| command.name() == "workspace.delete")
+            .expect("workspace.delete command");
+        assert!(
+            command.actions().iter().any(|action| {
+                action
+                    .hook()
+                    .is_some_and(|hook| hook.hook_name() == "workspace.delete")
+            }),
+            "workspace.delete should emit the workspace.delete hook"
+        );
+    }
+
+    #[test]
     fn package_exports_clone_command() {
         let package = package();
         assert!(
@@ -563,6 +581,17 @@ mod tests {
                 .iter()
                 .any(|command| command.name() == "workspace.clone")
         );
+    }
+
+    fn attach_host_projects(context: &mut PickerProviderContext) {
+        let snapshot = project_discovery_for_picker(&project_search_roots());
+        context.projects = snapshot
+            .candidates()
+            .iter()
+            .map(PickerProjectContext::from_candidate)
+            .collect::<Vec<_>>()
+            .into();
+        context.project_discovery_in_progress = snapshot.in_progress();
     }
 
     #[test]
@@ -586,6 +615,7 @@ mod tests {
             is_default: false,
         }]
         .into();
+        attach_host_projects(&mut context);
 
         let items = picker_items(&context).expect("project picker items");
         assert_eq!(items.len(), 2);
@@ -631,6 +661,7 @@ mod tests {
             },
         ]
         .into();
+        attach_host_projects(&mut context);
 
         let items = picker_items(&context).expect("switch picker items");
         assert_eq!(items[0].label(), "default");
@@ -664,11 +695,12 @@ mod tests {
         let _guard = begin_discovery_override(vec![ProjectSearchRoot::new(&root, 2)])?;
         set_project_discovery_worker_blocked_for_test(true);
 
-        let context = PickerProviderContext::new(
+        let mut context = PickerProviderContext::new(
             "workspace.projects",
             "Projects",
             PickerSource::WorkspaceProjects,
         );
+        attach_host_projects(&mut context);
         let items = picker_items(&context).expect("scanning items");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id(), PROJECT_DISCOVERY_SCANNING_ID);
@@ -690,11 +722,12 @@ mod tests {
         editor_plugin_api::set_project_discovery_ttl_for_test(Duration::ZERO);
         set_project_discovery_worker_blocked_for_test(true);
 
-        let context = PickerProviderContext::new(
+        let mut context = PickerProviderContext::new(
             "workspace.projects",
             "Projects",
             PickerSource::WorkspaceProjects,
         );
+        attach_host_projects(&mut context);
         let items = picker_items(&context).expect("stale candidates");
         assert!(
             items

@@ -225,7 +225,8 @@ pub fn providers() -> Vec<PickerProviderSpec> {
             "workspace.switch",
             "Workspaces and Projects",
             PickerSource::WorkspaceSwitch,
-        ),
+        )
+        .with_extra_keybind("Ctrl+d", "workspace.delete"),
         PickerProviderSpec::new(
             "workspace.delete",
             "Delete Workspace",
@@ -536,6 +537,17 @@ mod tests {
             .expect("workspace.dashboard provider");
         assert!(provider.extra_keybinds().iter().any(|binding| {
             binding.chord() == "Ctrl+d" && binding.command_name() == "workspace.worktree-remove"
+        }));
+    }
+
+    #[test]
+    fn workspace_switch_provider_declares_ctrl_d_delete_extra() {
+        let provider = providers()
+            .into_iter()
+            .find(|provider| provider.id() == "workspace.switch")
+            .expect("workspace.switch provider");
+        assert!(provider.extra_keybinds().iter().any(|binding| {
+            binding.chord() == "Ctrl+d" && binding.command_name() == "workspace.delete"
         }));
     }
 

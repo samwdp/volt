@@ -288,7 +288,11 @@ impl ShellState {
         refresh_pending_syntax(&mut self.runtime).map_err(ShellError::Runtime)
     }
 
-    fn refresh_pending_git(&mut self, now: Instant, typing_active: bool) -> Result<(), ShellError> {
+    fn refresh_pending_git(
+        &mut self,
+        now: Instant,
+        typing_active: bool,
+    ) -> Result<bool, ShellError> {
         refresh_pending_git(&mut self.runtime, now, typing_active).map_err(ShellError::Runtime)
     }
 

@@ -51,6 +51,11 @@ pub fn package() -> PluginPackage {
             "workspace.dock.previous",
             PluginKeymapScope::WorkspaceDock,
         ),
+        PluginKeyBinding::new(
+            "Ctrl+d",
+            "workspace.delete",
+            PluginKeymapScope::WorkspaceDock,
+        ),
     ])
 }
 
@@ -88,6 +93,7 @@ mod tests {
         for (chord, command) in [
             ("j", "workspace.dock.next"),
             ("k", "workspace.dock.previous"),
+            ("Ctrl+d", "workspace.delete"),
         ] {
             assert!(
                 package.key_bindings().iter().any(|binding| {

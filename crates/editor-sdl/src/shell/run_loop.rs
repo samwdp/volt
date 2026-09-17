@@ -577,11 +577,14 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                 }
                 let syntax_changed = syntax_stats.changed;
                 let git_refresh_started = Instant::now();
-                if let Err(error) =
-                    state.refresh_pending_git(refresh_now, secondary_refresh_deferred)
+                let git_changed = match state.refresh_pending_git(refresh_now, secondary_refresh_deferred)
                 {
-                    state.record_shell_error("shell.git-refresh", error);
-                }
+                    Ok(changed) => changed,
+                    Err(error) => {
+                        state.record_shell_error("shell.git-refresh", error);
+                        false
+                    }
+                };
                 if let Some(frame) = typing_frame.as_mut() {
                     frame.git_refresh = git_refresh_started.elapsed();
                 }
@@ -641,6 +644,7 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
                     || hover_changed
                     || command_stream_changed
                     || git_editor_changed
+                    || git_changed
                     || terminal_changed
                     || syntax_changed
                     || acp_changed

@@ -302,6 +302,87 @@ fn workspace_dashboard_provider_extras_copy_ctrl_d_onto_instance() -> Result<(),
 }
 
 #[test]
+fn workspace_switch_provider_extras_copy_ctrl_d_onto_instance() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("switch-ctrl-d-extra");
+    open_workspace_from_project(&mut state.runtime, "switch-ctrl-d-extra", &root)?;
+
+    let overlay = picker::picker_overlay(&state.runtime, "workspace.switch")?;
+    assert!(
+        overlay.extra_keybinds().iter().any(|binding| {
+            binding.chord() == "Ctrl+d" && binding.command_name() == "workspace.delete"
+        }),
+        "workspace.switch provider extras should land on the open picker instance"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn workspace_switch_ctrl_d_deletes_selected_workspace() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let keep_root = unique_temp_dir("switch-ctrl-d-keep");
+    let drop_root = unique_temp_dir("switch-ctrl-d-drop");
+    let keep = open_workspace_from_project(&mut state.runtime, "keep", &keep_root)?;
+    let drop = open_workspace_from_project(&mut state.runtime, "drop", &drop_root)?;
+    switch_runtime_workspace(&mut state.runtime, keep)?;
+
+    let overlay = workspace_switch_picker_overlay(&state.runtime)?;
+    shell_ui_mut(&mut state.runtime)?.set_picker(overlay);
+    {
+        let picker = shell_ui_mut(&mut state.runtime)?
+            .picker_mut()
+            .ok_or_else(|| "workspace.switch picker missing".to_owned())?;
+        let index = picker
+            .session
+            .matches()
+            .iter()
+            .position(|matched| matched.item().id() == drop.get().to_string())
+            .ok_or_else(|| "drop workspace missing from switch picker".to_owned())?;
+        picker.session.set_selected_index(index);
+    }
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(
+        handled,
+        "Ctrl+d should fire workspace.delete from switch picker"
+    );
+    assert!(shell_ui(&state.runtime)?.picker().is_none());
+    assert!(
+        !shell_ui(&state.runtime)?.has_workspace(drop),
+        "selected workspace should be deleted"
+    );
+    assert!(shell_ui(&state.runtime)?.has_workspace(keep));
+
+    let _ = std::fs::remove_dir_all(&keep_root);
+    let _ = std::fs::remove_dir_all(&drop_root);
+    Ok(())
+}
+
+#[test]
+fn workspace_delete_without_context_opens_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("workspace-delete-opens-picker");
+    open_workspace_from_project(&mut state.runtime, "delete-picker", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.delete")
+        .map_err(|error| error.to_string())?;
+    let title = shell_ui(&state.runtime)?
+        .picker()
+        .map(|picker| picker.session.title().to_owned())
+        .ok_or_else(|| "workspace.delete should open the delete picker".to_owned())?;
+    assert_eq!(title, "Delete Workspace");
+
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
 fn workspace_dashboard_ctrl_d_on_create_row_is_silent_noop() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let main = init_git_repo_with_commit("dashboard-ctrl-d-create-noop-main")?;

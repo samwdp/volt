@@ -227,11 +227,11 @@ fn refresh_pending_git(
     runtime: &mut EditorRuntime,
     now: Instant,
     typing_active: bool,
-) -> Result<(), String> {
-    let _ = apply_pending_worktree_branch_loads(runtime)?;
+) -> Result<bool, String> {
+    let branch_load_changed = apply_pending_worktree_branch_loads(runtime)?;
     refresh_pending_git_summary(runtime, now, typing_active)?;
     refresh_pending_git_fringe(runtime, now, typing_active)?;
-    Ok(())
+    Ok(branch_load_changed)
 }
 
 fn refresh_pending_lsp(runtime: &mut EditorRuntime, typing_active: bool) -> Result<bool, String> {

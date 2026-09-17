@@ -48,6 +48,7 @@ const HOOK_WORKSPACE_MARKED_2: &str = "workspace.marked-2";
 const HOOK_WORKSPACE_MARKED_3: &str = "workspace.marked-3";
 const HOOK_WORKSPACE_MARKED_4: &str = "workspace.marked-4";
 const HOOK_WORKSPACE_WORKTREE_REMOVE: &str = "workspace.worktree-remove";
+const HOOK_WORKSPACE_DELETE: &str = "workspace.delete";
 const HOOK_WORKSPACE_CLONE: &str = "workspace.clone";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";

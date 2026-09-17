@@ -29,7 +29,7 @@ fn queue_buffer_syntax_refresh(
     Ok(())
 }
 
-fn project_search_roots_from_user_library(
+pub(crate) fn project_search_roots_from_user_library(
     user_library: &dyn UserLibrary,
 ) -> Vec<ProjectSearchRoot> {
     user_library

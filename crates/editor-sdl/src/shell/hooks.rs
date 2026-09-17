@@ -197,6 +197,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_DELETE,
+        "Deletes the selected or focused workspace, or opens the delete picker.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_CLONE,
         "Clones a remote repository (bare or full) into a chosen directory.",
     )?;
@@ -1699,6 +1704,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             HOOK_WORKSPACE_WORKTREE_REMOVE,
             "shell.workspace-worktree-remove",
             |_, runtime| worktree_remove_from_one_shot(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_DELETE,
+            "shell.workspace-delete",
+            |_, runtime| workspace_delete_from_command(runtime),
         )
         .map_err(|error| error.to_string())?;
     runtime

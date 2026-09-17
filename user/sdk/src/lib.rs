@@ -1336,6 +1336,53 @@ pub struct PickerWorkspaceContext {
     pub is_default: bool,
 }
 
+/// Host-owned project discovery candidate for workspace pickers.
+///
+/// Built by the shell from the process-local discovery hub so the User Library
+/// cdylib does not keep a separate cache.
+#[repr(C)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
+pub struct PickerProjectContext {
+    pub name: RString,
+    pub root: RString,
+    /// `0` = git repo, `1` = git worktree.
+    pub kind: u8,
+    pub repository_name: RString,
+    pub repository_root: RString,
+}
+
+impl PickerProjectContext {
+    pub const KIND_GIT: u8 = 0;
+    pub const KIND_GIT_WORKTREE: u8 = 1;
+
+    pub fn from_candidate(candidate: &crate::ProjectCandidate) -> Self {
+        Self {
+            name: candidate.name().into(),
+            root: candidate.root().display().to_string().into(),
+            kind: match candidate.kind() {
+                crate::ProjectKind::Git => Self::KIND_GIT,
+                crate::ProjectKind::GitWorktree => Self::KIND_GIT_WORKTREE,
+            },
+            repository_name: candidate.repository_name().into(),
+            repository_root: candidate.repository_root().display().to_string().into(),
+        }
+    }
+
+    pub fn to_candidate(&self) -> crate::ProjectCandidate {
+        let kind = match self.kind {
+            Self::KIND_GIT_WORKTREE => crate::ProjectKind::GitWorktree,
+            _ => crate::ProjectKind::Git,
+        };
+        crate::ProjectCandidate::from_persisted(
+            self.name.as_str(),
+            std::path::PathBuf::from(self.root.as_str()),
+            kind,
+            self.repository_name.as_str(),
+            std::path::PathBuf::from(self.repository_root.as_str()),
+        )
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, StableAbi)]
 pub struct PickerWorkspaceFileContext {
@@ -1394,6 +1441,9 @@ pub struct PickerProviderContext {
     pub keybindings: RVec<PickerKeybindingContext>,
     pub syntax_languages: RVec<PickerSyntaxLanguageContext>,
     pub workspaces: RVec<PickerWorkspaceContext>,
+    pub projects: RVec<PickerProjectContext>,
+    /// Host discovery walk is running; pickers may show a scanning row when empty.
+    pub project_discovery_in_progress: bool,
     pub workspace_files: RVec<PickerWorkspaceFileContext>,
     pub workspace_root: ROption<RString>,
     pub themes: RVec<PickerThemeContext>,
@@ -1417,6 +1467,8 @@ impl PickerProviderContext {
             keybindings: RVec::new(),
             syntax_languages: RVec::new(),
             workspaces: RVec::new(),
+            projects: RVec::new(),
+            project_discovery_in_progress: false,
             workspace_files: RVec::new(),
             workspace_root: ROption::RNone,
             themes: RVec::new(),

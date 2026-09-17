@@ -202,3 +202,33 @@ fn workspace_dock_focus_j_k_cycle_workspaces() -> Result<(), String> {
     assert_eq!(shell_ui(&state.runtime)?.active_workspace(), first);
     Ok(())
 }
+
+#[test]
+fn workspace_dock_ctrl_d_deletes_active_workspace() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let keep_root = unique_temp_dir("workspace-dock-ctrl-d-keep");
+    let drop_root = unique_temp_dir("workspace-dock-ctrl-d-drop");
+    let keep = open_workspace_from_project(&mut state.runtime, "dock-del-keep", &keep_root)?;
+    let drop = open_workspace_from_project(&mut state.runtime, "dock-del-drop", &drop_root)?;
+    switch_runtime_workspace(&mut state.runtime, drop)?;
+    state
+        .runtime
+        .emit_hook(HOOK_WORKSPACE_DOCK_TOGGLE, HookEvent::new())
+        .map_err(|error| error.to_string())?;
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.set_workspace_dock_focus(true);
+        ui.enter_normal_mode();
+    }
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Ctrl+d should fire workspace.delete from dock");
+    assert!(
+        !shell_ui(&state.runtime)?.has_workspace(drop),
+        "focused workspace should be deleted"
+    );
+    assert_eq!(shell_ui(&state.runtime)?.active_workspace(), keep);
+    Ok(())
+}
