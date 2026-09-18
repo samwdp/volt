@@ -45,12 +45,14 @@ impl AcpDockLayout {
 pub(super) struct ShellDockEntries<'a> {
     pub(super) workspace: &'a [WorkspaceDockEntry],
     pub(super) acp: &'a [AcpDockEntry],
+    pub(super) browser: &'a [BrowserDockEntry],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ShellDocksLayout {
     pub(super) workspace: WorkspaceDockLayout,
     pub(super) acp: AcpDockLayout,
+    pub(super) browser: BrowserDockLayout,
     pub(super) content_x: i32,
     pub(super) content_width: u32,
     pub(super) content_height: u32,
@@ -87,6 +89,22 @@ pub(super) fn shell_docks_layout(
         0
     };
     let mut acp = AcpDockLayout::hidden();
+    let mut browser = BrowserDockLayout::hidden();
+
+    if browser_dock_visible(ui) {
+        let remaining = width.saturating_sub(left).saturating_sub(right);
+        let dock_width =
+            browser_dock_width(remaining.max(width / 5).max(1), cell_width).min(remaining);
+        if dock_width > 0 {
+            browser = BrowserDockLayout {
+                visible: true,
+                side: WorkspaceDockSide::Left,
+                dock_width,
+                dock_rect: PixelRect::new(left as i32, 0, dock_width, height),
+            };
+            left = left.saturating_add(dock_width);
+        }
+    }
 
     if acp_dock_visible(ui) {
         let remaining = width.saturating_sub(left).saturating_sub(right);
@@ -127,6 +145,7 @@ pub(super) fn shell_docks_layout(
     ShellDocksLayout {
         workspace,
         acp,
+        browser,
         content_x: left as i32,
         content_width,
         content_height: height,

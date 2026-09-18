@@ -180,6 +180,8 @@ pub enum KeymapScope {
     Multicursor,
     /// ACP Dock Minor Mode (vertical ACP session list focus).
     AcpDock,
+    /// Browser Dock Minor Mode (browser buffer/tab list focus).
+    BrowserDock,
 }
 
 impl fmt::Display for KeymapScope {
@@ -194,6 +196,7 @@ impl fmt::Display for KeymapScope {
             Self::WorkspaceDock => formatter.write_str("workspace-dock"),
             Self::Multicursor => formatter.write_str("multicursor"),
             Self::AcpDock => formatter.write_str("acp-dock"),
+            Self::BrowserDock => formatter.write_str("browser-dock"),
         }
     }
 }

@@ -325,6 +325,7 @@ fn plugin_buffer_binding_scope_active(
         | editor_plugin_api::PluginKeymapScope::Dap
         | editor_plugin_api::PluginKeymapScope::WorkspaceDock
         | editor_plugin_api::PluginKeymapScope::AcpDock
+        | editor_plugin_api::PluginKeymapScope::BrowserDock
         | editor_plugin_api::PluginKeymapScope::Multicursor => false,
     }
 }

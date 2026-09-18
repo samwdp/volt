@@ -24,6 +24,8 @@ impl ShellState {
             collect_workspace_dock_entries(&self.runtime).map_err(ShellError::Runtime)?;
         let acp_dock_entries =
             collect_acp_dock_entries(&self.runtime).map_err(ShellError::Runtime)?;
+        let browser_dock_entries =
+            browser_dock_entries_for_render(&self.runtime).map_err(ShellError::Runtime)?;
         if dock_visible {
             let roots = workspace_dock_project_roots(&self.runtime).map_err(ShellError::Runtime)?;
             let cache = self.ui_mut()?.workspace_dock_branches_mut();
@@ -49,6 +51,7 @@ impl ShellState {
             ShellDockEntries {
                 workspace: &dock_entries,
                 acp: &acp_dock_entries,
+                browser: &browser_dock_entries,
             },
             ShellChrome {
                 user_library: &*shell_user_library(&self.runtime),

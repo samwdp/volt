@@ -630,6 +630,7 @@ fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
         ShellDockEntries {
             workspace: &[],
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &NullUserLibrary,
@@ -1757,6 +1758,7 @@ fn render_shell_state_draws_input_prompt_overlay_text() -> Result<(), String> {
         ShellDockEntries {
             workspace: &[],
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &NullUserLibrary,

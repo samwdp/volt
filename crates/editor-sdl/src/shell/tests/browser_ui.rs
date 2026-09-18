@@ -267,12 +267,12 @@ fn browser_buffer_submit_tracks_requested_navigation() -> Result<(), String> {
         .browser_state
         .as_ref()
         .ok_or_else(|| "browser state missing".to_owned())?;
-    assert_eq!(state.current_url.as_deref(), None);
+    assert_eq!(state.active_tab().current_url.as_deref(), None);
     assert_eq!(
-        state.requested_url.as_deref(),
+        state.active_tab().requested_url.as_deref(),
         Some("https://example.com/docs")
     );
-    assert!(state.is_loading);
+    assert!(state.active_tab().is_loading);
     assert_eq!(
         buffer.display_name(),
         "*browser* [loading] https://example.com/docs"
@@ -361,7 +361,7 @@ fn browser_location_updates_rename_buffer_with_current_url() -> Result<(), Strin
         buffer
             .browser_state
             .as_ref()
-            .and_then(|browser| browser.current_url.as_deref()),
+            .and_then(|browser| browser.active_tab().current_url.as_deref()),
         Some("https://docs.rs/volt")
     );
     Ok(())
@@ -399,14 +399,14 @@ fn browser_page_load_event_commits_current_url_and_clears_loading() -> Result<()
         .as_ref()
         .ok_or_else(|| "browser state missing".to_owned())?;
     assert_eq!(
-        browser.current_url.as_deref(),
+        browser.active_tab().current_url.as_deref(),
         Some("https://example.com/docs")
     );
     assert_eq!(
-        browser.requested_url.as_deref(),
+        browser.active_tab().requested_url.as_deref(),
         Some("https://example.com/docs")
     );
-    assert!(!browser.is_loading);
+    assert!(!browser.active_tab().is_loading);
     Ok(())
 }
 
@@ -437,12 +437,12 @@ fn browser_page_load_event_does_not_clobber_a_newer_requested_navigation() -> Re
         .browser_state
         .as_ref()
         .ok_or_else(|| "browser state missing".to_owned())?;
-    assert_eq!(browser.current_url.as_deref(), None);
+    assert_eq!(browser.active_tab().current_url.as_deref(), None);
     assert_eq!(
-        browser.requested_url.as_deref(),
+        browser.active_tab().requested_url.as_deref(),
         Some("https://example.com/new")
     );
-    assert!(browser.is_loading);
+    assert!(browser.active_tab().is_loading);
     Ok(())
 }
 
@@ -486,14 +486,14 @@ fn browser_page_load_event_accepts_redirect_after_location_sync() -> Result<(), 
         .as_ref()
         .ok_or_else(|| "browser state missing".to_owned())?;
     assert_eq!(
-        browser.current_url.as_deref(),
+        browser.active_tab().current_url.as_deref(),
         Some("https://example.com/redirected#section")
     );
     assert_eq!(
-        browser.requested_url.as_deref(),
+        browser.active_tab().requested_url.as_deref(),
         Some("https://example.com/redirected#section")
     );
-    assert!(!browser.is_loading);
+    assert!(!browser.active_tab().is_loading);
     Ok(())
 }
 
@@ -567,7 +567,7 @@ fn browser_insert_mode_enter_binding_submits_current_url() -> Result<(), String>
         shell_buffer(&state.runtime, buffer_id)?
             .browser_state
             .as_ref()
-            .and_then(|state| state.requested_url.as_deref()),
+            .and_then(|state| state.active_tab().requested_url.as_deref()),
         Some("https://example.com/docs")
     );
     Ok(())
@@ -615,7 +615,7 @@ fn browser_insert_mode_ctrl_enter_binding_submits_current_url() -> Result<(), St
         shell_buffer(&state.runtime, buffer_id)?
             .browser_state
             .as_ref()
-            .and_then(|state| state.requested_url.as_deref()),
+            .and_then(|state| state.active_tab().requested_url.as_deref()),
         Some("https://example.com/docs")
     );
     Ok(())
@@ -827,7 +827,7 @@ fn browser_url_command_opens_split_browser_with_detected_url() -> Result<(), Str
         shell_buffer(&state.runtime, buffer_id)?
             .browser_state
             .as_ref()
-            .and_then(|state| state.requested_url.as_deref()),
+            .and_then(|state| state.active_tab().requested_url.as_deref()),
         Some("https://example.com/docs")
     );
     assert_eq!(ui.input_mode(), InputMode::Insert);
@@ -866,7 +866,7 @@ fn browser_open_buffer_command_opens_split_with_file_url() -> Result<(), String>
         shell_buffer(&state.runtime, buffer_id)?
             .browser_state
             .as_ref()
-            .and_then(|state| state.requested_url.as_deref()),
+            .and_then(|state| state.active_tab().requested_url.as_deref()),
         Some(expected_url.as_str())
     );
 
@@ -1002,7 +1002,7 @@ fn browser_host_new_window_event_routes_into_browser_popup() -> Result<(), Strin
         popup_buffer
             .browser_state
             .as_ref()
-            .and_then(|browser| browser.requested_url.as_deref()),
+            .and_then(|browser| browser.active_tab().requested_url.as_deref()),
         Some("https://example.com/oauth/callback?code=test")
     );
     Ok(())
@@ -1113,8 +1113,118 @@ fn help_command_prompts_then_opens_docs_search_in_browser_split() -> Result<(), 
         shell_buffer(&state.runtime, buffer_id)?
             .browser_state
             .as_ref()
-            .and_then(|state| state.requested_url.as_deref()),
+            .and_then(|state| state.active_tab().requested_url.as_deref()),
         Some("https://samwdp.github.io/volt-docs/search?q=split%20pane")
+    );
+    Ok(())
+}
+
+#[test]
+fn browser_dock_focus_j_k_cycle_entries() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(&mut state, BROWSER_BUFFER_NAME, BROWSER_KIND)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let browser = buffer
+            .browser_state
+            .get_or_insert_with(BrowserBufferState::default);
+        {
+            let tab = browser.active_tab_mut();
+            tab.current_url = Some("https://first.example".to_owned());
+            tab.requested_url = Some("https://first.example".to_owned());
+            tab.page_title = Some("First".to_owned());
+        }
+        browser.add_tab(Some("https://second.example"));
+    }
+    toggle_browser_dock(&mut state.runtime)?;
+    assert!(shell_ui(&state.runtime)?.browser_dock_focus_active());
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.enter_normal_mode();
+    }
+
+    let modes = state
+        .overlay_minor_modes()
+        .map_err(|error| error.to_string())?;
+    assert!(
+        modes.contains(&KeymapScope::BrowserDock),
+        "dock focus must activate Browser Dock Minor Mode: {modes:?}"
+    );
+
+    // Dock lists buffer then tabs; active tab is second (index 2). j advances.
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.browser_dock_focus_active());
+    assert_eq!(shell_ui(&state.runtime)?.browser_dock_cursor(), Some(0));
+    let active_tab = shell_buffer(&state.runtime, buffer_id)?
+        .browser_state
+        .as_ref()
+        .map(|browser| browser.active_tab_id);
+    // Wrapping from last tab lands on buffer row; active tab unchanged from before wrap.
+    assert_eq!(active_tab, Some(BrowserTabId(2)));
+
+    state
+        .handle_text_input("j")
+        .map_err(|error| error.to_string())?;
+    assert_eq!(shell_ui(&state.runtime)?.browser_dock_cursor(), Some(1));
+    let active_tab = shell_buffer(&state.runtime, buffer_id)?
+        .browser_state
+        .as_ref()
+        .map(|browser| browser.active_tab_id);
+    assert_eq!(active_tab, Some(BrowserTabId(1)));
+
+    state
+        .handle_text_input("k")
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.browser_dock_focus_active());
+    assert_eq!(shell_ui(&state.runtime)?.browser_dock_cursor(), Some(0));
+    Ok(())
+}
+
+#[test]
+fn browser_dock_ctrl_d_closes_tab_then_buffer() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let buffer_id = install_user_plugin_buffer(&mut state, BROWSER_BUFFER_NAME, BROWSER_KIND)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        let browser = buffer
+            .browser_state
+            .get_or_insert_with(BrowserBufferState::default);
+        browser.add_tab(Some("https://second.example"));
+    }
+    toggle_browser_dock(&mut state.runtime)?;
+    {
+        let ui = shell_ui_mut(&mut state.runtime)?;
+        ui.enter_normal_mode();
+        // Cursor starts on active (second) tab.
+        assert_eq!(ui.browser_dock_cursor(), Some(2));
+    }
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Ctrl+d should fire browser.dock.close from dock");
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .browser_state
+            .as_ref()
+            .map(|browser| browser.tabs.len()),
+        Some(1)
+    );
+    assert!(
+        shell_ui(&state.runtime)?.buffer(buffer_id).is_some(),
+        "closing last-but-one tab must keep buffer"
+    );
+
+    // Remaining entries: buffer + one tab. Cursor clamped; close again removes last tab → buffer.
+    let handled = state
+        .try_runtime_keybinding(Keycode::D, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Ctrl+d should close last tab as buffer");
+    assert!(
+        shell_ui(&state.runtime)?.buffer(buffer_id).is_none(),
+        "closing last tab must close browser buffer"
     );
     Ok(())
 }

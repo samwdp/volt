@@ -108,6 +108,28 @@ impl ShellState {
                             .map_err(ShellError::Runtime)?;
                         return Ok(false);
                     }
+                    let browser_entries =
+                        collect_browser_dock_entries(&self.runtime).map_err(ShellError::Runtime)?;
+                    if let Some(index) = browser_dock_entry_at_point(
+                        &docks.browser,
+                        &browser_entries,
+                        line_height,
+                        mouse_x,
+                        mouse_y,
+                    ) {
+                        self.mouse_drag = None;
+                        shell_ui_mut(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?
+                            .set_browser_dock_focus(true);
+                        shell_ui_mut(&mut self.runtime)
+                            .map_err(ShellError::Runtime)?
+                            .set_browser_dock_cursor(Some(index));
+                        if let Some(entry) = browser_entries.get(index) {
+                            activate_browser_dock_entry(&mut self.runtime, entry)
+                                .map_err(ShellError::Runtime)?;
+                        }
+                        return Ok(false);
+                    }
                 }
                 let runtime_popup = self.runtime_popup()?;
                 let popup_height = runtime_popup
@@ -1014,6 +1036,7 @@ impl ShellState {
         ui.set_popup_focus(false);
         ui.set_workspace_dock_focus(false);
         ui.set_acp_dock_focus(false);
+        ui.set_browser_dock_focus(false);
         ui.focus_pane(pane_id);
         Ok(())
     }

@@ -195,6 +195,14 @@ pub mod browser_hooks {
     pub const URL: &str = "ui.browser.url";
     pub const FOCUS_INPUT: &str = "ui.browser.focus-input";
     pub const SUBMIT: &str = "ui.browser.submit";
+    pub const ADD_TAB: &str = "ui.browser.add-tab";
+    pub const BOOKMARKS: &str = "ui.browser.bookmarks";
+    pub const BOOKMARK_ADD: &str = "ui.browser.bookmark-add";
+    pub const TABS: &str = "ui.browser.tabs";
+    pub const DOCK: &str = "ui.browser.dock";
+    pub const DOCK_PREVIOUS: &str = "ui.browser.dock.previous";
+    pub const DOCK_NEXT: &str = "ui.browser.dock.next";
+    pub const DOCK_CLOSE: &str = "ui.browser.dock.close";
 }
 
 /// Hook name constants and docs URL helpers for the help package.
@@ -3275,6 +3283,8 @@ pub enum PluginKeymapScope {
     Multicursor,
     /// ACP Dock Minor Mode (vertical ACP session list focus).
     AcpDock,
+    /// Browser Dock Minor Mode (browser buffer/tab list focus).
+    BrowserDock,
 }
 
 /// Modal Vim state that can activate a keybinding.

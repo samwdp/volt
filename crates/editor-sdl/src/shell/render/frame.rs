@@ -55,8 +55,9 @@ pub(super) fn render_shell_state(
     let popup_focus = runtime_popup
         .map(|popup| state.popup_focus_active(popup))
         .unwrap_or(false);
-    let dock_focus =
-        state.workspace_dock_focus_active(user_library) || state.acp_dock_focus_active();
+    let dock_focus = state.workspace_dock_focus_active(user_library)
+        || state.browser_dock_focus_active()
+        || state.acp_dock_focus_active();
     let command_line_row_visible = state.command_line().is_some() || state.input_prompt_visible();
 
     clear_window_surface(target, base_background, window_effects);
@@ -156,6 +157,15 @@ pub(super) fn render_shell_state(
         target,
         &docks.acp,
         dock_entries.acp,
+        theme_registry,
+        cell_width,
+        line_height,
+        ascent,
+    )?;
+    render_browser_dock(
+        target,
+        &docks.browser,
+        dock_entries.browser,
         theme_registry,
         cell_width,
         line_height,

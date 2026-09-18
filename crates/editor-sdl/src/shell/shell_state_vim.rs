@@ -337,6 +337,8 @@ impl ShellState {
             modes.push(KeymapScope::Popup);
         } else if ui.workspace_dock_focus_active(&*shell_user_library(&self.runtime)) {
             modes.push(KeymapScope::WorkspaceDock);
+        } else if ui.browser_dock_focus_active() {
+            modes.push(KeymapScope::BrowserDock);
         } else if ui.acp_dock_focus_active() {
             modes.push(KeymapScope::AcpDock);
         }
@@ -351,7 +353,10 @@ impl ShellState {
         if !modes.iter().any(|mode| {
             matches!(
                 mode,
-                KeymapScope::Popup | KeymapScope::WorkspaceDock | KeymapScope::AcpDock
+                KeymapScope::Popup
+                    | KeymapScope::WorkspaceDock
+                    | KeymapScope::BrowserDock
+                    | KeymapScope::AcpDock
             )
         }) && active_workspace_has_debug_session(&self.runtime)
         {

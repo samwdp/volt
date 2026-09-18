@@ -47,13 +47,71 @@ pub fn package() -> PluginPackage {
     PluginPackage::new(
         "browser",
         true,
-        "Embedded browser buffers and popup browsing.",
+        "Embedded browser buffers with tabs, bookmarks, and dock.",
     )
     .with_commands(vec![
         PluginCommand::new(
             "browser.open",
-            "Opens the browser buffer in a split pane alongside the active buffer.",
+            "Always opens a new browser buffer in a split pane alongside the active buffer.",
             vec![PluginAction::emit_hook(browser_hooks::OPEN, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "browser.add-tab",
+            "Creates a new tab in the browser buffer currently in view.",
+            vec![PluginAction::emit_hook(
+                browser_hooks::ADD_TAB,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "browser.bookmarks",
+            "Opens a picker of saved bookmarks. Uses add-tab when a browser is in view, otherwise open.",
+            vec![PluginAction::emit_hook(
+                browser_hooks::BOOKMARKS,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "browser.bookmark-add",
+            "Saves the current browser page URL as a named bookmark in the Volt data folder.",
+            vec![PluginAction::emit_hook(
+                browser_hooks::BOOKMARK_ADD,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "browser.tabs",
+            "Opens a picker of tabs in the active browser buffer.",
+            vec![PluginAction::emit_hook(browser_hooks::TABS, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "browser.dock",
+            "Toggles the browser dock listing open browser buffers and tabs.",
+            vec![PluginAction::emit_hook(browser_hooks::DOCK, None::<&str>)],
+        ),
+        PluginCommand::new(
+            "browser.dock.previous",
+            "Moves to the previous entry in the browser dock.",
+            vec![PluginAction::emit_hook(
+                browser_hooks::DOCK_PREVIOUS,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "browser.dock.next",
+            "Moves to the next entry in the browser dock.",
+            vec![PluginAction::emit_hook(
+                browser_hooks::DOCK_NEXT,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
+            "browser.dock.close",
+            "Closes the selected browser dock buffer or tab.",
+            vec![PluginAction::emit_hook(
+                browser_hooks::DOCK_CLOSE,
+                None::<&str>,
+            )],
         ),
         PluginCommand::new(
             "browser.open-popup",
@@ -103,6 +161,15 @@ pub fn package() -> PluginPackage {
             )
             .with_vim_mode(PluginVimMode::Insert),
         ]),
+    ])
+    .with_key_bindings(vec![
+        PluginKeyBinding::new("j", "browser.dock.next", PluginKeymapScope::BrowserDock),
+        PluginKeyBinding::new("k", "browser.dock.previous", PluginKeymapScope::BrowserDock),
+        PluginKeyBinding::new(
+            "Ctrl+d",
+            "browser.dock.close",
+            PluginKeymapScope::BrowserDock,
+        ),
     ])
 }
 
@@ -161,6 +228,48 @@ mod tests {
             package
                 .commands()
                 .iter()
+                .any(|command| command.name() == "browser.add-tab")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.bookmarks")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.tabs")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.dock")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.dock.next")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.dock.previous")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.dock.close")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
                 .any(|command| command.name() == "browser.open-popup")
         );
         assert!(
@@ -175,6 +284,25 @@ mod tests {
                 .iter()
                 .any(|command| command.name() == "browser.open-buffer")
         );
+    }
+
+    #[test]
+    fn package_binds_j_and_k_in_browser_dock_scope() {
+        let package = package();
+        for (chord, command) in [
+            ("j", "browser.dock.next"),
+            ("k", "browser.dock.previous"),
+            ("Ctrl+d", "browser.dock.close"),
+        ] {
+            assert!(
+                package.key_bindings().iter().any(|binding| {
+                    binding.chord() == chord
+                        && binding.command_name() == command
+                        && binding.scope() == PluginKeymapScope::BrowserDock
+                }),
+                "missing binding for {chord} -> {command}"
+            );
+        }
     }
 
     #[test]

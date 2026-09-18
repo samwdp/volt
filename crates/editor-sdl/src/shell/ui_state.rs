@@ -229,6 +229,13 @@ enum PickerAction {
     SwitchDapStackFrame {
         frame_id: u64,
     },
+    BrowserOpenUrl {
+        url: String,
+    },
+    BrowserActivateTab {
+        buffer_id: BufferId,
+        tab_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -942,6 +949,10 @@ pub(crate) struct ShellUiState {
     workspace_dock_branches: WorkspaceDockBranchCache,
     acp_dock_open: bool,
     acp_dock_focus: bool,
+    browser_dock_open: bool,
+    browser_dock_focus: bool,
+    browser_dock_cursor: Option<usize>,
+    pending_browser_bookmark_url: Option<String>,
     dismissed_popups: BTreeMap<WorkspaceId, DismissedPopupState>,
     yank_flash: Option<YankFlash>,
     git_summary: GitSummaryState,
@@ -1027,6 +1038,10 @@ impl ShellUiState {
             workspace_dock_branches: WorkspaceDockBranchCache::new(),
             acp_dock_open: false,
             acp_dock_focus: false,
+            browser_dock_open: false,
+            browser_dock_focus: false,
+            browser_dock_cursor: None,
+            pending_browser_bookmark_url: None,
             dismissed_popups: BTreeMap::new(),
             yank_flash: None,
             git_summary: GitSummaryState::new(),
@@ -1128,6 +1143,7 @@ impl ShellUiState {
         if focus {
             self.workspace_dock_focus = false;
             self.acp_dock_focus = false;
+            self.browser_dock_focus = false;
         }
         self.persist_active_buffer_vim_state();
         self.popup_focus = focus;
@@ -1157,6 +1173,7 @@ impl ShellUiState {
         if focus {
             self.popup_focus = false;
             self.acp_dock_focus = false;
+            self.browser_dock_focus = false;
         }
         self.workspace_dock_focus = focus;
     }
@@ -1195,12 +1212,61 @@ impl ShellUiState {
         if focus {
             self.popup_focus = false;
             self.workspace_dock_focus = false;
+            self.browser_dock_focus = false;
         }
         self.acp_dock_focus = focus;
     }
 
     fn acp_dock_focus_active(&self) -> bool {
         self.acp_dock_focus() && acp_dock_visible(self)
+    }
+
+    fn browser_dock_open(&self) -> bool {
+        self.browser_dock_open
+    }
+
+    fn toggle_browser_dock_open(&mut self) {
+        self.browser_dock_open = !self.browser_dock_open;
+        if !self.browser_dock_open {
+            self.browser_dock_focus = false;
+            self.browser_dock_cursor = None;
+        }
+    }
+
+    fn browser_dock_focus(&self) -> bool {
+        self.browser_dock_focus
+    }
+
+    fn set_browser_dock_focus(&mut self, focus: bool) {
+        if self.browser_dock_focus == focus {
+            return;
+        }
+        if focus {
+            self.popup_focus = false;
+            self.workspace_dock_focus = false;
+            self.acp_dock_focus = false;
+        }
+        self.browser_dock_focus = focus;
+    }
+
+    fn browser_dock_focus_active(&self) -> bool {
+        self.browser_dock_focus() && browser_dock_visible(self)
+    }
+
+    fn browser_dock_cursor(&self) -> Option<usize> {
+        self.browser_dock_cursor
+    }
+
+    fn set_browser_dock_cursor(&mut self, cursor: Option<usize>) {
+        self.browser_dock_cursor = cursor;
+    }
+
+    fn set_pending_browser_bookmark_url(&mut self, url: Option<String>) {
+        self.pending_browser_bookmark_url = url;
+    }
+
+    fn take_pending_browser_bookmark_url(&mut self) -> Option<String> {
+        self.pending_browser_bookmark_url.take()
     }
 
     fn popup_focus_allowed(&self, popup: &RuntimePopupSnapshot) -> bool {

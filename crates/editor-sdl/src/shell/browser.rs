@@ -6,15 +6,54 @@ pub(super) enum BrowserPane {
     Footer,
 }
 
-impl Default for BrowserBufferState {
-    fn default() -> Self {
-        let mut input = InputField::new("");
-        input.set_placeholder(Some("https://example.com".to_owned()));
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) struct BrowserTabId(pub(super) u64);
+
+#[derive(Debug, Clone)]
+pub(super) struct BrowserTabState {
+    pub(super) id: BrowserTabId,
+    pub(super) current_url: Option<String>,
+    pub(super) requested_url: Option<String>,
+    pub(super) page_title: Option<String>,
+    pub(super) is_loading: bool,
+}
+
+impl BrowserTabState {
+    fn blank(id: BrowserTabId) -> Self {
         Self {
+            id,
             current_url: None,
             requested_url: None,
             page_title: None,
             is_loading: false,
+        }
+    }
+
+    pub(super) fn label(&self) -> String {
+        self.page_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.requested_url
+                    .as_deref()
+                    .or(self.current_url.as_deref())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "New tab".to_owned())
+    }
+}
+
+impl Default for BrowserBufferState {
+    fn default() -> Self {
+        let mut input = InputField::new("");
+        input.set_placeholder(Some("https://example.com".to_owned()));
+        let first_id = BrowserTabId(1);
+        Self {
+            tabs: vec![BrowserTabState::blank(first_id)],
+            active_tab_id: first_id,
+            next_tab_id: 2,
             active_pane: BrowserPane::Input,
             input,
             footer_pane: PluginTextPaneState {
@@ -27,13 +66,79 @@ impl Default for BrowserBufferState {
 
 #[derive(Debug, Clone)]
 pub(super) struct BrowserBufferState {
-    pub(super) current_url: Option<String>,
-    pub(super) requested_url: Option<String>,
-    pub(super) page_title: Option<String>,
-    pub(super) is_loading: bool,
+    pub(super) tabs: Vec<BrowserTabState>,
+    pub(super) active_tab_id: BrowserTabId,
+    next_tab_id: u64,
     pub(super) active_pane: BrowserPane,
     pub(super) input: InputField,
     pub(super) footer_pane: PluginTextPaneState,
+}
+
+impl BrowserBufferState {
+    pub(super) fn active_tab(&self) -> &BrowserTabState {
+        for tab in &self.tabs {
+            if tab.id == self.active_tab_id {
+                return tab;
+            }
+        }
+        // Invariant: browser buffers always keep at least one tab.
+        &self.tabs[0]
+    }
+
+    pub(super) fn active_tab_mut(&mut self) -> &mut BrowserTabState {
+        let active_id = self.active_tab_id;
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == active_id) {
+            return &mut self.tabs[index];
+        }
+        if self.tabs.is_empty() {
+            let id = BrowserTabId(self.next_tab_id.max(1));
+            self.next_tab_id = id.0.saturating_add(1);
+            self.active_tab_id = id;
+            self.tabs.push(BrowserTabState::blank(id));
+        } else {
+            self.active_tab_id = self.tabs[0].id;
+        }
+        &mut self.tabs[0]
+    }
+
+    pub(super) fn add_tab(&mut self, url: Option<&str>) -> BrowserTabId {
+        let id = BrowserTabId(self.next_tab_id.max(1));
+        self.next_tab_id = id.0.saturating_add(1);
+        let mut tab = BrowserTabState::blank(id);
+        if let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) {
+            tab.requested_url = Some(url.to_owned());
+            tab.is_loading = true;
+        }
+        self.tabs.push(tab);
+        self.active_tab_id = id;
+        id
+    }
+
+    pub(super) fn activate_tab(&mut self, tab_id: BrowserTabId) -> bool {
+        if !self.tabs.iter().any(|tab| tab.id == tab_id) {
+            return false;
+        }
+        self.active_tab_id = tab_id;
+        true
+    }
+
+    /// Removes `tab_id`. Returns `true` when a tab was removed and at least one remains.
+    /// Returns `false` when the tab was missing or was the last tab (caller should close buffer).
+    pub(super) fn close_tab(&mut self, tab_id: BrowserTabId) -> bool {
+        if self.tabs.len() <= 1 {
+            return false;
+        }
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return false;
+        };
+        let was_active = self.active_tab_id == tab_id;
+        self.tabs.remove(index);
+        if was_active {
+            let next = index.min(self.tabs.len().saturating_sub(1));
+            self.active_tab_id = self.tabs[next].id;
+        }
+        true
+    }
 }
 
 pub(super) fn focus_browser_input_section(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -300,18 +405,17 @@ fn refresh_browser_buffer_display_name(buffer: &mut ShellBuffer) {
     let Some(state) = buffer.browser_state.as_ref() else {
         return;
     };
+    let tab = state.active_tab();
     buffer.name = browser_buffer_display_name(
-        state.page_title.as_deref(),
+        tab.page_title.as_deref(),
         browser_display_url(state),
-        state.is_loading,
+        tab.is_loading,
     );
 }
 
-fn browser_display_url(state: &BrowserBufferState) -> Option<&str> {
-    state
-        .requested_url
-        .as_deref()
-        .or(state.current_url.as_deref())
+pub(super) fn browser_display_url(state: &BrowserBufferState) -> Option<&str> {
+    let tab = state.active_tab();
+    tab.requested_url.as_deref().or(tab.current_url.as_deref())
 }
 
 fn refresh_browser_buffer_text(
@@ -359,14 +463,17 @@ pub(super) fn request_browser_buffer_navigation(
     clear_input: bool,
     user_library: &dyn UserLibrary,
 ) {
-    let state = buffer
-        .browser_state
-        .get_or_insert_with(BrowserBufferState::default);
-    if state.requested_url.as_deref() != Some(url) {
-        state.requested_url = Some(url.to_owned());
-        state.page_title = None;
+    {
+        let state = buffer
+            .browser_state
+            .get_or_insert_with(BrowserBufferState::default);
+        let tab = state.active_tab_mut();
+        if tab.requested_url.as_deref() != Some(url) {
+            tab.requested_url = Some(url.to_owned());
+            tab.page_title = None;
+        }
+        tab.is_loading = true;
     }
-    state.is_loading = true;
     refresh_browser_buffer_text(buffer, user_library, clear_input);
     refresh_browser_buffer_display_name(buffer);
 }
@@ -377,11 +484,14 @@ pub(super) fn set_browser_buffer_location(
     clear_input: bool,
     user_library: &dyn UserLibrary,
 ) {
-    let state = buffer
-        .browser_state
-        .get_or_insert_with(BrowserBufferState::default);
-    state.current_url = Some(url.to_owned());
-    state.requested_url = Some(url.to_owned());
+    {
+        let state = buffer
+            .browser_state
+            .get_or_insert_with(BrowserBufferState::default);
+        let tab = state.active_tab_mut();
+        tab.current_url = Some(url.to_owned());
+        tab.requested_url = Some(url.to_owned());
+    }
     refresh_browser_buffer_text(buffer, user_library, clear_input);
     refresh_browser_buffer_display_name(buffer);
 }
@@ -392,30 +502,44 @@ pub(super) fn apply_browser_page_load_state(
     is_loading: bool,
     user_library: &dyn UserLibrary,
 ) {
-    let state = buffer
-        .browser_state
-        .get_or_insert_with(BrowserBufferState::default);
-    let can_commit_request =
-        state.requested_url.is_none() || state.requested_url.as_deref() == Some(url);
-    if can_commit_request {
-        state.current_url = Some(url.to_owned());
-        state.requested_url = Some(url.to_owned());
-        state.is_loading = is_loading;
+    let should_refresh = {
+        let state = buffer
+            .browser_state
+            .get_or_insert_with(BrowserBufferState::default);
+        let tab = state.active_tab_mut();
+        let can_commit_request =
+            tab.requested_url.is_none() || tab.requested_url.as_deref() == Some(url);
+        if can_commit_request {
+            tab.current_url = Some(url.to_owned());
+            tab.requested_url = Some(url.to_owned());
+            tab.is_loading = is_loading;
+        }
+        can_commit_request
+    };
+    if should_refresh {
         refresh_browser_buffer_text(buffer, user_library, false);
         refresh_browser_buffer_display_name(buffer);
     }
 }
 
 pub(super) fn set_browser_buffer_title(buffer: &mut ShellBuffer, title: Option<&str>) {
-    let state = buffer
-        .browser_state
-        .get_or_insert_with(BrowserBufferState::default);
     let title = title
         .map(str::trim)
         .filter(|title| !title.is_empty())
         .map(str::to_owned);
-    if state.page_title != title {
-        state.page_title = title;
+    let changed = {
+        let state = buffer
+            .browser_state
+            .get_or_insert_with(BrowserBufferState::default);
+        let tab = state.active_tab_mut();
+        if tab.page_title != title {
+            tab.page_title = title;
+            true
+        } else {
+            false
+        }
+    };
+    if changed {
         refresh_browser_buffer_display_name(buffer);
     }
 }
@@ -440,12 +564,11 @@ pub(super) fn apply_browser_location_updates(
 
 fn buffer_browser_host_url(buffer: &ShellBuffer) -> Option<String> {
     if buffer_is_browser(&buffer.kind) {
-        return buffer.browser_state.as_ref().and_then(|browser| {
-            browser
-                .requested_url
-                .clone()
-                .or_else(|| browser.current_url.clone())
-        });
+        return buffer
+            .browser_state
+            .as_ref()
+            .and_then(browser_display_url)
+            .map(str::to_owned);
     }
     buffer.pdf_preview_url()
 }
@@ -902,7 +1025,7 @@ pub(super) fn render_browser_buffer_body(
             line_height,
         },
     )?;
-    if state.is_loading {
+    if state.active_tab().is_loading {
         let input_rect = browser_layout.input.rect;
         fill_window_surface_rect(
             target,
@@ -952,5 +1075,300 @@ pub(super) fn render_browser_buffer_body(
             },
         )?;
     }
+    Ok(())
+}
+
+pub(super) const BROWSER_BOOKMARK_PROMPT_ID: &str = "browser.bookmark-name";
+pub(super) const BROWSER_BUFFER_LOGO: &str = "browser/buffer.svg";
+pub(super) const BROWSER_TAB_LOGO: &str = "browser/tab.svg";
+
+pub(super) fn active_buffer_is_browser(runtime: &EditorRuntime) -> Result<bool, String> {
+    let buffer_id = match active_shell_buffer_id(runtime) {
+        Ok(buffer_id) => buffer_id,
+        Err(_) => return Ok(false),
+    };
+    Ok(shell_buffer(runtime, buffer_id)
+        .ok()
+        .is_some_and(|buffer| buffer_is_browser(&buffer.kind)))
+}
+
+pub(super) fn add_browser_tab(
+    runtime: &mut EditorRuntime,
+    raw_url: Option<&str>,
+) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if shell_buffer(runtime, buffer_id)?.browser_state.is_none() {
+        return Err("active buffer is not a browser buffer".to_owned());
+    }
+    let url = raw_url.map(normalize_browser_url);
+    {
+        let user_library = shell_user_library(runtime);
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        let state = buffer
+            .browser_state
+            .get_or_insert_with(BrowserBufferState::default);
+        state.add_tab(url.as_deref());
+        refresh_browser_buffer_text(buffer, &*user_library, true);
+        refresh_browser_buffer_display_name(buffer);
+    }
+    if url.is_none() {
+        focus_browser_input_section(runtime)?;
+    }
+    Ok(())
+}
+
+pub(super) fn activate_browser_tab(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+    tab_id: BrowserTabId,
+) -> Result<(), String> {
+    {
+        let user_library = shell_user_library(runtime);
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        let Some(state) = buffer.browser_state.as_mut() else {
+            return Err(format!("buffer `{buffer_id}` is not a browser buffer"));
+        };
+        if !state.activate_tab(tab_id) {
+            return Err(format!("browser tab `{}` is missing", tab_id.0));
+        }
+        refresh_browser_buffer_text(buffer, &*user_library, true);
+        refresh_browser_buffer_display_name(buffer);
+    }
+    focus_shell_buffer(runtime, buffer_id)
+}
+
+pub(super) fn focus_shell_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    if let Some(pane_id) = shell_ui(runtime)?
+        .panes()
+        .into_iter()
+        .flatten()
+        .find(|pane| pane.buffer_id == buffer_id)
+        .map(|pane| pane.pane_id)
+    {
+        runtime
+            .model_mut()
+            .focus_pane(workspace_id, pane_id)
+            .map_err(|error| error.to_string())?;
+        shell_ui_mut(runtime)?.focus_pane(pane_id);
+    }
+    shell_ui_mut(runtime)?.focus_buffer_in_active_pane(buffer_id);
+    Ok(())
+}
+
+pub(super) fn open_browser_url_smart(
+    runtime: &mut EditorRuntime,
+    raw_url: &str,
+) -> Result<(), String> {
+    let url = normalize_browser_url(raw_url);
+    if active_buffer_is_browser(runtime)? {
+        add_browser_tab(runtime, Some(&url))
+    } else {
+        open_browser_buffer_in_split(runtime, Some(&url))
+    }
+}
+
+pub(super) fn begin_browser_bookmark_prompt(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let (prefill_name, url) = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(state) = buffer.browser_state.as_ref() else {
+            return Err("active buffer is not a browser buffer".to_owned());
+        };
+        let tab = state.active_tab();
+        let url = browser_display_url(state)
+            .ok_or_else(|| "browser tab has no URL to bookmark".to_owned())?
+            .to_owned();
+        let prefill = tab
+            .page_title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("")
+            .to_owned();
+        (prefill, url)
+    };
+    shell_ui_mut(runtime)?.set_pending_browser_bookmark_url(Some(url));
+    let overlay =
+        InputPromptOverlay::new(BROWSER_BOOKMARK_PROMPT_ID, "Bookmark name: ", &prefill_name);
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+pub(super) fn confirm_browser_bookmark_name(
+    runtime: &mut EditorRuntime,
+    name: &str,
+) -> Result<(), String> {
+    let url = shell_ui_mut(runtime)?
+        .take_pending_browser_bookmark_url()
+        .ok_or_else(|| "bookmark prompt has no pending URL".to_owned())?;
+    save_browser_bookmark(name, &url)?;
+    Ok(())
+}
+
+pub(super) fn open_browser_bookmarks_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let bookmarks = load_browser_bookmarks();
+    if bookmarks.is_empty() {
+        let picker = PickerOverlay::from_entries(
+            "Browser Bookmarks",
+            vec![PickerEntry {
+                item: PickerItem::new(
+                    "empty",
+                    "No bookmarks saved",
+                    "Use browser.bookmark-add while viewing a page.",
+                    None::<String>,
+                ),
+                action: PickerAction::NoOp,
+                quickfix: None,
+            }],
+        );
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
+    }
+    let entries = bookmarks
+        .into_iter()
+        .map(|bookmark| PickerEntry {
+            item: PickerItem::new(
+                bookmark.url.clone(),
+                bookmark.name,
+                bookmark.url.clone(),
+                None::<String>,
+            ),
+            action: PickerAction::BrowserOpenUrl { url: bookmark.url },
+            quickfix: None,
+        })
+        .collect();
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Browser Bookmarks", entries));
+    Ok(())
+}
+
+pub(super) fn open_browser_tabs_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let entries = {
+        let buffer = shell_buffer(runtime, buffer_id)?;
+        let Some(state) = buffer.browser_state.as_ref() else {
+            return Err("active buffer is not a browser buffer".to_owned());
+        };
+        state
+            .tabs
+            .iter()
+            .map(|tab| {
+                let detail = tab
+                    .requested_url
+                    .as_deref()
+                    .or(tab.current_url.as_deref())
+                    .unwrap_or("about:blank")
+                    .to_owned();
+                let label = if tab.id == state.active_tab_id {
+                    format!("* {}", tab.label())
+                } else {
+                    tab.label()
+                };
+                PickerEntry {
+                    item: PickerItem::new(
+                        format!("tab-{}", tab.id.0),
+                        label,
+                        detail,
+                        None::<String>,
+                    ),
+                    action: PickerAction::BrowserActivateTab {
+                        buffer_id,
+                        tab_id: tab.id.0,
+                    },
+                    quickfix: None,
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Browser Tabs", entries));
+    Ok(())
+}
+
+pub(super) fn toggle_browser_dock(runtime: &mut EditorRuntime) -> Result<(), String> {
+    {
+        let ui = shell_ui_mut(runtime)?;
+        ui.toggle_browser_dock_open();
+        if !ui.browser_dock_open() {
+            return Ok(());
+        }
+        ui.set_browser_dock_focus(true);
+    }
+    let entries = collect_browser_dock_entries(runtime)?;
+    let cursor = entries.iter().rposition(|entry| entry.active).unwrap_or(0);
+    shell_ui_mut(runtime)?.set_browser_dock_cursor(Some(cursor));
+    Ok(())
+}
+
+pub(super) fn close_browser_dock_selection(runtime: &mut EditorRuntime) -> Result<(), String> {
+    if !shell_ui(runtime)?.browser_dock_focus_active() {
+        return Ok(());
+    }
+    let entries = collect_browser_dock_entries(runtime)?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let cursor = shell_ui(runtime)?
+        .browser_dock_cursor()
+        .filter(|index| *index < entries.len())
+        .unwrap_or_else(|| entries.iter().rposition(|entry| entry.active).unwrap_or(0));
+    let entry = entries[cursor].clone();
+    match entry.kind {
+        BrowserDockEntryKind::Buffer => {
+            close_buffer_immediate(runtime, entry.buffer_id)?;
+            refresh_browser_dock_cursor_after_close(runtime)?;
+        }
+        BrowserDockEntryKind::Tab => {
+            let tab_id = entry
+                .tab_id
+                .map(BrowserTabId)
+                .ok_or_else(|| "browser dock tab entry is missing tab id".to_owned())?;
+            let closed_tab = {
+                let user_library = shell_user_library(runtime);
+                let buffer = shell_buffer_mut(runtime, entry.buffer_id)?;
+                let Some(state) = buffer.browser_state.as_mut() else {
+                    return Err(format!(
+                        "buffer `{}` is not a browser buffer",
+                        entry.buffer_id
+                    ));
+                };
+                let closed = state.close_tab(tab_id);
+                if closed {
+                    refresh_browser_buffer_text(buffer, &*user_library, true);
+                    refresh_browser_buffer_display_name(buffer);
+                }
+                closed
+            };
+            if closed_tab {
+                refresh_browser_dock_cursor_after_close(runtime)?;
+            } else {
+                close_buffer_immediate(runtime, entry.buffer_id)?;
+                refresh_browser_dock_cursor_after_close(runtime)?;
+            }
+        }
+    }
+    shell_ui_mut(runtime)?.set_browser_dock_focus(true);
+    Ok(())
+}
+
+fn refresh_browser_dock_cursor_after_close(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let entries = collect_browser_dock_entries(runtime)?;
+    if entries.is_empty() {
+        let ui = shell_ui_mut(runtime)?;
+        ui.set_browser_dock_cursor(None);
+        if ui.browser_dock_open() {
+            // Keep dock open but clear focus when nothing left to select.
+            ui.set_browser_dock_focus(false);
+        }
+        return Ok(());
+    }
+    let previous = shell_ui(runtime)?.browser_dock_cursor().unwrap_or(0);
+    let cursor = previous.min(entries.len().saturating_sub(1));
+    shell_ui_mut(runtime)?.set_browser_dock_cursor(Some(cursor));
     Ok(())
 }

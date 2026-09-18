@@ -1601,6 +1601,7 @@ fn render_shell_state_keeps_pane_fills_out_of_acp_dock() -> Result<(), String> {
         ShellDockEntries {
             workspace: &[],
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &*shell_user_library(&state.runtime),

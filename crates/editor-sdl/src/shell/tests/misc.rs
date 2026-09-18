@@ -2636,6 +2636,7 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
         ShellDockEntries {
             workspace: &[],
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &NullUserLibrary,
@@ -2714,6 +2715,7 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
         ShellDockEntries {
             workspace: &[],
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &NullUserLibrary,
@@ -4869,6 +4871,7 @@ fn workspace_dock_render_marks_active_row() -> Result<(), String> {
         ShellDockEntries {
             workspace: &entries,
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &*shell_user_library(&state.runtime),

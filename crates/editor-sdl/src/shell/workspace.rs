@@ -287,6 +287,50 @@ fn cycle_acp_dock(runtime: &mut EditorRuntime, forward: bool) -> Result<(), Stri
     Ok(())
 }
 
+fn cycle_browser_dock(runtime: &mut EditorRuntime, forward: bool) -> Result<(), String> {
+    let entries = collect_browser_dock_entries(runtime)?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let current_index = shell_ui(runtime)?
+        .browser_dock_cursor()
+        .filter(|index| *index < entries.len())
+        .unwrap_or_else(|| {
+            entries
+                .iter()
+                .rposition(|entry| entry.active)
+                .unwrap_or(0)
+        });
+    let next_index = if entries.len() == 1 {
+        0
+    } else if forward {
+        (current_index + 1) % entries.len()
+    } else if current_index == 0 {
+        entries.len() - 1
+    } else {
+        current_index - 1
+    };
+    activate_browser_dock_entry(runtime, &entries[next_index])?;
+    let ui = shell_ui_mut(runtime)?;
+    ui.set_browser_dock_cursor(Some(next_index));
+    ui.set_browser_dock_focus(true);
+    Ok(())
+}
+
+fn ensure_browser_dock_focus(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let needs_cursor = shell_ui(runtime)?.browser_dock_cursor().is_none();
+    shell_ui_mut(runtime)?.set_browser_dock_focus(true);
+    if needs_cursor {
+        let entries = collect_browser_dock_entries(runtime)?;
+        let cursor = entries
+            .iter()
+            .rposition(|entry| entry.active)
+            .unwrap_or(0);
+        shell_ui_mut(runtime)?.set_browser_dock_cursor(Some(cursor));
+    }
+    Ok(())
+}
+
 fn collect_workspace_dock_entries(
     runtime: &EditorRuntime,
 ) -> Result<Vec<WorkspaceDockEntry>, String> {
@@ -1363,12 +1407,33 @@ fn move_workspace_window(
     let dock_focused = shell_ui(runtime)?.workspace_dock_focus_active(&*user_library);
     let acp_visible = acp_dock_visible(shell_ui(runtime)?);
     let acp_focused = shell_ui(runtime)?.acp_dock_focus_active();
+    let browser_visible = browser_dock_visible(shell_ui(runtime)?);
+    let browser_focused = shell_ui(runtime)?.browser_dock_focus_active();
     if dock_focused {
         if direction == workspace_dock_exit_direction(dock_config.side) {
             shell_ui_mut(runtime)?.set_workspace_dock_focus(false);
+            if dock_config.side == WorkspaceDockSide::Left && browser_visible {
+                ensure_browser_dock_focus(runtime)?;
+                return Ok(());
+            }
             if dock_config.side == WorkspaceDockSide::Right && acp_visible {
                 shell_ui_mut(runtime)?.set_acp_dock_focus(true);
             }
+            return Ok(());
+        }
+        return Ok(());
+    }
+    if browser_focused {
+        if direction == WindowMoveDirection::Right {
+            shell_ui_mut(runtime)?.set_browser_dock_focus(false);
+            return Ok(());
+        }
+        if direction == WindowMoveDirection::Left
+            && dock_visible
+            && dock_config.side == WorkspaceDockSide::Left
+        {
+            shell_ui_mut(runtime)?.set_browser_dock_focus(false);
+            shell_ui_mut(runtime)?.set_workspace_dock_focus(true);
             return Ok(());
         }
         return Ok(());
@@ -1390,6 +1455,10 @@ fn move_workspace_window(
     }
     if acp_visible && direction == WindowMoveDirection::Right {
         shell_ui_mut(runtime)?.set_acp_dock_focus(true);
+        return Ok(());
+    }
+    if browser_visible && direction == WindowMoveDirection::Left {
+        ensure_browser_dock_focus(runtime)?;
         return Ok(());
     }
     if dock_visible && direction == workspace_dock_enter_direction(dock_config.side) {

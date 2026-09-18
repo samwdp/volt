@@ -1658,6 +1658,7 @@ pub(super) fn render_shell_state_scene_with_docked_runtime_popup(
         ShellDockEntries {
             workspace: &[],
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &NullUserLibrary,
@@ -1747,6 +1748,7 @@ pub(super) fn render_shell_state_scene_with_notification_overlay(
         ShellDockEntries {
             workspace: &[],
             acp: &[],
+            browser: &[],
         },
         ShellChrome {
             user_library: &NullUserLibrary,

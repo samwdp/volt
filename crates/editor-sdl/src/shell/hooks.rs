@@ -562,6 +562,46 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_BROWSER_ADD_TAB,
+        "Creates a new tab in the active browser buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_BOOKMARKS,
+        "Opens the browser bookmarks picker.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_BOOKMARK_ADD,
+        "Prompts to save the current browser URL as a bookmark.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_TABS,
+        "Opens a picker of tabs in the active browser buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_DOCK,
+        "Toggles the browser dock for buffers and tabs.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_DOCK_PREVIOUS,
+        "Moves to the previous entry in the browser dock.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_DOCK_NEXT,
+        "Moves to the next entry in the browser dock.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_BROWSER_DOCK_CLOSE,
+        "Closes the selected browser dock buffer or tab.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_TERMINAL_OPEN_POPUP,
         "Focuses the terminal popup after opening it.",
     )?;
@@ -2199,6 +2239,74 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(HOOK_BROWSER_ADD_TAB, "shell.browser-add-tab", |_, runtime| {
+            browser::add_browser_tab(runtime, None)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BROWSER_BOOKMARKS,
+            "shell.browser-bookmarks",
+            |_, runtime| {
+                browser::open_browser_bookmarks_picker(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BROWSER_BOOKMARK_ADD,
+            "shell.browser-bookmark-add",
+            |_, runtime| {
+                browser::begin_browser_bookmark_prompt(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_BROWSER_TABS, "shell.browser-tabs", |_, runtime| {
+            browser::open_browser_tabs_picker(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_BROWSER_DOCK, "shell.browser-dock", |_, runtime| {
+            browser::toggle_browser_dock(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BROWSER_DOCK_PREVIOUS,
+            "shell.browser-dock-previous",
+            |_, runtime| {
+                cycle_browser_dock(runtime, false)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BROWSER_DOCK_NEXT,
+            "shell.browser-dock-next",
+            |_, runtime| {
+                cycle_browser_dock(runtime, true)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BROWSER_DOCK_CLOSE,
+            "shell.browser-dock-close",
+            |_, runtime| {
+                browser::close_browser_dock_selection(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_INPUT_CLEAR, "shell.input-clear", |_, runtime| {
             clear_input_buffer(runtime)?;
             Ok(())
@@ -2852,6 +2960,12 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 }
                 PickerAction::SwitchDapStackFrame { frame_id } => {
                     switch_dap_stack_frame(runtime, frame_id)?;
+                }
+                PickerAction::BrowserOpenUrl { url } => {
+                    browser::open_browser_url_smart(runtime, &url)?;
+                }
+                PickerAction::BrowserActivateTab { buffer_id, tab_id } => {
+                    browser::activate_browser_tab(runtime, buffer_id, BrowserTabId(tab_id))?;
                 }
             }
 
