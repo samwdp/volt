@@ -790,6 +790,7 @@ fn dispatch_input_prompt_confirm(
         COMPILE_PROMPT_ID => run_compile_command_streamed(runtime, text),
         HELP_PROMPT_ID => confirm_help_question(runtime, text),
         BROWSER_BOOKMARK_PROMPT_ID => confirm_browser_bookmark_name(runtime, text),
+        BROWSER_BOOKMARK_RENAME_PROMPT_ID => confirm_browser_bookmark_rename(runtime, text),
         WORKSPACE_CLONE_URL_PROMPT_ID => confirm_workspace_clone_url(runtime, text),
         DAP_PROGRAM_PROMPT_ID => confirm_dap_program_prompt(runtime, text),
         DAP_PROCESS_PROMPT_ID => confirm_dap_process_prompt(runtime, text),

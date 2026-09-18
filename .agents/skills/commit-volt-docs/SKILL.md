@@ -81,7 +81,7 @@ Return to the parent agent:
 - Whether push was skipped (default) or performed
 - Remaining dirty paths, if any
 
-## Push (only when asked)
+## Push only the docs site
 
 ```bash
 # inside docs/

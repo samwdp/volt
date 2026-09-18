@@ -1079,8 +1079,12 @@ pub(super) fn render_browser_buffer_body(
 }
 
 pub(super) const BROWSER_BOOKMARK_PROMPT_ID: &str = "browser.bookmark-name";
+pub(super) const BROWSER_BOOKMARK_RENAME_PROMPT_ID: &str = "browser.bookmark-rename";
 pub(super) const BROWSER_BUFFER_LOGO: &str = "browser/buffer.svg";
 pub(super) const BROWSER_TAB_LOGO: &str = "browser/tab.svg";
+
+const BROWSER_BOOKMARK_RENAME_CHORD: &str = "Ctrl+r";
+const BROWSER_BOOKMARK_RENAME_COMMAND: &str = "browser.bookmark-rename";
 
 pub(super) fn active_buffer_is_browser(runtime: &EditorRuntime) -> Result<bool, String> {
     let buffer_id = match active_shell_buffer_id(runtime) {
@@ -1212,7 +1216,49 @@ pub(super) fn confirm_browser_bookmark_name(
     Ok(())
 }
 
+pub(super) fn begin_browser_bookmark_rename_from_one_shot(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
+    let Some(context) = shell_ui_mut(runtime)?.take_picker_one_shot() else {
+        return Ok(());
+    };
+    let Some(selected) = context.selected() else {
+        return Ok(());
+    };
+    let url = selected.id().trim();
+    if url.is_empty() || url == "empty" {
+        return Ok(());
+    }
+    let prefill = selected.label().to_owned();
+    shell_ui_mut(runtime)?.set_pending_browser_bookmark_url(Some(url.to_owned()));
+    let overlay = InputPromptOverlay::new(
+        BROWSER_BOOKMARK_RENAME_PROMPT_ID,
+        "Rename bookmark: ",
+        &prefill,
+    );
+    shell_ui_mut(runtime)?.open_input_prompt(overlay);
+    Ok(())
+}
+
+pub(super) fn confirm_browser_bookmark_rename(
+    runtime: &mut EditorRuntime,
+    name: &str,
+) -> Result<(), String> {
+    let url = shell_ui_mut(runtime)?
+        .take_pending_browser_bookmark_url()
+        .ok_or_else(|| "bookmark rename prompt has no pending URL".to_owned())?;
+    save_browser_bookmark(name, &url)?;
+    open_browser_bookmarks_picker_selecting(runtime, Some(&url))
+}
+
 pub(super) fn open_browser_bookmarks_picker(runtime: &mut EditorRuntime) -> Result<(), String> {
+    open_browser_bookmarks_picker_selecting(runtime, None)
+}
+
+fn open_browser_bookmarks_picker_selecting(
+    runtime: &mut EditorRuntime,
+    select_url: Option<&str>,
+) -> Result<(), String> {
     let bookmarks = load_browser_bookmarks();
     if bookmarks.is_empty() {
         let picker = PickerOverlay::from_entries(
@@ -1244,7 +1290,32 @@ pub(super) fn open_browser_bookmarks_picker(runtime: &mut EditorRuntime) -> Resu
             quickfix: None,
         })
         .collect();
-    shell_ui_mut(runtime)?.set_picker(PickerOverlay::from_entries("Browser Bookmarks", entries));
+    let picker =
+        PickerOverlay::from_entries("Browser Bookmarks", entries).with_extra_keybinds(vec![
+            PickerExtraKeybind::new(
+                BROWSER_BOOKMARK_RENAME_CHORD,
+                BROWSER_BOOKMARK_RENAME_COMMAND,
+            ),
+        ]);
+    shell_ui_mut(runtime)?.set_picker(picker);
+    if let Some(url) = select_url {
+        select_browser_bookmark_row(runtime, url)?;
+    }
+    Ok(())
+}
+
+fn select_browser_bookmark_row(runtime: &mut EditorRuntime, url: &str) -> Result<(), String> {
+    let picker = shell_ui_mut(runtime)?
+        .picker_mut()
+        .ok_or_else(|| "browser bookmarks picker missing".to_owned())?;
+    if let Some(index) = picker
+        .session
+        .matches()
+        .iter()
+        .position(|matched| matched.item().id() == url)
+    {
+        picker.session.set_selected_index(index);
+    }
     Ok(())
 }
 

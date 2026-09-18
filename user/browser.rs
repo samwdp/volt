@@ -80,6 +80,14 @@ pub fn package() -> PluginPackage {
             )],
         ),
         PluginCommand::new(
+            "browser.bookmark-rename",
+            "Renames the selected bookmark in the bookmarks picker (Ctrl+r).",
+            vec![PluginAction::emit_hook(
+                browser_hooks::BOOKMARK_RENAME,
+                None::<&str>,
+            )],
+        ),
+        PluginCommand::new(
             "browser.tabs",
             "Opens a picker of tabs in the active browser buffer.",
             vec![PluginAction::emit_hook(browser_hooks::TABS, None::<&str>)],
@@ -235,6 +243,12 @@ mod tests {
                 .commands()
                 .iter()
                 .any(|command| command.name() == "browser.bookmarks")
+        );
+        assert!(
+            package
+                .commands()
+                .iter()
+                .any(|command| command.name() == "browser.bookmark-rename")
         );
         assert!(
             package

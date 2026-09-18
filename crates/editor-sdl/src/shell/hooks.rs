@@ -577,6 +577,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_BROWSER_BOOKMARK_RENAME,
+        "Renames the selected bookmark from the bookmarks picker.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_BROWSER_TABS,
         "Opens a picker of tabs in the active browser buffer.",
     )?;
@@ -2260,6 +2265,16 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             "shell.browser-bookmark-add",
             |_, runtime| {
                 browser::begin_browser_bookmark_prompt(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_BROWSER_BOOKMARK_RENAME,
+            "shell.browser-bookmark-rename",
+            |_, runtime| {
+                browser::begin_browser_bookmark_rename_from_one_shot(runtime)?;
                 Ok(())
             },
         )

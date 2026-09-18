@@ -1228,3 +1228,89 @@ fn browser_dock_ctrl_d_closes_tab_then_buffer() -> Result<(), String> {
     );
     Ok(())
 }
+
+#[test]
+fn browser_bookmarks_ctrl_r_renames_and_restores_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("browser-bookmark-rename");
+    let path = root.join("browser-bookmarks.json");
+    set_browser_bookmarks_path_for_test(Some(path));
+    save_browser_bookmark("Old Name", "https://example.com/renamed")?;
+    save_browser_bookmark("Other", "https://example.com/other")?;
+
+    open_browser_bookmarks_picker(&mut state.runtime)?;
+    {
+        let picker = shell_ui_mut(&mut state.runtime)?
+            .picker_mut()
+            .ok_or_else(|| "bookmarks picker missing".to_owned())?;
+        assert!(
+            picker
+                .extra_keybinds()
+                .iter()
+                .any(|binding| binding.chord() == "Ctrl+r"
+                    && binding.command_name() == "browser.bookmark-rename"),
+            "bookmarks picker must expose Ctrl+r rename extra"
+        );
+        let index = picker
+            .session
+            .matches()
+            .iter()
+            .position(|matched| matched.item().id() == "https://example.com/renamed")
+            .ok_or_else(|| "bookmark row missing".to_owned())?;
+        picker.session.set_selected_index(index);
+    }
+
+    let handled = state
+        .try_runtime_keybinding(Keycode::R, ctrl_mod())
+        .map_err(|error| error.to_string())?;
+    assert!(handled, "Ctrl+r should fire bookmark rename from picker");
+    assert!(
+        shell_ui(&state.runtime)?.picker().is_none(),
+        "rename extra must close picker before prompt"
+    );
+    assert_eq!(
+        shell_ui(&state.runtime)?
+            .input_prompt()
+            .map(|prompt| prompt.id.as_str()),
+        Some(BROWSER_BOOKMARK_RENAME_PROMPT_ID)
+    );
+    assert_eq!(
+        active_input_prompt_text(&state)?,
+        Some("Old Name".to_owned())
+    );
+
+    let prefill_len = active_input_prompt_text(&state)?
+        .map(|text| text.chars().count())
+        .unwrap_or(0);
+    for _ in 0..prefill_len {
+        state
+            .try_runtime_keybinding(Keycode::Backspace, Mod::empty())
+            .map_err(|error| error.to_string())?;
+    }
+    confirm_input_prompt(&mut state, "Friendly Renamed")?;
+
+    assert!(
+        !shell_ui(&state.runtime)?.input_prompt_visible(),
+        "rename confirm must close prompt"
+    );
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "bookmarks picker should reopen after rename".to_owned())?;
+    let selected = picker
+        .session
+        .selected()
+        .ok_or_else(|| "renamed bookmark selection missing".to_owned())?;
+    assert_eq!(selected.item().id(), "https://example.com/renamed");
+    assert_eq!(selected.item().label(), "Friendly Renamed");
+
+    let loaded = load_browser_bookmarks();
+    set_browser_bookmarks_path_for_test(None);
+    std::fs::remove_dir_all(&root).ok();
+    assert!(
+        loaded.iter().any(|bookmark| {
+            bookmark.url == "https://example.com/renamed" && bookmark.name == "Friendly Renamed"
+        }),
+        "persisted bookmark name must update"
+    );
+    Ok(())
+}

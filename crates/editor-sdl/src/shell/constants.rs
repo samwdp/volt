@@ -148,6 +148,7 @@ const HOOK_BROWSER_SUBMIT: &str = browser_hooks::SUBMIT;
 const HOOK_BROWSER_ADD_TAB: &str = browser_hooks::ADD_TAB;
 const HOOK_BROWSER_BOOKMARKS: &str = browser_hooks::BOOKMARKS;
 const HOOK_BROWSER_BOOKMARK_ADD: &str = browser_hooks::BOOKMARK_ADD;
+const HOOK_BROWSER_BOOKMARK_RENAME: &str = browser_hooks::BOOKMARK_RENAME;
 const HOOK_BROWSER_TABS: &str = browser_hooks::TABS;
 const HOOK_BROWSER_DOCK: &str = browser_hooks::DOCK;
 const HOOK_BROWSER_DOCK_PREVIOUS: &str = browser_hooks::DOCK_PREVIOUS;

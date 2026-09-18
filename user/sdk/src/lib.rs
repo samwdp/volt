@@ -198,6 +198,7 @@ pub mod browser_hooks {
     pub const ADD_TAB: &str = "ui.browser.add-tab";
     pub const BOOKMARKS: &str = "ui.browser.bookmarks";
     pub const BOOKMARK_ADD: &str = "ui.browser.bookmark-add";
+    pub const BOOKMARK_RENAME: &str = "ui.browser.bookmark-rename";
     pub const TABS: &str = "ui.browser.tabs";
     pub const DOCK: &str = "ui.browser.dock";
     pub const DOCK_PREVIOUS: &str = "ui.browser.dock.previous";
