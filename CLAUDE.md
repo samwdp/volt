@@ -21,3 +21,7 @@ Canonical role names used as-is (`needs-triage`, `needs-info`, `ready-for-agent`
 ### Domain docs
 
 Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
+
+### Docs sync (subagent)
+
+After product changes that affect user-facing docs, spawn a fresh subagent. Pass what changed, paths, and issue numbers. Subagent: (1) `.agents/skills/update-volt-docs/SKILL.md` (2) `.agents/skills/commit-volt-docs/SKILL.md`. Do not update or commit docs on the main thread. Authoring skills: `docs/.agents/skills/`.

@@ -98,11 +98,13 @@ Canonical role names used as-is (`needs-triage`, `needs-info`, `ready-for-agent`
 Single-context: root `CONTEXT.md` + `docs/adr/`. See `docs/agents/domain.md`.
 
 
-### Internal docs
+### Docs sync (subagent)
 
-internal docs live in the `docs` directory. These consist of html documents that are used as a static site and markdown files. The html documents should be updated first. Use existing styling and only make changes that are appropriate to the work that has been undertaken such as:
+`docs/` is the `volt-docs` submodule (VitePress help site). After product changes that affect user-facing docs — new or changed user packages, plugins, themes, commands, technologies, or help-relevant behavior — **spawn a fresh subagent**. Do not update or commit docs inline on the main thread.
 
-- Any new `user` packages that have been added. Give a simple description of the user package and what it does.
-- Any new technologies that have been added
+Subagent brief must include: what changed, Volt paths touched, issue numbers if any, and scope (`drift-only` default or `full`).
 
-Use git commit history to update the changelog in the site, link any github issues that appear. Ensure this page is easy to filter and is up to date. 
+1. Read and follow `.agents/skills/update-volt-docs/SKILL.md`
+2. Then read and follow `.agents/skills/commit-volt-docs/SKILL.md`
+
+Portable Agent Skills layout (any provider that scans `.agents/skills/`): update + commit live in the Volt repo; page authoring skills live in `docs/.agents/skills/` (`create-volt-docs`, `refresh-volt-docs`). 
