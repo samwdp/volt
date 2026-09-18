@@ -445,8 +445,6 @@ fn workspace_contexts(
 }
 
 fn buffer_picker_preview(buffer: &ShellBuffer) -> String {
-    const MAX_LINES: usize = 24;
-
     let mut lines = Vec::new();
     if let Some(path) = buffer.path() {
         lines.push(path.display().to_string());
@@ -459,7 +457,10 @@ fn buffer_picker_preview(buffer: &ShellBuffer) -> String {
         ));
     }
     lines.extend(
-        (0..buffer.text.line_count().min(MAX_LINES))
+        (0..buffer
+            .text
+            .line_count()
+            .min(REPOSITORY_FILE_PREVIEW_MAX_LINES))
             .filter_map(|line_index| buffer.text.line(line_index))
             .map(|line| line.trim_end().to_owned()),
     );

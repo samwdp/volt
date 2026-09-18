@@ -255,7 +255,8 @@ fn repository_file_preview_includes_path_and_caps_lines() -> Result<(), Box<dyn 
     let root = temp_repo_root("preview-caps");
     fs::create_dir_all(&root)?;
     let path = root.join("notes.txt");
-    let body = (0..40)
+    let body_line_count = REPOSITORY_FILE_PREVIEW_MAX_LINES + 16;
+    let body = (0..body_line_count)
         .map(|index| format!("line-{index}"))
         .collect::<Vec<_>>()
         .join("\n");

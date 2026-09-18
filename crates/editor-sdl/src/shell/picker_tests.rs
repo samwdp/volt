@@ -193,7 +193,31 @@ fn picker_preview_layout_splits_preview_to_the_right() {
     assert_eq!(layout.y, 120);
     assert!(layout.x > 20);
     assert!(layout.list_width < 900);
+    assert_eq!(layout.height, 300);
+    assert!(layout.width > 0);
     assert_eq!(layout.lines, vec!["path", "line 1", "line 2"]);
+}
+
+#[test]
+fn picker_preview_layout_fills_available_height_with_file_lines() {
+    let body = (0..80)
+        .map(|index| format!("line-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview = format!("C:\\repo\\file.rs\n{body}");
+    let list_height = 400;
+    let line_height = 20;
+    let layout = picker_preview_layout(Some(&preview), 0, 900, 0, list_height, line_height, 0.5)
+        .expect("preview layout should exist");
+
+    let expected_rows = (list_height / line_height) as usize;
+    assert_eq!(layout.height, list_height as u32);
+    assert_eq!(layout.lines.len(), expected_rows);
+    assert_eq!(layout.lines[0], "C:\\repo\\file.rs");
+    assert_eq!(
+        layout.lines[expected_rows - 1],
+        format!("line-{}", expected_rows - 2)
+    );
 }
 
 #[test]

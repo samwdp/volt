@@ -123,10 +123,11 @@ use editor_fs::{
     project_discovery_snapshot,
 };
 use editor_git::{
-    GitLogEntry, GitStatusSnapshot, detect_in_progress, git_probe_snapshot,
-    git_probe_snapshot_no_spawn, git_probe_snapshot_with_numstat, invalidate_git_probe_cache_for,
-    invalidate_repository_file_list_cache_for, list_repository_files, parse_log_oneline,
-    parse_stash_list, parse_status, repository_file_preview,
+    GitLogEntry, GitStatusSnapshot, REPOSITORY_FILE_PREVIEW_MAX_LINES, detect_in_progress,
+    git_probe_snapshot, git_probe_snapshot_no_spawn, git_probe_snapshot_with_numstat,
+    invalidate_git_probe_cache_for, invalidate_repository_file_list_cache_for,
+    list_repository_files, parse_log_oneline, parse_stash_list, parse_status,
+    repository_file_preview,
 };
 use editor_jobs::{JobManager, JobSpec};
 use editor_lsp::{

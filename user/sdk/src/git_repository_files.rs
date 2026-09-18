@@ -26,9 +26,13 @@ fn configure_background_command(_command: &mut Command) {
 }
 
 /// Byte cap for Workspace Files picker previews.
-pub const REPOSITORY_FILE_PREVIEW_MAX_BYTES: u64 = 16 * 1024;
+///
+/// Sized to fill a large preview pane; the shell still clips draw to available rows.
+pub const REPOSITORY_FILE_PREVIEW_MAX_BYTES: u64 = 64 * 1024;
 /// Line cap for Workspace Files picker previews (body lines after the path header).
-pub const REPOSITORY_FILE_PREVIEW_MAX_LINES: usize = 24;
+///
+/// High enough that available picker height is the visible limit, not this constant.
+pub const REPOSITORY_FILE_PREVIEW_MAX_LINES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileFingerprint {
