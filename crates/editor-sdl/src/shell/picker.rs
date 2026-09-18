@@ -820,6 +820,7 @@ pub(crate) fn render_picker_overlay(
         list_top,
         list_height,
         line_height,
+        picker_layout.split_fraction,
     );
     let list_content_width = preview_layout
         .as_ref()
@@ -967,21 +968,25 @@ fn picker_preview_layout(
     list_top: i32,
     list_height: i32,
     line_height: i32,
+    split_fraction: f32,
 ) -> Option<PickerPreviewLayout> {
     let preview = preview?;
     if content_width < 560 || list_height <= line_height {
         return None;
     }
-    let preview_width = (content_width * 2 / 5)
-        .max(240)
-        .min(content_width.saturating_sub(280));
-    if preview_width == 0 {
+    let gap = 18;
+    let usable_width = content_width.saturating_sub(gap);
+    if usable_width == 0 {
         return None;
     }
-    let gap = 18;
-    let list_width = content_width
-        .saturating_sub(preview_width)
-        .saturating_sub(gap);
+    let split = split_fraction.clamp(0.0, 1.0);
+    let list_width = ((usable_width as f32) * split)
+        .round()
+        .clamp(280.0, usable_width.saturating_sub(240) as f32) as u32;
+    let preview_width = usable_width.saturating_sub(list_width);
+    if preview_width == 0 || list_width == 0 {
+        return None;
+    }
     let preview_x = content_left + list_width as i32 + gap as i32;
     let preview_rows = (list_height / line_height.max(1)).max(1) as usize;
     let lines = picker_preview_lines(preview, preview_rows);

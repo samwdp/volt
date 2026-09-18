@@ -6,17 +6,21 @@
 //!
 //! # Workflow
 //!
-//! 1. `workspace.compile` emits `plugin.run-command` with the active language
-//!    as the hook detail. The host looks up the default command via
-//!    `UserLibrary::default_build_command`, opens a prompt pre-filled with it,
-//!    then streams output into the `*compile <workspace>*` popup.
+//! 1. `workspace.compile` emits `plugin.run-command`. The host prefills a
+//!    build command from the workspace root markers (for the shipped User
+//!    Source Tree that is `cargo build --release -p volt-user`), streams
+//!    output into the `*compile <workspace>*` popup, then hot-reloads the
+//!    built User Library into the running app and shows a success notification.
 //! 2. `workspace.recompile` emits `plugin.rerun-command`.  The host re-runs
 //!    the last stored command for the active workspace (or falls back to
 //!    `workspace.compile` if none has been run).
 //!
+//! On Windows the live DLL stays mapped, so the host stages a unique copy
+//! under `target/<profile>/volt-user-hot/` before reloading.
+//!
 //! # Adding a new language
 //!
-//! Add an entry to [`default_build_commands`].  No other files need changing.
+//! Add an entry to [`default_build_command`].  No other files need changing.
 
 use editor_plugin_api::{
     PluginAction, PluginCommand, PluginKeyBinding, PluginKeymapScope, PluginPackage, plugin_hooks,

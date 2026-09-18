@@ -187,11 +187,25 @@ fn picker_preview_is_opt_in() {
 
 #[test]
 fn picker_preview_layout_splits_preview_to_the_right() {
-    let layout = picker_preview_layout(Some("path\nline 1\nline 2"), 20, 900, 120, 300, 20)
+    let layout = picker_preview_layout(Some("path\nline 1\nline 2"), 20, 900, 120, 300, 20, 0.5)
         .expect("preview layout should exist on wide pickers");
 
     assert_eq!(layout.y, 120);
     assert!(layout.x > 20);
     assert!(layout.list_width < 900);
     assert_eq!(layout.lines, vec!["path", "line 1", "line 2"]);
+}
+
+#[test]
+fn picker_preview_layout_honors_split_fraction() {
+    let middle =
+        picker_preview_layout(Some("preview"), 0, 900, 0, 300, 20, 0.5).expect("middle split");
+    let left = picker_preview_layout(Some("preview"), 0, 900, 0, 300, 20, 0.3).expect("left split");
+    let right =
+        picker_preview_layout(Some("preview"), 0, 900, 0, 300, 20, 0.7).expect("right split");
+
+    assert!(left.list_width < middle.list_width);
+    assert!(middle.list_width < right.list_width);
+    assert!(left.x < middle.x);
+    assert!(middle.x < right.x);
 }

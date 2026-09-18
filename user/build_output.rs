@@ -38,6 +38,7 @@ pub fn user_library_filename(target_os: &str) -> &'static str {
 pub fn install_root_library_link(paths: &UserLibraryPaths) -> io::Result<()> {
     if let Ok(current_target) = fs::read_link(&paths.root_library_path)
         && current_target == paths.built_library_path
+        && paths.built_library_path.exists()
     {
         return Ok(());
     }

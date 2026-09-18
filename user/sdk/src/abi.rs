@@ -13,6 +13,7 @@ use abi_stable::{
     std_types::{ROption, RStr, RString, RVec},
 };
 use serde_json::Number;
+use std::path::Path;
 
 use crate::{
     AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, AutocompleteProviderItem,
@@ -1038,6 +1039,7 @@ impl From<PickerTruncateStrategy> for AbiPickerTruncateStrategy {
 pub struct AbiPickerLayout {
     pub width_fraction: f32,
     pub height_fraction: f32,
+    pub split_fraction: f32,
 }
 
 impl From<PickerLayout> for AbiPickerLayout {
@@ -1045,6 +1047,7 @@ impl From<PickerLayout> for AbiPickerLayout {
         Self {
             width_fraction: value.width_fraction,
             height_fraction: value.height_fraction,
+            split_fraction: value.split_fraction,
         }
     }
 }
@@ -1054,6 +1057,7 @@ impl From<AbiPickerLayout> for PickerLayout {
         Self {
             width_fraction: value.width_fraction,
             height_fraction: value.height_fraction,
+            split_fraction: value.split_fraction,
         }
     }
 }
@@ -1842,6 +1846,7 @@ pub struct AbiPaneConfig {
     pub picker_height_hundredths: u16,
     pub rainbow_parens_enabled: bool,
     pub show_paren_enabled: bool,
+    pub picker_split_hundredths: u16,
 }
 
 impl AbiPaneConfig {
@@ -1862,6 +1867,7 @@ impl AbiPaneConfig {
             picker_height_hundredths: fraction_to_hundredths(picker.height_fraction),
             rainbow_parens_enabled: rainbow_parens.enabled,
             show_paren_enabled: show_paren.enabled,
+            picker_split_hundredths: fraction_to_hundredths(picker.split_fraction),
         }
     }
 
@@ -1886,6 +1892,7 @@ impl AbiPaneConfig {
         PickerLayout {
             width_fraction: hundredths_to_fraction(self.picker_width_hundredths),
             height_fraction: hundredths_to_fraction(self.picker_height_hundredths),
+            split_fraction: hundredths_to_fraction(self.picker_split_hundredths),
         }
     }
 
@@ -2793,6 +2800,20 @@ impl RootModule for UserLibraryModuleRef {
     const BASE_NAME: &'static str = "user";
     const NAME: &'static str = "user";
     const VERSION_STRINGS: VersionStrings = abi_stable::package_version_strings!();
+}
+
+/// Load a User Library cdylib from `path` without the process-wide [`RootModule`] singleton.
+///
+/// [`UserLibraryModuleRef::load_from_file`] only initializes once per process; later calls
+/// return the first module and ignore `path`. Hot reload must use this helper so each staged
+/// copy is mapped and actually used.
+pub fn load_user_library_module_from_path(
+    path: &Path,
+) -> Result<UserLibraryModuleRef, abi_stable::library::LibraryError> {
+    let header = abi_stable::library::lib_header_from_path(path)?;
+    header
+        .init_root_module::<UserLibraryModuleRef>()?
+        .initialization()
 }
 
 #[cfg(test)]

@@ -296,16 +296,53 @@ fn rerun_compile_command(runtime: &mut EditorRuntime) -> Result<(), String> {
     }
 }
 
-fn command_builds_user_library(command: &str) -> bool {
+fn cargo_command_is_build_like(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    if !lower.contains("cargo") || !lower.contains("volt-user") {
+    lower.contains("cargo")
+        && (lower.contains("build")
+            || lower.contains("check")
+            || lower.contains("clippy")
+            || lower.contains("test")
+            || lower.contains("run"))
+}
+
+fn cargo_command_selects_other_package(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let tokens = lower.split_whitespace().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = tokens[index];
+        let package = if token == "-p" || token == "--package" {
+            index += 1;
+            tokens.get(index).copied()
+        } else {
+            token.strip_prefix("--package=")
+        };
+        if let Some(package) = package
+            && package != "volt-user"
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn command_builds_user_library(command: &str) -> bool {
+    cargo_command_is_build_like(command) && command.to_ascii_lowercase().contains("volt-user")
+}
+
+fn should_reload_user_library_after_compile(runtime: &EditorRuntime, command: &str) -> bool {
+    if command_builds_user_library(command) {
+        return true;
+    }
+    if !cargo_command_is_build_like(command) || cargo_command_selects_other_package(command) {
         return false;
     }
-    lower.contains("build")
-        || lower.contains("check")
-        || lower.contains("clippy")
-        || lower.contains("test")
-        || lower.contains("run")
+    active_workspace_root(runtime)
+        .ok()
+        .flatten()
+        .is_some_and(|root| cargo_manifest_package_name(&root).as_deref() == Some("volt-user"))
 }
 
 fn current_runtime_user_library_candidates() -> Vec<PathBuf> {
@@ -320,9 +357,16 @@ fn current_runtime_user_library_candidates() -> Vec<PathBuf> {
     if let Ok(current_exe) = std::env::current_exe()
         && let Some(exe_dir) = current_exe.parent()
     {
-        let path = UserLibraryModuleRef::get_library_path(exe_dir);
-        if seen.insert(path.clone()) {
-            candidates.push(path);
+        let staged_target = exe_dir.join("user").join("target");
+        for profile in ["release", "debug"] {
+            let path = UserLibraryModuleRef::get_library_path(&staged_target.join(profile));
+            if seen.insert(path.clone()) {
+                candidates.push(path);
+            }
+        }
+        let beside_exe = UserLibraryModuleRef::get_library_path(exe_dir);
+        if seen.insert(beside_exe.clone()) {
+            candidates.push(beside_exe);
         }
     }
     candidates
@@ -360,6 +404,20 @@ fn built_user_library_path_for_command(runtime: &EditorRuntime, command: &str) -
     )
 }
 
+fn prune_stale_staged_user_libraries(stage_dir: &Path, keep: &[&Path]) {
+    let Ok(entries) = fs::read_dir(stage_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || keep.iter().any(|kept| *kept == path) {
+            continue;
+        }
+        // Mapped copies stay locked on Windows; ignore delete failures.
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn stage_user_library_for_reload(built_path: &Path) -> Result<PathBuf, String> {
     if !built_path.is_file() {
         return Err(format!(
@@ -394,6 +452,42 @@ fn stage_user_library_for_reload(built_path: &Path) -> Result<PathBuf, String> {
         )
     })?;
     Ok(staged_path)
+}
+
+/// Stage the just-built User Library artifact and swap it into the running shell.
+///
+/// On Windows the mapped DLL cannot be overwritten, so this always copies to a unique
+/// path under `volt-user-hot/` before `load_from_file`.
+fn hot_reload_user_library_from_build(
+    runtime: &mut EditorRuntime,
+    command: &str,
+) -> Result<Vec<String>, String> {
+    let built_path = built_user_library_path_for_command(runtime, command).ok_or_else(|| {
+        "could not resolve build output path for the user library".to_owned()
+    })?;
+    let previous_staged = runtime
+        .services()
+        .get::<UserLibraryReloadState>()
+        .and_then(|state| state.last_staged_path.clone());
+    let staged_path = stage_user_library_for_reload(&built_path)?;
+    if let Some(parent) = staged_path.parent() {
+        let mut keep = vec![staged_path.as_path()];
+        if let Some(previous) = previous_staged.as_deref() {
+            keep.push(previous);
+        }
+        prune_stale_staged_user_libraries(parent, &keep);
+    }
+    let library = DynamicUserLibrary::load_from_file(&staged_path)?;
+    validate_runtime_user_library(library.as_ref())?;
+    if let Some(state) = runtime.services_mut().get_mut::<UserLibraryReloadState>() {
+        state.last_staged_path = Some(staged_path.clone());
+    }
+    let mut lines = replace_runtime_user_library(runtime, library)?;
+    lines.push(format!(
+        "Loaded runtime library from staged copy `{}`.",
+        staged_path.display()
+    ));
+    Ok(lines)
 }
 
 fn catch_unwind_silently<F, T>(operation: F) -> Result<T, String>
@@ -491,7 +585,7 @@ fn replace_runtime_user_library(
     picker::ensure_picker_keybindings(runtime).map_err(|error| error.to_string())?;
 
     Ok(vec![
-        "── ✓ User library reload requested ───────────────────────────────────".to_owned(),
+        "── ✓ User library hot-reloaded ───────────────────────────────────────".to_owned(),
         "Refreshed theme, autocomplete, hover, LSP, and syntax registries.".to_owned(),
         format!("Re-registered {loaded_packages} auto-loaded user packages."),
     ])

@@ -1286,6 +1286,7 @@ pub fn syntax_languages() -&gt; Vec&lt;LanguageConfiguration&gt; {
                             <tr><td><code>cargo build -p volt-user</code></td><td>Build the user library (debug)</td></tr>
                             <tr><td><code>cargo build -p volt</code></td><td>Build the editor binary (debug)</td></tr>
                             <tr><td><code>cargo build -p volt -p volt-user --release</code></td><td>Release build of both</td></tr>
+                            <tr><td><code>workspace.compile</code> (in released app)</td><td>Rebuild and hot-reload the shipped User Library</td></tr>
                             <tr><td><code>cargo xtask fmt</code></td><td>Format the workspace</td></tr>
                             <tr><td><code>cargo xtask check</code></td><td>Run cargo check</td></tr>
                             <tr><td><code>cargo xtask clippy</code></td><td>Run clippy (warnings &#8594; errors)</td></tr>
@@ -1293,6 +1294,19 @@ pub fn syntax_languages() -&gt; Vec&lt;LanguageConfiguration&gt; {
                             <tr><td><code>cargo xtask ci</code></td><td>Full CI validation</td></tr>
                         </tbody>
                     </table>
+
+                    <h3 class="reveal">Hot reload from a release install</h3>
+                    <p class="reveal">
+                        Open the released binary (for example
+                        <code>C:\tools\volt\release\volt.exe</code>). The default workspace is the
+                        shipped <code>user/</code> source tree beside the executable. Run
+                        <code>workspace.compile</code> &#8212; the prompt prefills
+                        <code>cargo build --release -p volt-user</code>. On success Volt copies the
+                        artifact to a unique path under
+                        <code>user/target/&lt;profile&gt;/volt-user-hot/</code>, swaps it into the
+                        running process, and shows a success notification. Staging avoids
+                        overwriting a mapped library (required on Windows).
+                    </p>
 
                     <h3 class="reveal">Running and Verifying</h3>
 <pre class="reveal"><code># Launch the SDL shell (interactive)

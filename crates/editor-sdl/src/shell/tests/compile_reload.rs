@@ -14,6 +14,19 @@ fn workspace_compile_prefills_with_detected_command_for_cargo_toml() -> Result<(
 }
 
 #[test]
+fn workspace_compile_prefills_release_rebuild_for_volt_user_tree() -> Result<(), String> {
+    assert_eq!(
+        prompt_prefill_for_marker(
+            "compile-prompt-volt-user",
+            "Cargo.toml",
+            "[package]\nname = \"volt-user\"\n",
+        )?,
+        "cargo build --release -p volt-user"
+    );
+    Ok(())
+}
+
+#[test]
 fn workspace_compile_prefills_with_detected_command_for_sln() -> Result<(), String> {
     assert_eq!(
         prompt_prefill_for_marker("compile-prompt-sln", "App.sln", "")?,

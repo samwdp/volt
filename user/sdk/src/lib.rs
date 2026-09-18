@@ -88,7 +88,7 @@ pub use abi::{
     AbiSectionAction, AbiSectionItem, AbiSectionTree, AbiShowParenConfig, AbiStatusEntry,
     AbiStatuslineContext, AbiStringPair, AbiTerminalConfig, AbiTerminalFeatureSpec, AbiTheme,
     AbiThemeOption, AbiThemeOptionEntry, AbiThemeToken, AbiWorkspaceDockSide, AbiWorkspaceRoot,
-    UserLibraryModule, UserLibraryModuleRef,
+    UserLibraryModule, UserLibraryModuleRef, load_user_library_module_from_path,
 };
 pub use icons::symbols;
 
@@ -1169,6 +1169,11 @@ pub struct PickerLayout {
     pub width_fraction: f32,
     /// Vertical fraction of the window (clamped by the shell to `0.15..=1.0`).
     pub height_fraction: f32,
+    /// Horizontal split position inside a preview picker (`0.0..=1.0`).
+    ///
+    /// `0.5` centers the divider. Smaller values move it left (narrower list);
+    /// larger values move it right (wider list).
+    pub split_fraction: f32,
 }
 
 impl Default for PickerLayout {
@@ -1176,6 +1181,7 @@ impl Default for PickerLayout {
         Self {
             width_fraction: 2.0 / 3.0,
             height_fraction: 3.0 / 5.0,
+            split_fraction: 0.5,
         }
     }
 }

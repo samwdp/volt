@@ -604,58 +604,50 @@ pub(super) fn refresh_pending_streamed_commands(
                         }
                     }
                     StreamedCommandExitAction::LeaveOpenAndMaybeReloadUserLibrary { command } => {
-                        if outcome.success && command_builds_user_library(&command) {
-                            let reload_lines =
-                                match built_user_library_path_for_command(runtime, &command) {
-                                    Some(built_path) => {
-                                        match stage_user_library_for_reload(&built_path) {
-                                            Ok(staged_path) => {
-                                                DynamicUserLibrary::load_from_file(&staged_path)
-                                                    .and_then(|library| {
-                                                        validate_runtime_user_library(
-                                                            library.as_ref(),
-                                                        )?;
-                                                        Ok(library)
-                                                    })
-                                                    .and_then(|library| {
-                                                        if let Some(state) = runtime
-                                                            .services_mut()
-                                                            .get_mut::<UserLibraryReloadState>(
-                                                        ) {
-                                                            state.last_staged_path =
-                                                                Some(staged_path.clone());
-                                                        }
-                                                        let mut lines =
-                                                            replace_runtime_user_library(
-                                                                runtime, library,
-                                                            )?;
-                                                        lines.push(format!(
-                                                        "Loaded runtime library from staged copy \
-                                                         `{}`.",
-                                                        staged_path.display()
-                                                    ));
-                                                        Ok(lines)
-                                                    })
-                                                    .unwrap_or_else(|error| {
-                                                        vec![format!(
-                                                            "── ✗ User library reload failed: \
-                                                             {error}"
-                                                        )]
-                                                    })
-                                            }
-                                            Err(error) => vec![format!(
-                                                "── ✗ User library staging failed: {error}"
-                                            )],
-                                        }
+                        if outcome.success
+                            && should_reload_user_library_after_compile(runtime, &command)
+                        {
+                            match hot_reload_user_library_from_build(runtime, &command) {
+                                Ok(reload_lines) => {
+                                    if let Ok(buf) = shell_buffer_mut(runtime, buffer_id) {
+                                        buf.append_output_lines(&reload_lines);
                                     }
-                                    None => vec![
-                                        "── ✗ User library reload failed: could not resolve \
-                                         build output path"
-                                            .to_owned(),
-                                    ],
-                                };
-                            if let Ok(buf) = shell_buffer_mut(runtime, buffer_id) {
-                                buf.append_output_lines(&reload_lines);
+                                    shell_ui_mut(runtime)?.apply_notification(
+                                        NotificationUpdate {
+                                            key: format!("user-library-reload:{buffer_id}"),
+                                            severity: NotificationSeverity::Success,
+                                            title: "User library reloaded".to_owned(),
+                                            body_lines: vec![
+                                                "Hot-reloaded the compiled user library."
+                                                    .to_owned(),
+                                            ],
+                                            progress: None,
+                                            active: false,
+                                            action: None,
+                                            workspace_id: None,
+                                        },
+                                        now,
+                                    );
+                                }
+                                Err(error) => {
+                                    let line = format!("── ✗ User library reload failed: {error}");
+                                    if let Ok(buf) = shell_buffer_mut(runtime, buffer_id) {
+                                        buf.append_output_lines(std::slice::from_ref(&line));
+                                    }
+                                    shell_ui_mut(runtime)?.apply_notification(
+                                        NotificationUpdate {
+                                            key: format!("user-library-reload:{buffer_id}"),
+                                            severity: NotificationSeverity::Error,
+                                            title: "User library reload failed".to_owned(),
+                                            body_lines: vec![error],
+                                            progress: None,
+                                            active: false,
+                                            action: None,
+                                            workspace_id: None,
+                                        },
+                                        now,
+                                    );
+                                }
                             }
                         }
                     }
@@ -958,8 +950,9 @@ fn drain_completed_output_lines(pending: &mut Vec<u8>) -> Vec<String> {
 
 /// Detect a build command from marker files at the top level of `dir`.
 ///
-/// Priority order: `Cargo.toml` → `cargo build`, `*.sln`/`*.csproj` →
-/// `dotnet build`, `package.json` → `npm run build`, `Makefile` → `make`.
+/// Priority order: `Cargo.toml` → cargo build (or the User Library release rebuild
+/// when the package is `volt-user`), `*.sln`/`*.csproj` → `dotnet build`,
+/// `package.json` → `npm run build`, `Makefile` → `make`.
 /// Returns an empty string if no marker is found. Detection is shallow (no
 /// recursion into sub-directories).
 pub(super) fn detect_build_command(dir: &std::path::Path) -> String {
@@ -974,7 +967,11 @@ pub(super) fn detect_build_command(dir: &std::path::Path) -> String {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name == "Cargo.toml" {
-            return "cargo build".to_owned();
+            return if cargo_manifest_package_name(dir).as_deref() == Some("volt-user") {
+                "cargo build --release -p volt-user".to_owned()
+            } else {
+                "cargo build".to_owned()
+            };
         }
         if name.ends_with(".sln") || name.ends_with(".csproj") {
             has_dotnet = true;
@@ -993,6 +990,34 @@ pub(super) fn detect_build_command(dir: &std::path::Path) -> String {
     } else {
         String::new()
     }
+}
+
+/// Read `[package].name` from `dir/Cargo.toml` when present.
+pub(super) fn cargo_manifest_package_name(dir: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("name") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let name = rest.trim().trim_matches('"').trim_matches('\'');
+        if !name.is_empty() {
+            return Some(name.to_owned());
+        }
+    }
+    None
 }
 
 fn push_streamed_command_update(

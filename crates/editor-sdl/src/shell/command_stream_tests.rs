@@ -50,8 +50,36 @@ impl Drop for TempDir {
 #[test]
 fn detects_cargo_toml() {
     let dir = TempDir::new("cargo");
-    fs::write(dir.path.join("Cargo.toml"), "").expect("write");
+    fs::write(dir.path.join("Cargo.toml"), "[package]\nname = \"demo\"\n").expect("write");
     assert_eq!(detect_build_command(&dir.path), "cargo build");
+}
+
+#[test]
+fn detects_volt_user_cargo_toml_as_release_rebuild() {
+    let dir = TempDir::new("volt-user");
+    fs::write(
+        dir.path.join("Cargo.toml"),
+        "[package]\nname = \"volt-user\"\n",
+    )
+    .expect("write");
+    assert_eq!(
+        detect_build_command(&dir.path),
+        "cargo build --release -p volt-user"
+    );
+}
+
+#[test]
+fn reads_cargo_manifest_package_name() {
+    let dir = TempDir::new("pkg-name");
+    fs::write(
+        dir.path.join("Cargo.toml"),
+        "[package]\nname = \"volt-user\"\nedition = \"2024\"\n",
+    )
+    .expect("write");
+    assert_eq!(
+        super::cargo_manifest_package_name(&dir.path).as_deref(),
+        Some("volt-user")
+    );
 }
 
 #[test]
@@ -91,7 +119,7 @@ fn empty_dir_returns_empty_string() {
 #[test]
 fn cargo_toml_wins_over_other_markers() {
     let dir = TempDir::new("priority");
-    fs::write(dir.path.join("Cargo.toml"), "").expect("write");
+    fs::write(dir.path.join("Cargo.toml"), "[package]\nname = \"demo\"\n").expect("write");
     fs::write(dir.path.join("package.json"), "{}").expect("write");
     fs::write(dir.path.join("Makefile"), "").expect("write");
     assert_eq!(detect_build_command(&dir.path), "cargo build");

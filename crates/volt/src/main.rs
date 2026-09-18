@@ -644,7 +644,7 @@ fn load_user_library(trace: &mut Option<StartupTrace>) -> Arc<dyn UserLibrary> {
             continue;
         }
         let load_path = stage_user_library_for_startup(&path);
-        match UserLibraryModuleRef::load_from_file(&load_path) {
+        match editor_plugin_api::load_user_library_module_from_path(&load_path) {
             Ok(module) => {
                 if let Some(trace) = trace.as_mut() {
                     trace.mark("user-library.load-dylib");

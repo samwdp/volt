@@ -128,6 +128,12 @@ cd /path/to/install/user    # e.g. C:\tools\volt2\release\user
 cargo build --release -p volt-user
 ```
 
+From inside the released app the default workspace is that same `user/` tree. Run
+`workspace.compile` (prompt prefills `cargo build --release -p volt-user`); on success Volt
+stages a unique copy under `user/target/<profile>/volt-user-hot/`, hot-reloads it into the
+running process, and shows a success notification. Staging avoids overwriting the mapped
+library (required on Windows where a loaded DLL stays locked).
+
 The staged tree writes `.cargo/config.toml` so Cargo always uses `user/target/`, even when a parent
 `CARGO_TARGET_DIR` points at the install profile dir. That keeps a live `user.dll` next to `volt`
 from being truncated to zero bytes while Volt still has it mapped.

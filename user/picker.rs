@@ -46,11 +46,17 @@ pub const WIDTH_FRACTION: f32 = 0.8;
 /// Fraction of the window height occupied by the picker card.
 pub const HEIGHT_FRACTION: f32 = 0.8;
 
+/// Horizontal split position inside a preview picker (`0.0..=1.0`).
+///
+/// `0.5` centers the divider. `0.3` moves it left; `0.7` moves it right.
+pub const SPLIT_FRACTION: f32 = 0.5;
+
 /// Returns the picker card size as window fractions.
 pub fn layout() -> editor_plugin_api::PickerLayout {
     editor_plugin_api::PickerLayout {
         width_fraction: width_fraction(),
         height_fraction: height_fraction(),
+        split_fraction: split_fraction(),
     }
 }
 
@@ -62,6 +68,11 @@ pub fn width_fraction() -> f32 {
 /// Returns [`HEIGHT_FRACTION`].
 pub fn height_fraction() -> f32 {
     HEIGHT_FRACTION
+}
+
+/// Returns [`SPLIT_FRACTION`].
+pub fn split_fraction() -> f32 {
+    SPLIT_FRACTION
 }
 
 /// Returns the metadata for the generic picker UI package.
@@ -560,9 +571,11 @@ mod tests {
     fn layout_exposes_window_fractions() {
         assert_eq!(width_fraction(), WIDTH_FRACTION);
         assert_eq!(height_fraction(), HEIGHT_FRACTION);
+        assert_eq!(split_fraction(), SPLIT_FRACTION);
         let layout = layout();
         assert_eq!(layout.width_fraction, WIDTH_FRACTION);
         assert_eq!(layout.height_fraction, HEIGHT_FRACTION);
+        assert_eq!(layout.split_fraction, SPLIT_FRACTION);
     }
 
     #[test]

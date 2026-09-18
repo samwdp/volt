@@ -24,8 +24,11 @@ struct DynamicUserLibrary {
 
 impl DynamicUserLibrary {
     fn load_from_file(path: &Path) -> Result<Arc<dyn UserLibrary>, String> {
-        let module =
-            UserLibraryModuleRef::load_from_file(path).map_err(|error| error.to_string())?;
+        // Do not use UserLibraryModuleRef::load_from_file: it sticks to the first
+        // mapped DLL for the whole process, so hot reload would toast success while
+        // still executing the startup library.
+        let module = editor_plugin_api::load_user_library_module_from_path(path)
+            .map_err(|error| error.to_string())?;
         let icon_symbols = module.icon_symbols()()
             .into_iter()
             .map(editor_icons::IconFontSymbol::from)

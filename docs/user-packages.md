@@ -921,11 +921,20 @@ function for your language's LSP server.
 | `cargo build -p volt-user`     | Build the user library (debug)                |
 | `cargo build -p volt`          | Build the editor binary (debug)               |
 | `cargo build -p volt -p volt-user --release` | Release build of both         |
+| `workspace.compile` (released app) | Rebuild and hot-reload the shipped User Library |
 | `cargo xtask fmt`              | Format the workspace                          |
 | `cargo xtask check`            | Run cargo check                               |
 | `cargo xtask clippy`           | Run clippy (warnings → errors)                |
 | `cargo xtask test`             | Run all workspace tests                       |
 | `cargo xtask ci`               | Full CI validation                            |
+
+### Hot reload from a release install
+
+Open the released binary (for example `C:\tools\volt\release\volt.exe`). The default workspace is
+the shipped `user/` source tree beside the executable. Run `workspace.compile` — the prompt
+prefills `cargo build --release -p volt-user`. On success Volt copies the artifact to a unique
+path under `user/target/<profile>/volt-user-hot/`, swaps it into the running process, and shows a
+success notification. Staging avoids overwriting a mapped library (required on Windows).
 
 ### Running and Verifying
 

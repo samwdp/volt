@@ -320,6 +320,29 @@
                         </div>
 
                         <div class="cl-section">
+                            <p class="cl-section-label">Added</p>
+                            <ul>
+                                <li>
+                                    <strong>In-editor User Library hot reload.</strong>
+                                    From a released install, the default workspace is the shipped
+                                    <code>user/</code> tree. <code>workspace.compile</code> prefills
+                                    <code>cargo build --release -p volt-user</code>; on success Volt
+                                    stages a unique copy (Windows-safe while the DLL stays mapped),
+                                    hot-reloads it, and shows a success notification.
+                                    <span class="cl-tag cl-tag-new">new</span>
+                                </li>
+                                <li>
+                                    <strong>Hot reload actually maps the new cdylib.</strong>
+                                    abi_stable <code>RootModule::load_from_file</code> sticks to the
+                                    first loaded module for the process; Volt now loads each staged
+                                    copy through <code>load_user_library_module_from_path</code> so
+                                    edits like picker height take effect without restart.
+                                    <span class="cl-tag cl-tag-fix">fix</span>
+                                </li>
+                            </ul>
+                        </div>
+
+                        <div class="cl-section">
                             <p class="cl-section-label">Performance</p>
                             <ul>
                                 <li>
