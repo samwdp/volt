@@ -145,6 +145,7 @@ const HOOK_BROWSER_OPEN_POPUP: &str = browser_hooks::OPEN_POPUP;
 const HOOK_BROWSER_URL: &str = browser_hooks::URL;
 const HOOK_BROWSER_FOCUS_INPUT: &str = browser_hooks::FOCUS_INPUT;
 const HOOK_BROWSER_SUBMIT: &str = browser_hooks::SUBMIT;
+const HOOK_HELP_OPEN: &str = help_hooks::OPEN;
 const HOOK_TERMINAL_OPEN_POPUP: &str = terminal_hooks::OPEN_POPUP;
 const HOOK_IMAGE_ZOOM_IN: &str = image_hooks::ZOOM_IN;
 const HOOK_IMAGE_ZOOM_OUT: &str = image_hooks::ZOOM_OUT;

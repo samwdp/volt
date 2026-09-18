@@ -16,7 +16,7 @@ This directory is Volt's compiled customization layer. The `volt-user` crate bui
 
 Most user-facing changes happen in this folder:
 
-- edit a Rust module such as `workspace.rs`, `picker.rs`, `vim.rs`, or `statusline.rs` when you want to change behavior
+- edit a Rust module such as `workspace.rs`, `picker.rs`, `vim.rs`, `help.rs`, or `statusline.rs` when you want to change behavior
 - edit `config.yaml` or a file under `config\` when you want to change runtime-loaded settings without recompiling
 - edit `themes\global.toml` when you want to change shared options such as font, font size, scrolloff, or language defaults
 - edit a named theme file under `themes\` when you want to change colors and token mappings

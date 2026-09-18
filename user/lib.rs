@@ -39,6 +39,8 @@ pub mod db;
 pub mod git;
 /// Git fringe configuration.
 pub mod gitfringe;
+/// Docs help prompt and browser search split.
+pub mod help;
 /// Cursor-anchored hover commands and provider ordering.
 pub mod hover;
 /// Bundled icon-font symbols and metadata (backed by editor-icons).
@@ -129,6 +131,7 @@ pub fn packages() -> Vec<PluginPackage> {
         browser::package(),
         calculator::package(),
         compile::package(),
+        help::package(),
         image::package(),
         interactive::package(),
         issues::package(),

@@ -197,6 +197,39 @@ pub mod browser_hooks {
     pub const SUBMIT: &str = "ui.browser.submit";
 }
 
+/// Hook name constants and docs URL helpers for the help package.
+pub mod help_hooks {
+    /// Opens the help question prompt, then a docs search browser split.
+    pub const OPEN: &str = "ui.help.open";
+    /// Volt docs search endpoint; query text goes in the `q` parameter.
+    pub const DOCS_SEARCH_BASE: &str = "https://samwdp.github.io/volt-docs/search";
+
+    /// Builds `DOCS_SEARCH_BASE?q=...` with percent-encoded query text.
+    pub fn docs_search_url(question: &str) -> String {
+        format!(
+            "{DOCS_SEARCH_BASE}?q={}",
+            percent_encode_query(question.trim())
+        )
+    }
+
+    fn percent_encode_query(input: &str) -> String {
+        let mut encoded = String::with_capacity(input.len());
+        for byte in input.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(char::from(byte));
+                }
+                b' ' => encoded.push_str("%20"),
+                _ => {
+                    encoded.push('%');
+                    encoded.push_str(&format!("{byte:02X}"));
+                }
+            }
+        }
+        encoded
+    }
+}
+
 /// Hook name constants for generic input surfaces.
 pub mod input_hooks {
     pub const SUBMIT: &str = "ui.input.submit";

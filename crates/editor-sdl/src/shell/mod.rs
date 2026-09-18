@@ -158,8 +158,8 @@ use editor_plugin_api::{
     },
     autocomplete_hooks, browser_hooks, buffer_kinds, dap_hooks, db_hooks, decode_modeline,
     flatten_modeline_text, flatten_modeline_to_spans, git_actions, git_hooks, git_sections,
-    hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol, pdf_hooks,
-    plugin_hooks, resolve_git_dirs, terminal_hooks,
+    help_hooks, hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol,
+    pdf_hooks, plugin_hooks, resolve_git_dirs, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -254,6 +254,7 @@ include!("compile.rs");
 include!("refresh.rs");
 include!("workspace.rs");
 include!("workspace_clone.rs");
+include!("help.rs");
 include!("syntax_refresh.rs");
 include!("files.rs");
 include!("input_chords.rs");

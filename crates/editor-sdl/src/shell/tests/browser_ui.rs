@@ -1083,3 +1083,38 @@ fn browser_devtools_shortcut_requested_rejects_other_modifiers() {
         Mod::NOMOD
     ));
 }
+
+#[test]
+fn help_command_prompts_then_opens_docs_search_in_browser_split() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    execute_shell_command(&mut state, "help")?;
+    assert!(
+        shell_ui(&state.runtime)?.input_prompt_visible(),
+        "help must open InputPromptOverlay"
+    );
+    assert_eq!(
+        shell_ui(&state.runtime)?
+            .input_prompt()
+            .map(|prompt| prompt.id.as_str()),
+        Some("help")
+    );
+
+    confirm_input_prompt(&mut state, "split pane")?;
+
+    assert!(!shell_ui(&state.runtime)?.input_prompt_visible());
+    let ui = shell_ui(&state.runtime)?;
+    assert_eq!(ui.pane_count(), 2);
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let buffer = ui
+        .buffer(buffer_id)
+        .ok_or_else(|| "help browser split buffer missing".to_owned())?;
+    assert!(buffer_is_browser(&buffer.kind));
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?
+            .browser_state
+            .as_ref()
+            .and_then(|state| state.requested_url.as_deref()),
+        Some("https://samwdp.github.io/volt-docs/search?q=split%20pane")
+    );
+    Ok(())
+}

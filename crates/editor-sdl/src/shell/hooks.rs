@@ -527,6 +527,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_HELP_OPEN,
+        "Prompts for a docs question and opens the search page in a browser split.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_BROWSER_OPEN,
         "Opens the browser buffer in a split pane.",
     )?;
@@ -2033,6 +2038,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 Ok(())
             },
         )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_HELP_OPEN, "shell.help-open", |_, runtime| {
+            open_help_prompt(runtime)
+        })
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_BROWSER_OPEN, "shell.browser-open", |_, runtime| {
