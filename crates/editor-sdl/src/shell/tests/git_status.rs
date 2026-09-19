@@ -717,6 +717,45 @@ fn git_status_shift_v_visual_x_deletes_selected_items() -> Result<(), String> {
 }
 
 #[test]
+fn git_status_commit_reuses_active_status_snapshot() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-status-commit-reuse")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+
+    let mut state = state_with_user_library()?;
+    let status_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let staged_before = shell_buffer(&state.runtime, status_id)?
+        .git_snapshot()
+        .map(|snapshot| {
+            snapshot
+                .staged()
+                .iter()
+                .map(|entry| entry.path().to_owned())
+                .collect::<BTreeSet<_>>()
+        })
+        .ok_or_else(|| "git snapshot missing before commit".to_owned())?;
+    assert_eq!(staged_before, BTreeSet::from(["alpha.txt".to_owned()]));
+
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+
+    let commit_id = active_shell_buffer_id(&state.runtime)?;
+    let commit_buffer = shell_buffer(&state.runtime, commit_id)?;
+    assert!(matches!(
+        &commit_buffer.kind,
+        BufferKind::Plugin(kind) if kind == GIT_COMMIT_KIND
+    ));
+    let commit_text = commit_buffer.text.text();
+    assert!(
+        commit_text.contains("alpha.txt"),
+        "commit template should list staged path from reused snapshot: {commit_text}"
+    );
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String> {
     let repo = init_git_repo("git-status-fresh-repo")?;
     let branch = run_git_in_dir(&repo, &["symbolic-ref", "--short", "HEAD"])?

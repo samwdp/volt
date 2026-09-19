@@ -34,7 +34,12 @@ pub(crate) fn open_git_commit_buffer(runtime: &mut EditorRuntime) -> Result<(), 
             .map_err(|error| error.to_string())?
     };
     let root = git_root(runtime)?;
-    let snapshot = git_status_snapshot(runtime, &root)?;
+    // Commit opens from the status buffer; reuse its snapshot instead of
+    // blocking the UI on another full multi-process `git status` rebuild.
+    let snapshot = match active_git_status_snapshot(runtime) {
+        Some(snapshot) => snapshot,
+        None => git_status_snapshot(runtime, &root)?,
+    };
     let user_library = shell_user_library(runtime);
     let template = user_library.git_commit_template(&snapshot);
     let buffer = runtime

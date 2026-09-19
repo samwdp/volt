@@ -88,16 +88,6 @@ pub(crate) fn git_read_log_oneline_optional(
         .unwrap_or_default()
 }
 
-pub(crate) fn git_command_output_owned(
-    runtime: &mut EditorRuntime,
-    root: &Path,
-    label: &str,
-    args: &[String],
-) -> Result<String, String> {
-    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    git_command_output(runtime, root, label, &refs)
-}
-
 pub(crate) fn git_read_command_output_allow_exit_codes(
     root: &Path,
     label: &str,
@@ -195,62 +185,114 @@ pub(crate) fn invalidate_git_identity_for_active_workspace(runtime: &mut EditorR
 }
 
 pub(crate) fn git_status_snapshot(
-    runtime: &mut EditorRuntime,
+    _runtime: &mut EditorRuntime,
     root: &Path,
 ) -> Result<GitStatusSnapshot, String> {
-    let status_output = git_read_command_output(
-        root,
-        "status --short --branch",
-        &["status", "--short", "--branch"],
-    )?;
-    let status = parse_status(&status_output).map_err(|error| error.to_string())?;
+    let root = root.to_path_buf();
+    let log_limit = GIT_LOG_LIMIT.to_string();
 
-    let recent_output = git_read_command_output_optional(
-        root,
-        "log --oneline",
-        &["log", "-n", &GIT_LOG_LIMIT.to_string(), "--oneline"],
-    )
-    .unwrap_or_default();
+    // Independent reads run in parallel. On Windows each git spawn is expensive;
+    // sequential snapshots were multi-second on the UI thread.
+    let status_root = root.clone();
+    let recent_root = root.clone();
+    let upstream_root = root.clone();
+    let push_root = root.clone();
+    let tag_root = root.clone();
+    let stash_root = root.clone();
+    let git_dir_root = root.clone();
+
+    let (status_output, recent_output, upstream_opt, push_opt, tag, stash_output, git_dir) =
+        std::thread::scope(|scope| {
+            let status_h = scope.spawn(|| {
+                git_read_command_output(
+                    &status_root,
+                    "status --short --branch",
+                    &["status", "--short", "--branch"],
+                )
+            });
+            let recent_h = scope.spawn(|| {
+                git_read_command_output_optional(
+                    &recent_root,
+                    "log --oneline",
+                    &["log", "-n", &log_limit, "--oneline"],
+                )
+                .unwrap_or_default()
+            });
+            let upstream_h = scope.spawn(|| {
+                git_read_command_output_optional(
+                    &upstream_root,
+                    "rev-parse --abbrev-ref @{upstream}",
+                    &["rev-parse", "--abbrev-ref", "@{upstream}"],
+                )
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+            });
+            let push_h = scope.spawn(|| {
+                git_read_command_output_optional(
+                    &push_root,
+                    "rev-parse --abbrev-ref @{push}",
+                    &["rev-parse", "--abbrev-ref", "@{push}"],
+                )
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+            });
+            let tag_h = scope.spawn(|| git_head_tag(&tag_root));
+            let stash_h = scope.spawn(|| {
+                git_read_command_output_optional(&stash_root, "stash list", &["stash", "list"])
+                    .unwrap_or_default()
+            });
+            let git_dir_h = scope.spawn(|| git_dir_path_at(&git_dir_root));
+
+            (
+                status_h
+                    .join()
+                    .unwrap_or_else(|_| Err("status thread panicked".to_owned())),
+                recent_h.join().unwrap_or_else(|_| String::new()),
+                upstream_h.join().unwrap_or(None),
+                push_h.join().unwrap_or(None),
+                tag_h.join().unwrap_or(None),
+                stash_h.join().unwrap_or_else(|_| String::new()),
+                git_dir_h.join().unwrap_or(None),
+            )
+        });
+
+    let status_output = status_output?;
+    let status = parse_status(&status_output).map_err(|error| error.to_string())?;
     let recent = parse_log_oneline(&recent_output);
     let head = recent.first().cloned();
     let head_exists = head.is_some();
-
-    let upstream = git_read_command_output_optional(
-        root,
-        "rev-parse --abbrev-ref @{upstream}",
-        &["rev-parse", "--abbrev-ref", "@{upstream}"],
-    )
-    .map(|value| value.trim().to_owned())
-    .filter(|value| !value.is_empty())
-    .or_else(|| status_output_upstream(&status_output));
-    let push_remote = git_read_command_output_optional(
-        root,
-        "rev-parse --abbrev-ref @{push}",
-        &["rev-parse", "--abbrev-ref", "@{push}"],
-    )
-    .map(|value| value.trim().to_owned())
-    .filter(|value| !value.is_empty())
-    .or_else(|| upstream.clone());
-    let tag = git_head_tag(root);
-
-    let stash_output = git_read_command_output_optional(root, "stash list", &["stash", "list"])
-        .unwrap_or_default();
+    let upstream = upstream_opt.or_else(|| status_output_upstream(&status_output));
+    let push_remote = push_opt.or_else(|| upstream.clone());
     let stashes = parse_stash_list(&stash_output);
 
-    let unpulled = if head_exists && upstream.is_some() {
-        git_read_log_oneline_optional(root, "log --oneline ..@{upstream}", "..@{upstream}")
+    let (unpulled, unpushed) = if head_exists && upstream.is_some() {
+        let unpulled_root = root.clone();
+        let unpushed_root = root.clone();
+        std::thread::scope(|scope| {
+            let unpulled_h = scope.spawn(|| {
+                git_read_log_oneline_optional(
+                    &unpulled_root,
+                    "log --oneline ..@{upstream}",
+                    "..@{upstream}",
+                )
+            });
+            let unpushed_h = scope.spawn(|| {
+                git_read_log_oneline_optional(
+                    &unpushed_root,
+                    "log --oneline @{upstream}..",
+                    "@{upstream}..",
+                )
+            });
+            (
+                unpulled_h.join().unwrap_or_default(),
+                unpushed_h.join().unwrap_or_default(),
+            )
+        })
     } else {
-        Vec::new()
-    };
-    let unpushed = if head_exists && upstream.is_some() {
-        git_read_log_oneline_optional(root, "log --oneline @{upstream}..", "@{upstream}..")
-    } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
-    let in_progress = git_dir_path(runtime, root)
-        .map(detect_in_progress)
-        .unwrap_or_default();
+    let in_progress = git_dir.map(detect_in_progress).unwrap_or_default();
 
     Ok(GitStatusSnapshot::default()
         .with_status(status)

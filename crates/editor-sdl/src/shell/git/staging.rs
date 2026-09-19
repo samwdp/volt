@@ -10,15 +10,16 @@ pub(crate) fn stage_git_files(runtime: &mut EditorRuntime, paths: &[String]) -> 
     let root = git_root(runtime)?;
     let mut args = vec!["add".to_owned(), "--".to_owned()];
     args.extend(paths.iter().cloned());
-    git_command_output_owned(runtime, &root, "add", &args)?;
-    refresh_git_status_if_active(runtime)?;
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_read_command_output(&root, "add", &arg_refs)?;
+    refresh_git_status_files_if_active(runtime)?;
     Ok(())
 }
 
 pub(crate) fn stage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "add -A", &["add", "-A"])?;
-    refresh_git_status_if_active(runtime)?;
+    git_read_command_output(&root, "add -A", &["add", "-A"])?;
+    refresh_git_status_files_if_active(runtime)?;
     Ok(())
 }
 
@@ -32,15 +33,16 @@ pub(crate) fn unstage_git_files(
     let root = git_root(runtime)?;
     let mut args = vec!["reset".to_owned(), "-q".to_owned(), "--".to_owned()];
     args.extend(paths.iter().cloned());
-    git_command_output_owned(runtime, &root, "reset --", &args)?;
-    refresh_git_status_if_active(runtime)?;
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_read_command_output(&root, "reset --", &arg_refs)?;
+    refresh_git_status_files_if_active(runtime)?;
     Ok(())
 }
 
 pub(crate) fn unstage_git_all(runtime: &mut EditorRuntime) -> Result<(), String> {
     let root = git_root(runtime)?;
-    git_command_output(runtime, &root, "reset", &["reset", "-q"])?;
-    refresh_git_status_if_active(runtime)?;
+    git_read_command_output(&root, "reset", &["reset", "-q"])?;
+    refresh_git_status_files_if_active(runtime)?;
     Ok(())
 }
 

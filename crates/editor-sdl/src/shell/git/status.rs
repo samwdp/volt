@@ -603,12 +603,73 @@ impl GitPrefixState {
     }
 }
 
+pub(crate) fn active_git_status_snapshot(runtime: &EditorRuntime) -> Option<GitStatusSnapshot> {
+    let buffer_id = active_shell_buffer_id(runtime).ok()?;
+    let buffer = shell_buffer(runtime, buffer_id).ok()?;
+    if !buffer_is_git_status(&buffer.kind) {
+        return None;
+    }
+    buffer.git_snapshot().cloned()
+}
+
 pub(crate) fn refresh_git_status_if_active(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     if !buffer_is_git_status(&shell_buffer(runtime, buffer_id)?.kind) {
         return Ok(());
     }
     refresh_git_status_buffer(runtime, buffer_id)
+}
+
+/// After stage/unstage, only re-read porcelain status and merge into the
+/// existing snapshot. Avoids re-running log/stash/rev-parse on every `s`.
+pub(crate) fn refresh_git_status_files_if_active(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    if !buffer_is_git_status(&shell_buffer(runtime, buffer_id)?.kind) {
+        return Ok(());
+    }
+    refresh_git_status_files_for_buffer(runtime, buffer_id)
+}
+
+pub(crate) fn refresh_git_status_files_for_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let root = match git_root(runtime) {
+        Ok(root) => root,
+        Err(error) => {
+            set_git_status_error(runtime, buffer_id, &error)?;
+            return Err(error);
+        }
+    };
+    let existing = shell_buffer(runtime, buffer_id)?.git_snapshot().cloned();
+    let Some(existing) = existing else {
+        return refresh_git_status_buffer_for_root(runtime, buffer_id, &root, Instant::now());
+    };
+    let status_output = match git_read_command_output(
+        &root,
+        "status --short --branch",
+        &["status", "--short", "--branch"],
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            set_git_status_error(runtime, buffer_id, &error)?;
+            return Err(error);
+        }
+    };
+    let status = match parse_status(&status_output) {
+        Ok(status) => status,
+        Err(error) => {
+            let message = error.to_string();
+            set_git_status_error(runtime, buffer_id, &message)?;
+            return Err(message);
+        }
+    };
+    let snapshot = existing.with_status(status);
+    apply_git_status_snapshot(runtime, buffer_id, snapshot)?;
+    shell_buffer_mut(runtime, buffer_id)?.mark_git_status_refreshed(&root, Instant::now());
+    Ok(())
 }
 
 pub(crate) fn refresh_git_status_if_active_if_due(
