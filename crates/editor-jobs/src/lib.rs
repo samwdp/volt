@@ -9,7 +9,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         mpsc::{self, Receiver},
     },
     thread,
@@ -152,6 +152,167 @@ pub fn resolve_command_path(
     None
 }
 
+/// Upper bound for the `PATH` handed to `npm` on Windows.
+///
+/// `cmd.exe` stops resolving commands once `PATH` is longer than 8191 characters,
+/// including entries near the front. npm prepends `node_modules/.bin` directories
+/// before lifecycle scripts, so the value passed to `npm.cmd` has to stay well
+/// under that limit or `core-js` postinstall reports `'node' is not recognized`.
+const WINDOWS_NPM_PATH_BUDGET: usize = 2_500;
+
+/// Puts `node`'s directory on `PATH` when `program` is an absolute npm/node shim.
+///
+/// Windows `npm.cmd` launches `%~dp0node.exe` by full path, then lifecycle scripts
+/// call bare `node` through `cmd.exe`. The directory that contains that `node.exe`
+/// has to lead `PATH`. npm launches also get a short `PATH`: a merged machine and
+/// fnm path is long enough that cmd can no longer find `node` after npm adds
+/// script directories.
+pub fn ensure_sibling_node_on_path(
+    program: &str,
+    mut env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let program_path = Path::new(program);
+    if !program_path.is_absolute() {
+        return env;
+    }
+    let Some(node_dir) = program_path.parent() else {
+        return env;
+    };
+    let node_file = if cfg!(windows) {
+        node_dir.join("node.exe")
+    } else {
+        node_dir.join("node")
+    };
+    if !node_file.is_file() {
+        return env;
+    }
+    let node_dir = node_dir.to_string_lossy().into_owned();
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let existing = joined_path_value(&env, separator);
+    let cap_path = npm_cli_program(program_path);
+    let merged = if cap_path {
+        bounded_path_with_node_dir(&node_dir, &existing, separator)
+    } else {
+        prepend_path_entry(&node_dir, &existing, separator)
+    };
+    if cap_path {
+        env.retain(|(key, _)| !path_key_matches(key));
+        env.push(("PATH".to_owned(), merged));
+    } else if let Some(index) = env.iter().position(|(key, _)| path_key_matches(key)) {
+        env[index].1 = merged;
+    } else {
+        env.push(("PATH".to_owned(), merged));
+    }
+    env
+}
+
+fn npm_cli_program(program: &Path) -> bool {
+    let Some(stem) = program.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    stem.eq_ignore_ascii_case("npm") || stem.eq_ignore_ascii_case("npx")
+}
+
+fn joined_path_value(env: &[(String, String)], separator: char) -> String {
+    env.iter()
+        .filter(|(key, _)| path_key_matches(key))
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(&separator.to_string())
+}
+
+fn prepend_path_entry(node_dir: &str, existing: &str, separator: char) -> String {
+    let mut entries = Vec::new();
+    push_unique_path(&mut entries, node_dir);
+    for part in split_path_entries(existing, separator) {
+        push_unique_path(&mut entries, &part);
+    }
+    join_path_entries(&entries, separator)
+}
+
+fn bounded_path_with_node_dir(node_dir: &str, existing: &str, separator: char) -> String {
+    let mut entries = Vec::new();
+    push_unique_path(&mut entries, node_dir);
+    #[cfg(windows)]
+    {
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+        push_unique_path(&mut entries, &format!(r"{system_root}\System32"));
+        push_unique_path(&mut entries, &system_root);
+        for part in split_path_entries(existing, separator) {
+            if windows_path_entry_is_git(&part) {
+                push_unique_path(&mut entries, &part);
+            }
+        }
+    }
+    for part in split_path_entries(existing, separator) {
+        if path_entries_len(&entries, separator) >= windows_npm_path_budget() {
+            break;
+        }
+        push_unique_path(&mut entries, &part);
+        if path_entries_len(&entries, separator) > windows_npm_path_budget() {
+            entries.pop();
+            break;
+        }
+    }
+    join_path_entries(&entries, separator)
+}
+
+fn windows_npm_path_budget() -> usize {
+    if cfg!(windows) {
+        WINDOWS_NPM_PATH_BUDGET
+    } else {
+        usize::MAX
+    }
+}
+
+fn split_path_entries(existing: &str, separator: char) -> Vec<String> {
+    existing
+        .split(separator)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn push_unique_path(entries: &mut Vec<String>, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    let already = if cfg!(windows) {
+        entries.iter().any(|entry| entry.eq_ignore_ascii_case(part))
+    } else {
+        entries.iter().any(|entry| entry == part)
+    };
+    if !already {
+        entries.push(part.to_owned());
+    }
+}
+
+fn path_entries_len(entries: &[String], separator: char) -> usize {
+    entries.iter().map(String::len).sum::<usize>()
+        + entries.len().saturating_sub(1) * separator.len_utf8()
+}
+
+fn join_path_entries(entries: &[String], separator: char) -> String {
+    let separator = if separator == ';' { ";" } else { ":" };
+    entries.join(separator)
+}
+
+#[cfg(windows)]
+fn windows_path_entry_is_git(part: &str) -> bool {
+    let lower = part.to_ascii_lowercase();
+    lower.ends_with(r"\git\cmd") || lower.ends_with(r"\git\bin")
+}
+
+fn path_key_matches(key: &str) -> bool {
+    if cfg!(windows) {
+        key.eq_ignore_ascii_case("PATH")
+    } else {
+        key == "PATH"
+    }
+}
+
 /// Wraps a command with Volt's parent-death supervisor when the target program can be resolved.
 pub fn supervised_command_if_resolved(
     program: &str,
@@ -171,23 +332,29 @@ pub fn supervised_command_if_resolved(
 /// GUI-launched hosts often lack a live Node shim on `PATH`. Tree-sitter generate,
 /// npm, and similar tools need that shim even when the parent process never loaded a
 /// shell profile. Non-Windows platforms return `env` unchanged.
+///
+/// On Windows this also merges Machine+User `Path` into the env list before probing
+/// fnm/nvm. Cursor/shortcut launches often omit User entries such as WinGet Links,
+/// so bare `fnm` lookup against process PATH alone misses a working install.
 pub fn enrich_env_with_node_manager(
     cwd: Option<&Path>,
     env: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
     #[cfg(windows)]
     {
+        let env = with_windows_persistent_path(env);
         if let Some(runtime_env) =
             windows_fnm_environment(cwd, &env).or_else(|| windows_nvm_environment(cwd, &env))
         {
             return merge_windows_explicit_and_runtime_env(&env, &runtime_env);
         }
+        env
     }
     #[cfg(not(windows))]
     {
         let _ = cwd;
+        env
     }
-    env
 }
 
 /// Wraps a command with Volt's parent-death supervisor when the runtime advertises one.
@@ -815,6 +982,7 @@ fn build_job_launch_spec(
     #[cfg(not(windows))]
     let resolved_program =
         resolve_command_path(program, &env_pairs, None).unwrap_or_else(|| program.to_owned());
+    let env_pairs = ensure_sibling_node_on_path(&resolved_program, env_pairs);
     let mut launch_spec = ProcessLaunchSpec::new(resolved_program, spec.args().iter().cloned())
         .with_mode(ProcessSupervisionMode::Background)
         .with_stdio(ProcessLaunchStdio::Piped);
@@ -855,11 +1023,130 @@ fn windows_should_retry_spawn_error(error: &std::io::Error) -> bool {
 }
 
 #[cfg(windows)]
+fn with_windows_persistent_path(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let Some(persistent) = windows_persistent_path() else {
+        return env;
+    };
+    let current = explicit_windows_env_value(&env, "PATH")
+        .cloned()
+        .or_else(|| env::var("PATH").ok())
+        .unwrap_or_default();
+    let merged = merge_windows_path_values(&persistent, &current);
+    if let Some((_, value)) = env
+        .iter_mut()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+    {
+        *value = merged;
+    } else {
+        env.push(("PATH".to_owned(), merged));
+    }
+    env
+}
+
+#[cfg(windows)]
+fn merge_windows_path_values(preferred: &str, existing: &str) -> String {
+    let mut entries = Vec::new();
+    for part in preferred
+        .split(';')
+        .chain(existing.split(';'))
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if !entries
+            .iter()
+            .any(|entry: &String| entry.eq_ignore_ascii_case(part))
+        {
+            entries.push(part.to_owned());
+        }
+    }
+    entries.join(";")
+}
+
+#[cfg(windows)]
+fn windows_persistent_path() -> Option<String> {
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    CACHED.get_or_init(windows_persistent_path_uncached).clone()
+}
+
+#[cfg(windows)]
+fn windows_persistent_path_uncached() -> Option<String> {
+    let system_root = env::var_os("SystemRoot")
+        .or_else(|| env::var_os("WINDIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let powershell = system_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if !powershell.is_file() {
+        return None;
+    }
+    let script = concat!(
+        "$machine = [Environment]::GetEnvironmentVariable('Path','Machine');",
+        "$user = [Environment]::GetEnvironmentVariable('Path','User');",
+        "$parts = @();",
+        "if (-not [string]::IsNullOrEmpty($machine)) { $parts += $machine };",
+        "if (-not [string]::IsNullOrEmpty($user)) { $parts += $user };",
+        "[Environment]::ExpandEnvironmentVariables(($parts -join ';'))"
+    );
+    let mut command = Command::new(powershell);
+    configure_background_command(&mut command);
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let output = command.output().ok()?;
+    output.status.success().then_some(())?;
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!path.is_empty()).then_some(path)
+}
+
+#[cfg(windows)]
+fn resolve_windows_fnm_program(env: &[(String, String)]) -> Option<String> {
+    if let Some(path) = resolve_command_path("fnm", env, None) {
+        return Some(path);
+    }
+    windows_fnm_well_known_candidates()
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn windows_fnm_well_known_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local) = env::var_os("LOCALAPPDATA") {
+        let local = PathBuf::from(local);
+        candidates.push(local.join(r"Microsoft\WinGet\Links\fnm.exe"));
+        candidates.push(local.join(r"fnm\fnm.exe"));
+    }
+    if let Some(home) = env::var_os("USERPROFILE") {
+        let home = PathBuf::from(home);
+        candidates.push(home.join(r"scoop\shims\fnm.exe"));
+        candidates.push(home.join(r".local\bin\fnm.exe"));
+    }
+    candidates.push(PathBuf::from(r"C:\ProgramData\chocolatey\bin\fnm.exe"));
+    candidates
+}
+
+#[cfg(windows)]
 fn windows_fnm_environment(
     cwd: Option<&std::path::Path>,
     env: &[(String, String)],
 ) -> Option<Vec<(String, String)>> {
-    let mut command = Command::new("fnm");
+    // Resolve an absolute fnm path first. CreateProcess looks up bare names against
+    // the parent process PATH, not the child env we attach — so GUI hosts that omit
+    // WinGet Links never reach `fnm env` unless we pass a full path.
+    let program = resolve_windows_fnm_program(env)?;
+    let mut command = Command::new(&program);
     configure_background_command(&mut command);
     command
         .args(["env", "--shell", "cmd"])

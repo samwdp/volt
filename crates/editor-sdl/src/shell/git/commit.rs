@@ -98,18 +98,16 @@ pub(crate) fn commit_git_buffer(
     let temp_path = git_commit_temp_path();
     fs::write(&temp_path, &message)
         .map_err(|error| format!("failed to write commit message: {error}"))?;
-    let result = git_command_output(
-        runtime,
-        &root,
-        "commit",
-        &["commit", "-F", &temp_path.to_string_lossy()],
-    );
+    let temp_path_arg = temp_path.to_string_lossy().into_owned();
+    let result =
+        git_read_command_output(&root, "commit", &["commit", "-F", temp_path_arg.as_str()]);
     fs::remove_file(&temp_path).ok();
     result?;
     mark_git_fringe_snapshots_stale(runtime)?;
     invalidate_git_identity_for_active_workspace(runtime);
     close_buffer_discard(runtime, buffer_id)?;
-    refresh_git_status_if_active(runtime)?;
+    // HEAD moved — refresh status + recent/unpushed, keep stashes/etc.
+    refresh_git_status_after_commit_if_active(runtime)?;
     Ok(())
 }
 
@@ -117,7 +115,6 @@ pub(crate) fn cancel_git_commit_buffer(
     runtime: &mut EditorRuntime,
     buffer_id: BufferId,
 ) -> Result<(), String> {
-    close_buffer_discard(runtime, buffer_id)?;
-    refresh_git_status_if_active(runtime)?;
-    Ok(())
+    // Cancel changes nothing in the repo; skip status rebuild.
+    close_buffer_discard(runtime, buffer_id)
 }

@@ -19,6 +19,7 @@ use serde_json::Value;
 
 pub mod buf;
 pub mod hook;
+pub mod job;
 pub mod lsp;
 pub mod ui;
 
@@ -52,6 +53,10 @@ pub struct AbiVoltHost {
     pub lsp_client_ids: extern "C" fn(u64) -> RVec<RString>,
     pub lsp_request: extern "C" fn(RString, RString, RString, u64),
     pub ui_open_locations: extern "C" fn(RString, RString),
+    pub workspace_root: extern "C" fn() -> ROption<RString>,
+    pub job_run_silent: extern "C" fn(RString, RVec<RString>, ROption<RString>) -> RString,
+    pub buf_section_action: extern "C" fn(u64) -> ROption<RString>,
+    pub buf_set_cursor: extern "C" fn(u64, u64, u64),
 }
 
 type VoltCallback = Box<dyn FnOnce(Result<Value, String>) + Send>;
@@ -88,6 +93,16 @@ pub extern "C" fn install_host_c(host: AbiVoltHost) {
 /// Completes an async LSP request posted by the host.
 pub extern "C" fn dispatch_c(token: u64, payload: RString) {
     dispatch(token, payload.as_str());
+}
+
+/// Returns the active workspace root path when the host has prepared one.
+pub fn workspace_root() -> Option<String> {
+    with_host(|host| {
+        (host.workspace_root)()
+            .into_option()
+            .map(|root| root.into_string())
+    })
+    .flatten()
 }
 
 pub(crate) fn with_host<T>(call: impl FnOnce(&AbiVoltHost) -> T) -> Option<T> {

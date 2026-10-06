@@ -1,6 +1,7 @@
 //! Buffer primitives. Mirrors `vim.api.nvim_buf_*` at a small depth.
 
 use super::{BufHandle, with_host};
+use serde_json::Value;
 
 /// Returns the focused buffer, if the host has prepared a call context.
 pub fn current() -> Option<BufHandle> {
@@ -57,4 +58,31 @@ pub fn get_lines(buf: BufHandle, start: usize, end: usize) -> Vec<String> {
             .collect()
     })
     .unwrap_or_default()
+}
+
+/// Returns `{id, detail}` JSON for the section action under the cursor, when any.
+pub fn section_action(buf: BufHandle) -> Option<(String, Option<String>)> {
+    with_host(|host| {
+        (host.buf_section_action)(buf.0)
+            .into_option()
+            .and_then(|payload| parse_section_action(payload.as_str()))
+    })
+    .flatten()
+}
+
+/// Moves the cursor to `(line, column)` (0-based).
+pub fn set_cursor(buf: BufHandle, line: u32, column: u32) {
+    let _ = with_host(|host| {
+        (host.buf_set_cursor)(buf.0, u64::from(line), u64::from(column));
+    });
+}
+
+fn parse_section_action(payload: &str) -> Option<(String, Option<String>)> {
+    let value = serde_json::from_str::<Value>(payload).ok()?;
+    let id = value.get("id")?.as_str()?.to_owned();
+    let detail = value
+        .get("detail")
+        .and_then(|entry| entry.as_str())
+        .map(str::to_owned);
+    Some((id, detail))
 }

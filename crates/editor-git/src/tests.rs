@@ -250,6 +250,78 @@ fn invalidate_repository_file_list_cache_forces_rescan() -> Result<(), Box<dyn s
 }
 
 #[test]
+fn repository_file_listing_reads_git_for_windows_worktree_gitdir()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _lock = repository_file_list_test_lock();
+    if !git_available() {
+        return Ok(());
+    }
+
+    invalidate_repository_file_list_cache();
+    let root = temp_repo_root("win-gitdir");
+    let repo = root.join("repo");
+    let worktree = root.join("wt");
+    fs::create_dir_all(&repo)?;
+    fs::write(repo.join("tracked.txt"), "tracked\n")?;
+    run_git(&repo, &["init", "-q"])?;
+    configure_git_identity(&repo)?;
+    run_git(&repo, &["add", "tracked.txt"])?;
+    run_git(&repo, &["commit", "-q", "-m", "init"])?;
+    run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            &worktree.display().to_string(),
+        ],
+    )?;
+    force_git_for_windows_gitdir(&worktree)?;
+
+    let files = list_repository_files(&worktree)?;
+    assert!(
+        files.iter().any(|path| path == Path::new("tracked.txt")),
+        "files={files:?}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+    Ok(())
+}
+
+/// Rewrites a worktree `.git` file to `gitdir: /x/...`, the form Git for Windows writes.
+fn force_git_for_windows_gitdir(worktree: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let marker = worktree.join(".git");
+    let contents = fs::read_to_string(&marker)?;
+    let reference = contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:").map(str::trim))
+        .ok_or("worktree .git file has no gitdir")?;
+    let referenced = Path::new(reference);
+    let absolute = if referenced.is_absolute() {
+        referenced.to_path_buf()
+    } else {
+        worktree.join(referenced)
+    };
+    let canonical = fs::canonicalize(&absolute).unwrap_or(absolute);
+    let posix = to_git_for_windows_path(&canonical);
+    fs::write(&marker, format!("gitdir: {posix}\n"))?;
+    Ok(())
+}
+
+fn to_git_for_windows_path(path: &Path) -> String {
+    let mut text = path.display().to_string().replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/") {
+        text = rest.to_owned();
+    }
+    let Some(drive) = text.chars().next() else {
+        return format!("/{text}");
+    };
+    let tail = &text[drive.len_utf8()..];
+    let rest = tail.strip_prefix(':').unwrap_or(tail);
+    format!("/{}{rest}", drive.to_ascii_lowercase())
+}
+
+#[test]
 fn repository_file_preview_includes_path_and_caps_lines() -> Result<(), Box<dyn std::error::Error>>
 {
     let root = temp_repo_root("preview-caps");

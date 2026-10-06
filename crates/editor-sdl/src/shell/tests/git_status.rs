@@ -756,6 +756,152 @@ fn git_status_commit_reuses_active_status_snapshot() -> Result<(), String> {
 }
 
 #[test]
+fn git_commit_cancel_skips_status_rebuild() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-commit-cancel-fast")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+
+    let mut state = state_with_user_library()?;
+    let status_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let before = shell_buffer(&state.runtime, status_id)?
+        .git_snapshot()
+        .cloned()
+        .ok_or_else(|| "git snapshot missing before commit".to_owned())?;
+
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+    let commit_id = active_shell_buffer_id(&state.runtime)?;
+    cancel_git_commit_buffer(&mut state.runtime, commit_id)?;
+
+    let after_id = active_shell_buffer_id(&state.runtime)?;
+    assert_eq!(after_id, status_id);
+    let after = shell_buffer(&state.runtime, status_id)?
+        .git_snapshot()
+        .cloned()
+        .ok_or_else(|| "git snapshot missing after cancel".to_owned())?;
+    assert_eq!(after.staged(), before.staged());
+    assert_eq!(after.recent(), before.recent());
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_commit_ctrl_c_updates_status_without_full_rebuild_fields() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-commit-confirm-fast")?;
+    std::fs::write(repo.join("alpha.txt"), "alpha\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "alpha.txt"])?;
+
+    let mut state = state_with_user_library()?;
+    let status_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+    let commit_id = active_shell_buffer_id(&state.runtime)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, commit_id)?;
+        buffer.replace_with_lines(vec![
+            "fast commit message".to_owned(),
+            String::new(),
+            "# comment".to_owned(),
+        ]);
+    }
+    commit_git_buffer(&mut state.runtime, commit_id)?;
+
+    let (staged, unstaged, untracked) = git_status_snapshot_paths(&state, status_id)?;
+    assert!(staged.is_empty());
+    assert!(unstaged.is_empty());
+    assert!(untracked.is_empty());
+    let snapshot = shell_buffer(&state.runtime, status_id)?
+        .git_snapshot()
+        .ok_or_else(|| "git snapshot missing after commit".to_owned())?;
+    assert!(
+        snapshot
+            .recent()
+            .iter()
+            .any(|entry| entry.summary().contains("fast commit message")),
+        "recent commits should include new HEAD after confirm"
+    );
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn git_commit_ctrl_c_increments_status_ahead_with_upstream() -> Result<(), String> {
+    let repo = init_git_repo_with_commit("git-commit-ahead-status")?;
+    let remote = unique_temp_dir("git-commit-ahead-status-remote");
+    run_git_in_dir(&remote, &["init", "--bare", "-q"])?;
+    run_git_in_dir(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote
+                .to_str()
+                .ok_or_else(|| format!("non-utf8 path `{}`", remote.display()))?,
+        ],
+    )?;
+    let branch = run_git_in_dir(&repo, &["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_owned();
+    run_git_in_dir(
+        &repo,
+        &["push", "-q", "--set-upstream", "origin", branch.as_str()],
+    )?;
+
+    let mut state = state_with_user_library()?;
+    let status_id = open_repo_git_status_buffer(&mut state, &repo)?;
+    let before = shell_buffer(&state.runtime, status_id)?
+        .git_snapshot()
+        .cloned()
+        .ok_or_else(|| "git snapshot missing before commit".to_owned())?;
+    assert_eq!(before.ahead(), 0);
+    assert!(before.upstream().is_some());
+
+    std::fs::write(repo.join("ahead.txt"), "ahead\n").map_err(|error| error.to_string())?;
+    run_git_in_dir(&repo, &["add", "--", "ahead.txt"])?;
+    refresh_git_status_buffer(&mut state.runtime, status_id)?;
+
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+    assert!(handle_git_status_chord(&mut state.runtime, "c")?);
+    let commit_id = active_shell_buffer_id(&state.runtime)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, commit_id)?;
+        buffer.replace_with_lines(vec!["bump ahead".to_owned(), String::new()]);
+    }
+    commit_git_buffer(&mut state.runtime, commit_id)?;
+
+    let after = shell_buffer(&state.runtime, status_id)?
+        .git_snapshot()
+        .cloned()
+        .ok_or_else(|| "git snapshot missing after commit".to_owned())?;
+    assert!(
+        after.staged().is_empty(),
+        "staged should clear after commit; refresh may have been skipped"
+    );
+    assert_eq!(
+        after.ahead(),
+        1,
+        "ahead={}, upstream={:?}, unpushed={}, status={}",
+        after.ahead(),
+        after.upstream(),
+        after.unpushed().len(),
+        shell_buffer(&state.runtime, status_id)?.text.text()
+    );
+    assert_eq!(after.unpushed().len(), 1);
+    let status_text = shell_buffer(&state.runtime, status_id)?.text.text();
+    assert!(
+        status_text.contains("ahead 1"),
+        "Status section should show incremented ahead count: {status_text}"
+    );
+
+    std::fs::remove_dir_all(&repo).map_err(|error| error.to_string())?;
+    std::fs::remove_dir_all(&remote).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
 fn git_status_buffer_supports_first_commit_on_fresh_repo() -> Result<(), String> {
     let repo = init_git_repo("git-status-fresh-repo")?;
     let branch = run_git_in_dir(&repo, &["symbolic-ref", "--short", "HEAD"])?

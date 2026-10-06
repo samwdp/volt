@@ -7,10 +7,10 @@ use std::path::Path;
 pub use editor_plugin_api::{
     GitLogEntry, GitStashEntry, GitStatusError, GitStatusSnapshot,
     REPOSITORY_FILE_PREVIEW_MAX_BYTES, REPOSITORY_FILE_PREVIEW_MAX_LINES, RepositoryFilesError,
-    RepositoryStatus, StatusEntry, invalidate_repository_file_list_cache,
-    invalidate_repository_file_list_cache_for, list_repository_files,
-    list_repository_files_uncached, parse_log_oneline, parse_stash_list, parse_status,
-    repository_file_list_generation, repository_file_preview,
+    RepositoryStatus, StatusEntry, git_repository_location_args,
+    invalidate_repository_file_list_cache, invalidate_repository_file_list_cache_for,
+    list_repository_files, list_repository_files_uncached, parse_log_oneline, parse_stash_list,
+    parse_status, repository_file_list_generation, repository_file_preview,
 };
 pub use probe::{
     GitProbeSnapshot, git_probe_generation, git_probe_snapshot, git_probe_snapshot_no_spawn,

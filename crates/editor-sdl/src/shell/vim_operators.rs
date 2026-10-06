@@ -806,6 +806,7 @@ fn dispatch_input_prompt_confirm(
         DAP_BP_LOG_MESSAGE_PROMPT_ID => {
             apply_dap_breakpoint_extra(runtime, DapBreakpointExtraKind::LogMessage, text)
         }
+        id if id.starts_with("plugin.") => confirm_plugin_prompt(runtime, id, text),
         _ => Ok(()),
     }
 }

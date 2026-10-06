@@ -16,8 +16,11 @@ struct VoltBufSnap {
 struct VoltHostState {
     current_buf: u64,
     buffers: BTreeMap<u64, VoltBufSnap>,
+    workspace_root: Option<PathBuf>,
     lsp: Option<Arc<LspClientManager>>,
     pending_locations: Option<(String, Vec<editor_lsp::LspLocation>)>,
+    pending_cursor: Option<(u64, TextPoint)>,
+    section_actions: BTreeMap<u64, Option<(String, Option<String>)>>,
     dispatch: extern "C" fn(u64, abi_stable::std_types::RString),
 }
 
@@ -41,6 +44,10 @@ fn abi_volt_host() -> AbiVoltHost {
         lsp_client_ids: volt_host_lsp_client_ids,
         lsp_request: volt_host_lsp_request,
         ui_open_locations: volt_host_ui_open_locations,
+        workspace_root: volt_host_workspace_root,
+        job_run_silent: volt_host_job_run_silent,
+        buf_section_action: volt_host_buf_section_action,
+        buf_set_cursor: volt_host_buf_set_cursor,
     }
 }
 
@@ -61,11 +68,27 @@ fn prepare_volt_host(runtime: &EditorRuntime) {
         .as_deref()
         .map(LspClientManager::document_uri_for_path);
     let root = lsp_root_for_buffer(runtime, buffer).ok().flatten();
+    let workspace_root = runtime
+        .model()
+        .active_workspace_id()
+        .ok()
+        .and_then(|workspace_id| runtime.model().workspace(workspace_id).ok())
+        .and_then(|workspace| workspace.root().map(Path::to_path_buf));
     let client_ids = runtime
         .services()
         .get::<Arc<LspClientManager>>()
         .and_then(|lsp| path.as_deref().map(|path| lsp.session_labels_for_path(path)))
         .unwrap_or_default();
+    let section_action = buffer
+        .section_line_meta(buffer.cursor_point().line)
+        .and_then(|meta| {
+            meta.action.as_ref().map(|action| {
+                (
+                    action.id().to_owned(),
+                    action.detail().map(str::to_owned),
+                )
+            })
+        });
     let snap = VoltBufSnap {
         name: buffer.path().map(|path| path.display().to_string()),
         uri,
@@ -81,24 +104,38 @@ fn prepare_volt_host(runtime: &EditorRuntime) {
     *slot = Some(VoltHostState {
         current_buf: buffer_id.get(),
         buffers: BTreeMap::from([(buffer_id.get(), snap)]),
+        workspace_root,
         lsp: runtime.services().get::<Arc<LspClientManager>>().cloned(),
         pending_locations: None,
+        pending_cursor: None,
+        section_actions: BTreeMap::from([(buffer_id.get(), section_action)]),
         dispatch: editor_plugin_api::volt::dispatch_c,
     });
 }
 
 fn apply_volt_host_actions(runtime: &mut EditorRuntime) -> Result<bool, String> {
-    let pending = volt_host_lock()
-        .as_mut()
-        .and_then(|state| state.pending_locations.take());
-    let Some((title, locations)) = pending else {
-        return Ok(false);
+    let (pending_locations, pending_cursor) = {
+        let mut slot = volt_host_lock();
+        let Some(state) = slot.as_mut() else {
+            return Ok(false);
+        };
+        (state.pending_locations.take(), state.pending_cursor.take())
     };
-    if locations.is_empty() {
-        return Ok(false);
+    let mut handled = false;
+    if let Some((title, locations)) = pending_locations
+        && !locations.is_empty()
+    {
+        open_lsp_locations(runtime, &title, locations)?;
+        handled = true;
     }
-    open_lsp_locations(runtime, &title, locations)?;
-    Ok(true)
+    if let Some((buf_id, point)) = pending_cursor {
+        let active_id = active_shell_buffer_id(runtime)?;
+        if active_id.get() == buf_id {
+            shell_buffer_mut(runtime, active_id)?.set_cursor(point);
+            handled = true;
+        }
+    }
+    Ok(handled)
 }
 
 fn dispatch_volt_result(token: u64, payload: String) {
@@ -274,6 +311,80 @@ extern "C" fn volt_host_ui_open_locations(
     }
     if let Some(state) = volt_host_lock().as_mut() {
         state.pending_locations = Some((title.into_string(), locations));
+    }
+    ping_shell_wakeup();
+}
+
+extern "C" fn volt_host_workspace_root() -> abi_stable::std_types::ROption<abi_stable::std_types::RString> {
+    volt_host_lock()
+        .as_ref()
+        .and_then(|state| state.workspace_root.as_ref())
+        .map(|root| root.display().to_string())
+        .map(Into::into)
+        .into()
+}
+
+extern "C" fn volt_host_job_run_silent(
+    program: abi_stable::std_types::RString,
+    args: abi_stable::std_types::RVec<abi_stable::std_types::RString>,
+    cwd: abi_stable::std_types::ROption<abi_stable::std_types::RString>,
+) -> abi_stable::std_types::RString {
+    let program = program.into_string();
+    let args: Vec<String> = args.into_iter().map(|arg| arg.into_string()).collect();
+    let cwd = cwd.into_option().map(|path| PathBuf::from(path.into_string()));
+    let fallback_root = volt_host_lock()
+        .as_ref()
+        .and_then(|state| state.workspace_root.clone());
+    let workspace = editor_jobs::WorkspaceId::from_raw(1);
+    let mut spec = editor_jobs::ProcessLaunchSpec::new(program, args)
+        .with_mode(editor_jobs::ProcessSupervisionMode::Background)
+        .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
+        .with_workspace(workspace);
+    if let Some(cwd) = cwd.or(fallback_root) {
+        spec = spec.with_current_dir(cwd);
+    }
+    let payload = match editor_jobs::run_captured_in_app_registry(spec) {
+        Some(Ok(output)) => serde_json::json!({
+            "code": output.exit_code.unwrap_or(1),
+            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+        }),
+        Some(Err(error)) => serde_json::json!({
+            "code": 1,
+            "stdout": "",
+            "stderr": error.to_string(),
+        }),
+        None => serde_json::json!({
+            "code": 1,
+            "stdout": "",
+            "stderr": "process registry unavailable",
+        }),
+    };
+    serde_json::to_string(&payload)
+        .unwrap_or_else(|_| {
+            "{\"code\":1,\"stdout\":\"\",\"stderr\":\"encode failed\"}".to_owned()
+        })
+        .into()
+}
+
+extern "C" fn volt_host_buf_section_action(
+    buf: u64,
+) -> abi_stable::std_types::ROption<abi_stable::std_types::RString> {
+    volt_host_lock()
+        .as_ref()
+        .and_then(|state| state.section_actions.get(&buf).cloned())
+        .flatten()
+        .map(|(id, detail)| {
+            serde_json::json!({ "id": id, "detail": detail }).to_string()
+        })
+        .map(Into::into)
+        .into()
+}
+
+extern "C" fn volt_host_buf_set_cursor(buf: u64, line: u64, column: u64) {
+    let point = TextPoint::new(line as usize, column as usize);
+    if let Some(state) = volt_host_lock().as_mut() {
+        state.pending_cursor = Some((buf, point));
     }
     ping_shell_wakeup();
 }

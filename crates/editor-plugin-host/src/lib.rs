@@ -336,6 +336,14 @@ fn open_buffer(
             .open_popup_buffer(workspace_id, popup_title, buffer_id)?;
     }
 
+    let mut event = HookEvent::new()
+        .with_workspace(workspace_id)
+        .with_buffer(buffer_id);
+    if let Some(window_id) = runtime.model().active_window_id() {
+        event = event.with_window(window_id);
+    }
+    let _ = runtime.emit_hook(editor_plugin_api::plugin_hooks::SECTION_REFRESH, event);
+
     Ok(())
 }
 

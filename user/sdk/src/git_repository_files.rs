@@ -114,6 +114,22 @@ pub fn list_repository_files(root: impl AsRef<Path>) -> Result<Vec<PathBuf>, Rep
     Ok(files)
 }
 
+/// Prefix args that pin Git to `root`.
+///
+/// Git for Windows writes linked-worktree `.git` files as `gitdir: /x/...`.
+/// Discovery from the working directory then fails with
+/// `fatal: not a git repository: (NULL)`. The resolved Windows `--git-dir`
+/// and `--work-tree` skip that discovery.
+pub fn git_repository_location_args(root: &Path) -> Vec<String> {
+    let Some((git_dir, _)) = resolve_git_dirs(root) else {
+        return Vec::new();
+    };
+    vec![
+        format!("--git-dir={}", git_dir.display()),
+        format!("--work-tree={}", root.display()),
+    ]
+}
+
 /// Runs `git ls-files` without consulting the cache.
 pub fn list_repository_files_uncached(
     root: impl AsRef<Path>,
@@ -121,15 +137,21 @@ pub fn list_repository_files_uncached(
     let root = root.as_ref();
     let mut command = Command::new("git");
     configure_background_command(&mut command);
+    // A parent `GIT_DIR` would ignore `root` and fail every workspace the same way.
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    command.env_remove("GIT_INDEX_FILE");
+    let mut args = git_repository_location_args(root);
+    args.extend([
+        "ls-files".to_owned(),
+        "-z".to_owned(),
+        "--cached".to_owned(),
+        "--others".to_owned(),
+        "--exclude-standard".to_owned(),
+        "--full-name".to_owned(),
+    ]);
     let output = command
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--full-name",
-        ])
+        .args(&args)
         .current_dir(root)
         .output()
         .map_err(RepositoryFilesError::Io)?;

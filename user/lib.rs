@@ -35,6 +35,8 @@ pub mod compile;
 pub mod dap;
 /// Database explorer commands, query buffers, and schema browsers.
 pub mod db;
+/// NuGet package list/search/install buffers via the dotnet CLI.
+pub mod dotnet;
 /// Git workflows and repository-oriented commands.
 pub mod git;
 /// Git fringe configuration.
@@ -141,6 +143,7 @@ pub fn packages() -> Vec<PluginPackage> {
         lsp::package(),
         dap::package(),
         db::package(),
+        dotnet::package(),
         oil::package(),
         multicursor::package(),
         picker::package(),
@@ -588,6 +591,20 @@ impl UserLibrary for UserLibraryImpl {
     }
 
     fn run_plugin_buffer_evaluator(&self, handler: &str, input: &str) -> Vec<String> {
+        if let Some(section_handler) = handler.strip_prefix("section:") {
+            let Ok(json) =
+                serde_json::from_str::<editor_plugin_api::PluginSectionContextJson>(input)
+            else {
+                return vec!["null".to_owned()];
+            };
+            let context = editor_plugin_api::PluginSectionContext::from_json(json);
+            let Some(result) = crate::dotnet::handle_section(section_handler, &context) else {
+                return vec!["null".to_owned()];
+            };
+            return vec![
+                serde_json::to_string(&result.to_json()).unwrap_or_else(|_| "null".to_owned()),
+            ];
+        }
         match handler {
             calculator::EVALUATE_HANDLER => calculator::evaluate(input),
             _ => vec![format!(

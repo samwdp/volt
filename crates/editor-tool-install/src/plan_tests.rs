@@ -1,4 +1,4 @@
-use super::{commands_for_recipe, install_launch_env, resolved_toolchain};
+use super::{commands_for_recipe, resolved_toolchain};
 use crate::InstallRecipe;
 use std::path::Path;
 
@@ -79,17 +79,34 @@ fn resolved_toolchain_prefers_path_from_launch_env() {
 #[cfg(windows)]
 #[test]
 fn install_launch_env_can_surface_fnm_npm_when_present() {
-    let env = install_launch_env(None);
+    use std::path::PathBuf;
+
+    let fnm_installed = std::env::var_os("LOCALAPPDATA")
+        .map(|local| PathBuf::from(local).join(r"Microsoft\WinGet\Links\fnm.exe"))
+        .is_some_and(|path| path.is_file());
+    if !fnm_installed {
+        // Fall back: if neither well-known nor PATH-visible fnm exists, skip.
+        if editor_jobs::resolve_command_path(
+            "fnm",
+            &[("PATH".to_owned(), std::env::var("PATH").unwrap_or_default())],
+            None,
+        )
+        .is_none()
+        {
+            return;
+        }
+    }
+
+    // GUI-like PATH has no node shims. Enrichment must still make npm resolvable.
+    let env = editor_jobs::enrich_env_with_node_manager(
+        None,
+        vec![("PATH".to_owned(), r"C:\Windows\system32".to_owned())],
+    );
     let path = env
         .iter()
         .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
         .map(|(_, value)| value.as_str())
         .unwrap_or_default();
-    // When fnm is installed, enrichment should make npm resolvable even if the
-    // parent process PATH lacks the ephemeral multishell dir.
-    if editor_jobs::resolve_command_path("fnm", &[], None).is_none() {
-        return;
-    }
     assert!(
         editor_jobs::resolve_command_path("npm", &env, None).is_some(),
         "fnm present but enriched install env still cannot resolve npm; PATH={path}"

@@ -505,10 +505,22 @@ fn workspace_notes_lines(name: &str, root: Option<&std::path::Path>) -> Vec<Stri
 
 fn buffer_interaction(
     kind: &BufferKind,
-    _user_library: &dyn UserLibrary,
+    user_library: &dyn UserLibrary,
 ) -> (bool, Option<InputField>) {
     match kind {
         BufferKind::Image => (false, None),
+        BufferKind::Plugin(plugin_kind)
+            if user_library
+                .plugin_buffer(plugin_kind)
+                .is_some_and(|buffer| {
+                    matches!(
+                        buffer.content_mode(),
+                        editor_plugin_api::PluginBufferContentMode::SectionTree
+                    )
+                }) =>
+        {
+            (true, None)
+        }
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_READONLY_KIND => (true, None),
         BufferKind::Plugin(plugin_kind) if plugin_kind == INTERACTIVE_INPUT_KIND => {
             (true, Some(InputField::new("Ask > ")))

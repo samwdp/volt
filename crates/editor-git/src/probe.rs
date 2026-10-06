@@ -15,8 +15,8 @@ use std::{
 };
 
 use editor_plugin_api::{
-    FileFingerprint, cache_key, file_fingerprint, resolve_git_dirs, resolve_git_path,
-    worktree_common_dir,
+    FileFingerprint, cache_key, file_fingerprint, git_repository_location_args, resolve_git_dirs,
+    resolve_git_path, worktree_common_dir,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,13 +510,12 @@ fn run_git(root: &Path, args: &[&str], allowed_exit_codes: &[i32]) -> Option<Str
 }
 
 fn run_owned_git(root: &Path, args: &[&str]) -> Option<editor_jobs::CapturedProcessOutput> {
-    let spec = editor_jobs::ProcessLaunchSpec::new(
-        "git",
-        args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
-    )
-    .with_mode(editor_jobs::ProcessSupervisionMode::Background)
-    .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
-    .with_current_dir(root);
+    let mut launch_args = git_repository_location_args(root);
+    launch_args.extend(args.iter().copied().map(str::to_owned));
+    let spec = editor_jobs::ProcessLaunchSpec::new("git", launch_args)
+        .with_mode(editor_jobs::ProcessSupervisionMode::Background)
+        .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
+        .with_current_dir(root);
     match editor_jobs::run_captured_in_app_registry(spec) {
         Some(Ok(output)) => Some(output),
         Some(Err(_)) | None => None,

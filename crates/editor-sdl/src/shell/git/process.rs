@@ -2,6 +2,7 @@ use super::super::*;
 
 use super::remote::*;
 use super::status::*;
+use editor_git::git_repository_location_args;
 
 pub(crate) fn git_args_with_no_pager(command: &str, extra: &[&str]) -> Vec<String> {
     let mut args = Vec::with_capacity(2 + extra.len());
@@ -115,13 +116,12 @@ fn run_direct_git_command_raw(
     root: &Path,
     args: &[&str],
 ) -> Result<editor_jobs::CapturedProcessOutput, String> {
-    let spec = editor_jobs::ProcessLaunchSpec::new(
-        "git",
-        args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
-    )
-    .with_mode(editor_jobs::ProcessSupervisionMode::Background)
-    .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
-    .with_current_dir(root);
+    let mut launch_args = git_repository_location_args(root);
+    launch_args.extend(args.iter().copied().map(str::to_owned));
+    let spec = editor_jobs::ProcessLaunchSpec::new("git", launch_args)
+        .with_mode(editor_jobs::ProcessSupervisionMode::Background)
+        .with_stdio(editor_jobs::ProcessLaunchStdio::Piped)
+        .with_current_dir(root);
     match editor_jobs::run_captured_in_app_registry(spec) {
         Some(Ok(output)) => Ok(output),
         Some(Err(error)) => Err(format!(

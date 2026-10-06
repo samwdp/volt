@@ -259,6 +259,14 @@ impl ShellState {
                 return Ok(());
             }
             if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                && self.try_section_tree_plugin_keybinding(&chord)?
+            {
+                self.ui_mut()?.vim_mut().clear_transient();
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
+            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
                 && handle_git_view_chord(&mut self.runtime, &chord).map_err(ShellError::Runtime)?
             {
                 self.ui_mut()?.vim_mut().clear_transient();
@@ -268,6 +276,14 @@ impl ShellState {
             }
             if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
                 && handle_directory_chord(&mut self.runtime, &chord).map_err(ShellError::Runtime)?
+            {
+                self.ui_mut()?.vim_mut().clear_transient();
+                self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;
+                self.maybe_finish_change_after_input()?;
+                return Ok(());
+            }
+            if !matches!(self.input_mode()?, InputMode::Insert | InputMode::Replace)
+                && self.try_plugin_buffer_keybinding(&chord, vim_mode)?
             {
                 self.ui_mut()?.vim_mut().clear_transient();
                 self.record_vim_input(VimRecordedInput::Text(chord.to_owned()))?;

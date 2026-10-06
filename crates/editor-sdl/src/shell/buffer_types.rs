@@ -7,6 +7,8 @@ pub(crate) struct ShellBuffer {
     input: Option<InputField>,
     section_state: Option<SectionedBufferState>,
     plugin_section_state: Option<PluginSectionBufferState>,
+    plugin_section_opaque: Option<String>,
+    plugin_section_tree: Option<editor_plugin_api::SectionTree>,
     image_state: Option<ImageBufferState>,
     pdf_state: Option<PdfBufferState>,
     acp_state: Option<AcpBufferState>,

@@ -10,6 +10,7 @@ pub mod icons;
 pub mod install;
 pub mod lsp;
 pub mod path;
+pub mod plugin_section;
 pub mod sections;
 pub mod syntax;
 pub mod theme;
@@ -48,10 +49,10 @@ pub use git::{
 };
 pub use git_repository_files::{
     FileFingerprint, REPOSITORY_FILE_PREVIEW_MAX_BYTES, REPOSITORY_FILE_PREVIEW_MAX_LINES,
-    cache_key, file_fingerprint, invalidate_repository_file_list_cache,
-    invalidate_repository_file_list_cache_for, list_repository_files,
-    list_repository_files_uncached, repository_file_list_generation, repository_file_preview,
-    resolve_git_dirs, resolve_git_path, worktree_common_dir,
+    cache_key, file_fingerprint, git_repository_location_args,
+    invalidate_repository_file_list_cache, invalidate_repository_file_list_cache_for,
+    list_repository_files, list_repository_files_uncached, repository_file_list_generation,
+    repository_file_preview, resolve_git_dirs, resolve_git_path, worktree_common_dir,
 };
 pub use icons::{
     IconFontCategory, IconFontSymbol, all_symbols, find_symbol, seti_directory_icon, seti_file_icon,
@@ -323,6 +324,8 @@ pub mod buffer_kinds {
     pub const DAP_REPL: &str = "dap-repl";
     pub const PDF: &str = "pdf";
     pub const ISSUES_BOARD: &str = "issues-board";
+    pub const DOTNET_PACKAGES: &str = "dotnet-packages";
+    pub const DOTNET_SEARCH: &str = "dotnet-search";
 }
 
 /// Controls how a plugin section is updated when plugin evaluation writes to it.
@@ -580,6 +583,8 @@ pub struct PluginBuffer {
     evaluate_target_section: ROption<RString>,
     line_wrap: bool,
     key_bindings: RVec<PluginKeyBinding>,
+    content_mode: plugin_section::PluginBufferContentMode,
+    section_handler: ROption<RString>,
 }
 
 /// Context passed to the user library when rendering the statusline.
@@ -2286,6 +2291,28 @@ pub trait UserLibrary: Send + Sync {
     fn run_plugin_buffer_evaluator(&self, _handler: &str, _input: &str) -> Vec<String> {
         Vec::new()
     }
+    /// Runs a magit-style section-tree handler declared on a [`PluginBuffer`].
+    ///
+    /// Implemented via [`Self::run_plugin_buffer_evaluator`] JSON protocol so the
+    /// User Library ABI prefix stays within its field limit (see CONTEXT.md Volt API).
+    fn run_plugin_section_handler(
+        &self,
+        handler: &str,
+        context: &plugin_section::PluginSectionContext,
+    ) -> Option<plugin_section::PluginSectionResult> {
+        let Ok(payload) = serde_json::to_string(&context.to_json()) else {
+            return None;
+        };
+        let lines = self.run_plugin_buffer_evaluator(&format!("section:{handler}"), &payload);
+        let joined = lines.join("\n");
+        let trimmed = joined.trim();
+        if trimmed.is_empty() || trimmed == "null" {
+            return None;
+        }
+        serde_json::from_str::<plugin_section::PluginSectionResultJson>(trimmed)
+            .ok()
+            .map(plugin_section::PluginSectionResult::from_json)
+    }
     fn plugin_buffer(&self, kind: &str) -> Option<PluginBuffer> {
         self.packages()
             .into_iter()
@@ -2316,12 +2343,22 @@ impl PluginBuffer {
             evaluate_target_section: ROption::RNone,
             line_wrap: true,
             key_bindings: RVec::new(),
+            content_mode: plugin_section::PluginBufferContentMode::Plain,
+            section_handler: ROption::RNone,
         }
     }
 
     /// Attaches split-pane metadata for the buffer.
     pub fn with_sections(mut self, sections: PluginBufferSections) -> Self {
         self.sections = ROption::RSome(sections);
+        self.content_mode = plugin_section::PluginBufferContentMode::SplitPanes;
+        self
+    }
+
+    /// Declares a magit-style section-tree handler id for this buffer kind.
+    pub fn with_section_handler(mut self, handler: impl Into<RString>) -> Self {
+        self.section_handler = ROption::RSome(handler.into());
+        self.content_mode = plugin_section::PluginBufferContentMode::SectionTree;
         self
     }
 
@@ -2392,7 +2429,25 @@ impl PluginBuffer {
     pub const fn line_wrap(&self) -> bool {
         self.line_wrap
     }
+
+    /// Returns the content presentation mode for this buffer.
+    pub const fn content_mode(&self) -> plugin_section::PluginBufferContentMode {
+        self.content_mode
+    }
+
+    /// Returns the optional section-tree handler id.
+    pub fn section_handler(&self) -> Option<&str> {
+        match &self.section_handler {
+            ROption::RSome(handler) => Some(handler.as_str()),
+            ROption::RNone => None,
+        }
+    }
 }
+
+pub use plugin_section::{
+    PluginBufferContentMode, PluginSectionContext, PluginSectionContextJson, PluginSectionResult,
+    PluginSectionResultJson, render_section_tree,
+};
 
 // ─── Generic plugin hooks ─────────────────────────────────────────────────────
 
@@ -2427,6 +2482,24 @@ pub mod plugin_hooks {
     /// Emitted when a plugin wants the host to switch focus between its
     /// currently active split panes (for example between input and output).
     pub const SWITCH_PANE: &str = "plugin.switch-pane";
+
+    /// Rebuilds the active section-tree plugin buffer via its section handler.
+    pub const SECTION_REFRESH: &str = "plugin.section.refresh";
+
+    /// Runs the [`crate::SectionAction`] under the cursor (or the prompt payload).
+    pub const SECTION_ACTIVATE: &str = "plugin.section.activate";
+
+    /// Toggles collapse for the section header under the cursor.
+    pub const SECTION_TOGGLE: &str = "plugin.section.toggle";
+
+    /// Moves the cursor to the previous interactable section item.
+    pub const SECTION_PREV_ITEM: &str = "plugin.section.prev-item";
+
+    /// Moves the cursor to the next interactable section item.
+    pub const SECTION_NEXT_ITEM: &str = "plugin.section.next-item";
+
+    /// Opens a generic input prompt. Detail format: `id|title|prefill`.
+    pub const PROMPT: &str = "plugin.prompt";
 }
 
 // ─── Git action / section ID constants ───────────────────────────────────────

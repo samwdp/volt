@@ -255,6 +255,7 @@ pub fn providers() -> Vec<PickerProviderSpec> {
         )
         .with_extra_keybind("Ctrl+q", "quickfix.open"),
         PickerProviderSpec::new("undo-tree", "Undo Tree", PickerSource::UndoTree),
+        crate::dotnet::csproj_picker_provider(),
     ]
 }
 
@@ -264,6 +265,9 @@ pub fn providers() -> Vec<PickerProviderSpec> {
 /// then return its entries here. Built-in `PickerSource::*` providers do not need
 /// an entry function because the shell supplies their runtime data.
 pub fn provider_items(context: &PickerProviderContext) -> Option<Vec<PickerItemSpec>> {
+    if let Some(items) = crate::dotnet::csproj_picker_items(context) {
+        return Some(items);
+    }
     match context.source {
         PickerSource::User | PickerSource::Static => providers()
             .into_iter()

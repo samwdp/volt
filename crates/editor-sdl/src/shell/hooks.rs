@@ -753,6 +753,88 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             |event, runtime| switch_active_plugin_pane(runtime, event.buffer_id),
         )
         .map_err(|error| error.to_string())?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_SECTION_REFRESH,
+        "Refreshes the active section-tree plugin buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_SECTION_ACTIVATE,
+        "Activates the section action under the cursor.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_SECTION_TOGGLE,
+        "Toggles collapse for the section header under the cursor.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_SECTION_PREV_ITEM,
+        "Moves to the previous interactable section item.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_SECTION_NEXT_ITEM,
+        "Moves to the next interactable section item.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_PLUGIN_PROMPT,
+        "Opens a generic plugin input prompt. Detail: id|title|prefill.",
+    )?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_SECTION_REFRESH,
+            "shell.plugin-section-refresh",
+            |event, runtime| {
+                let buffer_id = event
+                    .buffer_id
+                    .unwrap_or(active_shell_buffer_id(runtime)?);
+                maybe_refresh_section_tree_after_open(runtime, buffer_id)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_SECTION_ACTIVATE,
+            "shell.plugin-section-activate",
+            |event, runtime| {
+                match event.detail.as_deref() {
+                    Some(detail) => activate_plugin_section_with_detail(runtime, Some(detail)),
+                    None => activate_plugin_section_line(runtime),
+                }
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_SECTION_TOGGLE,
+            "shell.plugin-section-toggle",
+            |_event, runtime| toggle_plugin_section(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_SECTION_PREV_ITEM,
+            "shell.plugin-section-prev-item",
+            |_event, runtime| move_plugin_section_item(runtime, false),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_SECTION_NEXT_ITEM,
+            "shell.plugin-section-next-item",
+            |_event, runtime| move_plugin_section_item(runtime, true),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_PLUGIN_PROMPT,
+            "shell.plugin-prompt",
+            |event, runtime| open_plugin_prompt(runtime, event.detail.as_deref()),
+        )
+        .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
             HOOK_PLUGIN_RUN_COMMAND,

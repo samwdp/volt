@@ -275,6 +275,32 @@ impl ShellState {
         Ok(true)
     }
 
+    fn try_section_tree_plugin_keybinding(&mut self, chord: &str) -> Result<bool, ShellError> {
+        let buffer_id = {
+            let ui = self.ui()?;
+            let Some(buffer_id) = ui.focused_buffer_id() else {
+                return Ok(false);
+            };
+            buffer_id
+        };
+        let has_handler = {
+            let Some(buffer) = self.ui()?.buffer(buffer_id) else {
+                return Ok(false);
+            };
+            let BufferKind::Plugin(kind) = &buffer.kind else {
+                return Ok(false);
+            };
+            shell_user_library(&self.runtime)
+                .plugin_buffer(kind)
+                .is_some_and(|spec| spec.section_handler().is_some())
+        };
+        if !has_handler {
+            return Ok(false);
+        }
+        let vim_mode = keymap_vim_mode(self.input_mode()?);
+        self.try_plugin_buffer_keybinding(chord, vim_mode)
+    }
+
     #[cfg(test)]
     pub(crate) fn wait_for_autocomplete_results(&mut self) -> Result<(), ShellError> {
         for _ in 0..40 {

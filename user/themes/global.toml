@@ -2,11 +2,11 @@
 "ui.line-number.relative" = true
 scrolloff = 5
 font = "Liga Berkeley Mono"
-font_size = 18
+font_size = 20
 emoji_font = "Segoe UI Emoji"
 emoji_font_size = 18
-cursor_roundness = 4
-corner_radius = 12
+cursor_roundness = 3
+corner_radius = 6
 "acp.chat.rounded" = true
 # Window backdrop (Windows compositor materials). Change without rebuilding.
 # Types: none | blur | acrylic | mica | mica-tabbed

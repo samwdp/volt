@@ -612,16 +612,6 @@ pub(crate) fn active_git_status_snapshot(runtime: &EditorRuntime) -> Option<GitS
     buffer.git_snapshot().cloned()
 }
 
-pub(crate) fn refresh_git_status_if_active(runtime: &mut EditorRuntime) -> Result<(), String> {
-    let buffer_id = active_shell_buffer_id(runtime)?;
-    if !buffer_is_git_status(&shell_buffer(runtime, buffer_id)?.kind) {
-        return Ok(());
-    }
-    refresh_git_status_buffer(runtime, buffer_id)
-}
-
-/// After stage/unstage, only re-read porcelain status and merge into the
-/// existing snapshot. Avoids re-running log/stash/rev-parse on every `s`.
 pub(crate) fn refresh_git_status_files_if_active(
     runtime: &mut EditorRuntime,
 ) -> Result<(), String> {
@@ -670,6 +660,156 @@ pub(crate) fn refresh_git_status_files_for_buffer(
     apply_git_status_snapshot(runtime, buffer_id, snapshot)?;
     shell_buffer_mut(runtime, buffer_id)?.mark_git_status_refreshed(&root, Instant::now());
     Ok(())
+}
+
+/// After a successful commit, refresh porcelain + HEAD-related log sections on
+/// every open git-status buffer. Keeps stashes/in-progress from existing snapshots.
+pub(crate) fn refresh_git_status_after_commit_if_active(
+    runtime: &mut EditorRuntime,
+) -> Result<(), String> {
+    let buffer_ids = {
+        let ui = shell_ui(runtime)?;
+        ui.buffers
+            .iter()
+            .filter(|buffer| buffer_is_git_status(&buffer.kind))
+            .map(ShellBuffer::id)
+            .collect::<Vec<_>>()
+    };
+    for buffer_id in buffer_ids {
+        refresh_git_status_after_commit_for_buffer(runtime, buffer_id)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn refresh_git_status_after_commit_for_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    let root = match git_root(runtime) {
+        Ok(root) => root,
+        Err(error) => {
+            set_git_status_error(runtime, buffer_id, &error)?;
+            return Err(error);
+        }
+    };
+    let existing = shell_buffer(runtime, buffer_id)?.git_snapshot().cloned();
+    let Some(existing) = existing else {
+        return refresh_git_status_buffer_for_root(runtime, buffer_id, &root, Instant::now());
+    };
+
+    let root_for_status = root.clone();
+    let root_for_recent = root.clone();
+    let log_limit = GIT_LOG_LIMIT.to_string();
+    let (status_output, recent_output) = std::thread::scope(|scope| {
+        let status_h = scope.spawn(move || {
+            git_read_command_output(
+                &root_for_status,
+                "status --short --branch",
+                &["status", "--short", "--branch"],
+            )
+        });
+        let recent_h = scope.spawn(move || {
+            git_read_command_output_optional(
+                &root_for_recent,
+                "log --oneline",
+                &["log", "-n", &log_limit, "--oneline"],
+            )
+            .unwrap_or_default()
+        });
+        (
+            status_h
+                .join()
+                .unwrap_or_else(|_| Err("status thread panicked".to_owned())),
+            recent_h.join().unwrap_or_else(|_| String::new()),
+        )
+    });
+    let status_output = match status_output {
+        Ok(output) => output,
+        Err(error) => {
+            set_git_status_error(runtime, buffer_id, &error)?;
+            return Err(error);
+        }
+    };
+    let status = match parse_status(&status_output) {
+        Ok(status) => status,
+        Err(error) => {
+            let message = error.to_string();
+            set_git_status_error(runtime, buffer_id, &message)?;
+            return Err(message);
+        }
+    };
+    let recent = parse_log_oneline(&recent_output);
+    let head = recent.first().cloned();
+    let upstream =
+        status_branch_upstream(&status_output).or_else(|| existing.upstream().map(str::to_owned));
+    let (unpulled, unpushed) = if let Some(upstream_ref) = upstream.as_ref() {
+        let unpulled_root = root.clone();
+        let unpushed_root = root.clone();
+        let unpulled_rev = format!("..{upstream_ref}");
+        let unpushed_rev = format!("{upstream_ref}..");
+        std::thread::scope(|scope| {
+            let unpulled_h = scope.spawn(move || {
+                git_read_log_oneline_optional(
+                    &unpulled_root,
+                    "log --oneline ..upstream",
+                    unpulled_rev.as_str(),
+                )
+            });
+            let unpushed_h = scope.spawn(move || {
+                git_read_log_oneline_optional(
+                    &unpushed_root,
+                    "log --oneline upstream..",
+                    unpushed_rev.as_str(),
+                )
+            });
+            (
+                unpulled_h.join().unwrap_or_default(),
+                unpushed_h.join().unwrap_or_default(),
+            )
+        })
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    // Status "Merge: … (ahead N)" reads snapshot.ahead(). Prefer porcelain, but
+    // never under-count vs the unpushed/unpulled lists we just refreshed.
+    let ahead = status.ahead().max(unpushed.len());
+    let behind = status.behind().max(unpulled.len());
+    let status = RepositoryStatus::new(
+        status.branch().map(str::to_owned),
+        ahead,
+        behind,
+        status.staged().to_vec(),
+        status.unstaged().to_vec(),
+        status.untracked().to_vec(),
+    );
+    let push_remote = existing
+        .push_remote()
+        .map(str::to_owned)
+        .or_else(|| upstream.clone());
+    let snapshot = existing
+        .with_status(status)
+        .with_upstreams(upstream, push_remote)
+        .with_head(head)
+        .with_recent(recent)
+        .with_unpulled(unpulled)
+        .with_unpushed(unpushed);
+    apply_git_status_snapshot(runtime, buffer_id, snapshot)?;
+    shell_buffer_mut(runtime, buffer_id)?.mark_git_status_refreshed(&root, Instant::now());
+    Ok(())
+}
+
+fn status_branch_upstream(status_output: &str) -> Option<String> {
+    status_output.lines().find_map(|line| {
+        let line = line.strip_prefix("## ")?;
+        let (_, tracking) = line.split_once("...")?;
+        let upstream = tracking
+            .split_once(" [")
+            .map(|(upstream, _)| upstream)
+            .unwrap_or(tracking)
+            .trim();
+        (!upstream.is_empty()).then(|| upstream.to_owned())
+    })
 }
 
 pub(crate) fn refresh_git_status_if_active_if_due(
