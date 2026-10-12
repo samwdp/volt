@@ -328,3 +328,123 @@ fn hover_manual_provider_lines_match_current_plugin_token() -> Result<(), String
     assert_eq!(lines, vec!["sqrt(x)".to_owned(), "Square root".to_owned()]);
     Ok(())
 }
+
+#[test]
+fn plugin_section_scroll_keeps_cursor_inside_each_section_viewport() -> Result<(), String> {
+    let render_width = 960u32;
+    let render_height = 640u32;
+    let cell_width = 8i32;
+    let line_height = 16i32;
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let input_lines: Vec<String> = (0..80).map(|index| format!("local {index}")).collect();
+    let input_refs: Vec<&str> = input_lines.iter().map(String::as_str).collect();
+    let output_lines: Vec<String> = (0..40).map(|index| format!("watch {index}")).collect();
+    let output_refs: Vec<&str> = output_lines.iter().map(String::as_str).collect();
+    let buffer_id = install_plugin_sections_test_buffer(&mut state, &input_refs, &output_refs)?;
+
+    sync_plugin_section_scroll(
+        &mut state,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+    let (section_rows, pane_rows) =
+        plugin_section_viewport_gap(&state, buffer_id, render_height, line_height)?;
+    assert!(
+        section_rows < pane_rows,
+        "base section viewport {section_rows} must be shorter than the pane viewport {pane_rows}"
+    );
+
+    assert_section_cursor_stays_visible(
+        &mut state,
+        buffer_id,
+        section_rows,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+    let last_input = shell_buffer(&state.runtime, buffer_id)?.line_count() - 1;
+    assert_section_cursor_stays_visible(
+        &mut state,
+        buffer_id,
+        last_input,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+
+    assert!(
+        shell_buffer_mut(&mut state.runtime, buffer_id)?.plugin_switch_pane(),
+        "output section must take focus"
+    );
+    sync_plugin_section_scroll(
+        &mut state,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+    let output_rows = shell_buffer(&state.runtime, buffer_id)?.viewport_lines();
+    assert!(output_rows < output_lines.len());
+    let last_output = shell_buffer(&state.runtime, buffer_id)?.line_count() - 1;
+    assert_section_cursor_stays_visible(
+        &mut state,
+        buffer_id,
+        last_output,
+        render_width,
+        render_height,
+        cell_width,
+        line_height,
+    )?;
+    Ok(())
+}
+
+fn sync_plugin_section_scroll(
+    state: &mut ShellState,
+    render_width: u32,
+    render_height: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), String> {
+    state
+        .sync_visible_buffer_layouts(render_width, render_height, cell_width, line_height)
+        .map_err(|error| error.to_string())
+}
+
+fn plugin_section_viewport_gap(
+    state: &ShellState,
+    buffer_id: BufferId,
+    render_height: u32,
+    line_height: i32,
+) -> Result<(usize, usize), String> {
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let ui = shell_ui(&state.runtime)?;
+    let command_line_visible = ui.command_line().is_some() || ui.input_prompt_visible();
+    let pane_rows =
+        buffer_visible_rows_for_height(buffer, render_height, line_height, command_line_visible);
+    Ok((buffer.viewport_lines(), pane_rows))
+}
+
+fn assert_section_cursor_stays_visible(
+    state: &mut ShellState,
+    buffer_id: BufferId,
+    line: usize,
+    render_width: u32,
+    render_height: u32,
+    cell_width: i32,
+    line_height: i32,
+) -> Result<(), String> {
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(line, 0));
+    sync_plugin_section_scroll(state, render_width, render_height, cell_width, line_height)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let offset = buffer.cursor_viewport_offset();
+    let viewport = buffer.viewport_lines();
+    assert!(
+        offset < viewport,
+        "cursor on line {line} left the section viewport: offset {offset}, viewport {viewport}"
+    );
+    Ok(())
+}

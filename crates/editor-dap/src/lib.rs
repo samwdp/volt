@@ -3,6 +3,7 @@
 mod breakpoints;
 mod client;
 mod config;
+mod dotnet;
 
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf};
 
@@ -22,6 +23,12 @@ pub use config::{
     DebugStartHistory, DebugStartRecord, PROJECT_DEBUG_CONFIG_PATH,
     collect_configuration_candidates, configuration_holes, infer_compile_heuristic,
     infer_configurations, load_project_configurations,
+};
+pub use dotnet::{
+    DotnetBuildTarget, DotnetBuildTargetKind, DotnetProgramCandidate,
+    discover_dotnet_build_targets, dotnet_build_target_from_command, dotnet_compile_command,
+    dotnet_program_candidates, dotnet_program_candidates_for_build_command,
+    dotnet_workspace_program_candidates, is_dotnet_build_command, preferred_existing_dotnet_dll,
 };
 pub use editor_plugin_api::{
     DebugAdapterRootStrategy, DebugAdapterSpec, DebugAdapterTransport, normalize_extension,

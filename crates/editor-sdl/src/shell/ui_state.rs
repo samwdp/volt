@@ -220,6 +220,15 @@ enum PickerAction {
         adapter_id: String,
         configuration: DebugConfiguration,
     },
+    SelectDapDotnetBuild {
+        adapter_id: String,
+        configuration: DebugConfiguration,
+        command: Option<String>,
+    },
+    SelectDapDotnetProgram {
+        adapter_id: String,
+        configuration: DebugConfiguration,
+    },
     RemoveDapExpression {
         expression: String,
     },
@@ -980,6 +989,8 @@ pub(crate) struct ShellUiState {
     pending_dap_start: Option<PendingDapStartPrompt>,
     /// Pending Workspace Clone waiting for an oil destination dirname.
     pending_workspace_clone: Option<PendingWorkspaceClone>,
+    /// Pending new workspace waiting for one new oil directory.
+    pending_workspace_create: bool,
     /// One-shot Bare Repo / common-dir override for the next Workspace Dashboard open.
     pending_workspace_dashboard_base: Option<PathBuf>,
     failed_tool_installs: BTreeSet<String>,
@@ -1065,6 +1076,7 @@ impl ShellUiState {
             pending_workspace_readme_opens: VecDeque::new(),
             pending_dap_start: None,
             pending_workspace_clone: None,
+            pending_workspace_create: false,
             pending_workspace_dashboard_base: None,
             failed_tool_installs: BTreeSet::new(),
         }

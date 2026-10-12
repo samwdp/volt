@@ -6,12 +6,12 @@ use std::{
 };
 
 use super::{
-    DirectoryBuffer, DirectoryEntryKind, ProjectKind, ProjectSearchRoot, compact_project_path,
-    discover_projects, project_discovery_for_picker, project_discovery_forget_candidate,
-    project_discovery_persist_path, project_discovery_request_scan, project_discovery_snapshot,
-    reset_project_discovery_cache, set_project_discovery_persist_path_for_test,
-    set_project_discovery_ttl_for_test, set_project_discovery_worker_blocked_for_test,
-    wait_for_project_discovery,
+    DirectoryBuffer, DirectoryEntryKind, ProjectCandidate, ProjectKind, ProjectSearchRoot,
+    compact_project_path, discover_projects, project_discovery_for_picker,
+    project_discovery_forget_candidate, project_discovery_persist_path,
+    project_discovery_request_scan, project_discovery_snapshot, reset_project_discovery_cache,
+    set_project_discovery_persist_path_for_test, set_project_discovery_ttl_for_test,
+    set_project_discovery_worker_blocked_for_test, wait_for_project_discovery,
 };
 
 fn discovery_test_lock() -> MutexGuard<'static, ()> {
@@ -171,9 +171,30 @@ fn discover_projects_resolves_worktree_repository_metadata()
         compact_project_path(&repo, 2),
     );
     assert_eq!(worktree_project.display_name(), "project [feature]");
+    assert_eq!(
+        ProjectCandidate::linked_worktree_display_name(&worktree),
+        worktree_project.display_name()
+    );
 
     fs::remove_dir_all(root)?;
     Ok(())
+}
+
+#[test]
+fn linked_worktree_display_name_uses_each_repository_parent() {
+    let shared = Path::new("systemcommand");
+    assert_eq!(
+        ProjectCandidate::linked_worktree_display_name(
+            &Path::new("group").join("ftc-ui-web").join(shared)
+        ),
+        "ftc-ui-web [systemcommand]"
+    );
+    assert_eq!(
+        ProjectCandidate::linked_worktree_display_name(
+            &Path::new("group").join("af-platform-api").join(shared)
+        ),
+        "af-platform-api [systemcommand]"
+    );
 }
 
 #[cfg(windows)]
@@ -212,6 +233,10 @@ fn discover_projects_resolves_git_for_windows_worktree_metadata()
         Some("project")
     );
     assert_eq!(worktree_project.display_name(), "project [feature]");
+    assert_eq!(
+        ProjectCandidate::linked_worktree_display_name(&worktree),
+        worktree_project.display_name()
+    );
 
     fs::remove_dir_all(root)?;
     Ok(())

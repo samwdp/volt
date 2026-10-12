@@ -864,6 +864,15 @@ pub(super) fn apply_directory_edit_queue(
             return Ok(());
         }
     }
+    if let Some(path) = pending_workspace_create_dir(runtime, &root, &actions)? {
+        shell_ui_mut(runtime)?.pending_workspace_create = false;
+        apply_directory_edit_actions(&actions)?;
+        if apply_directory_listing_patch(runtime, buffer_id, &actions).is_err() {
+            refresh_directory_buffer(runtime, buffer_id)?;
+        }
+        run_workspace_git_init(runtime, &path)?;
+        return Ok(());
+    }
     for action in &actions {
         if let DirectoryEditAction::CreateGitWorktree {
             remote_branch,

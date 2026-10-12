@@ -50,6 +50,7 @@ const HOOK_WORKSPACE_MARKED_4: &str = "workspace.marked-4";
 const HOOK_WORKSPACE_WORKTREE_REMOVE: &str = "workspace.worktree-remove";
 const HOOK_WORKSPACE_DELETE: &str = "workspace.delete";
 const HOOK_WORKSPACE_CLONE: &str = "workspace.clone";
+const HOOK_WORKSPACE_CREATE: &str = "workspace.create";
 const HOOK_WORKSPACE_FORMAT: &str = "workspace.format";
 const HOOK_WORKSPACE_FORMATTER_REGISTER: &str = "workspace.formatter.register";
 const HOOK_PICKER_OPEN: &str = "ui.picker.open";

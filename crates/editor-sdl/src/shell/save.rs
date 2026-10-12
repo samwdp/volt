@@ -124,6 +124,9 @@ fn close_buffer_discard(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Res
 }
 
 fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> Result<(), String> {
+    let closing_oil = shell_ui(runtime)?
+        .buffer(buffer_id)
+        .is_some_and(|buffer| buffer.directory_state().is_some());
     let workspace_id = runtime
         .model()
         .active_workspace_id()
@@ -148,6 +151,9 @@ fn close_buffer_immediate(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
         .close_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
     shell_ui_mut(runtime)?.remove_buffer(buffer_id);
+    if closing_oil {
+        shell_ui_mut(runtime)?.pending_workspace_create = false;
+    }
     sync_active_buffer(runtime)?;
     Ok(())
 }

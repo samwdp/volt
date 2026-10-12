@@ -525,3 +525,164 @@ fn workspace_clone_refuses_existing_destination() -> Result<(), String> {
     std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
     Ok(())
 }
+
+struct ProjectSearchRootGuard;
+
+impl Drop for ProjectSearchRootGuard {
+    fn drop(&mut self) {
+        user::workspace::override_project_search_roots_for_test(None);
+    }
+}
+
+fn override_project_search_root(root: &Path) -> ProjectSearchRootGuard {
+    user::workspace::override_project_search_roots_for_test(Some(vec![ProjectSearchRoot::new(
+        root, 1,
+    )]));
+    ProjectSearchRootGuard
+}
+
+fn select_picker_row(runtime: &mut EditorRuntime, id: &str) -> Result<(), String> {
+    let picker = shell_ui_mut(runtime)?
+        .picker_mut()
+        .ok_or_else(|| "picker missing".to_owned())?;
+    let index = picker
+        .session
+        .matches()
+        .iter()
+        .position(|matched| matched.item().id() == id)
+        .ok_or_else(|| format!("picker missing `{id}`"))?;
+    picker.session.set_selected_index(index);
+    Ok(())
+}
+
+fn picker_row_labels(runtime: &EditorRuntime) -> Result<Vec<(String, bool)>, String> {
+    let picker = shell_ui(runtime)?
+        .picker()
+        .ok_or_else(|| "picker missing".to_owned())?;
+    Ok(picker
+        .session()
+        .matches()
+        .iter()
+        .map(|matched| {
+            (
+                matched.item().label().to_owned(),
+                matched.item().is_divider(),
+            )
+        })
+        .collect())
+}
+
+#[test]
+fn workspace_new_and_switch_put_create_new_first_in_unopened_section() -> Result<(), String> {
+    let root = unique_temp_dir("workspace-create-picker");
+    let _guard = override_project_search_root(&root);
+    let mut state = state_with_user_library()?;
+    open_workspace_from_project(&mut state.runtime, "host", &root)?;
+
+    state
+        .runtime
+        .execute_command("workspace.new")
+        .map_err(|error| error.to_string())?;
+    let rows = picker_row_labels(&state.runtime)?;
+    assert_eq!(
+        rows.first().map(|(label, _)| label.as_str()),
+        Some("+ Create New"),
+        "workspace.new should lead the unopened section with create, got {rows:?}"
+    );
+    state
+        .runtime
+        .execute_command("picker.cancel")
+        .map_err(|error| error.to_string())?;
+
+    state
+        .runtime
+        .execute_command("workspace.switch")
+        .map_err(|error| error.to_string())?;
+    let rows = picker_row_labels(&state.runtime)?;
+    let divider = rows
+        .iter()
+        .position(|(_, divider)| *divider)
+        .ok_or_else(|| format!("workspace.switch missing divider, got {rows:?}"))?;
+    assert_eq!(
+        rows.get(divider + 1).map(|(label, _)| label.as_str()),
+        Some("+ Create New"),
+        "workspace.switch create row should be first in the unopened section, got {rows:?}"
+    );
+
+    std::fs::remove_dir_all(&root).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_create_file_does_not_git_init() -> Result<(), String> {
+    let parent = unique_temp_dir("workspace-create-file");
+    let _guard = override_project_search_root(&parent);
+    let mut state = state_with_user_library()?;
+    open_workspace_from_project(&mut state.runtime, "host", &parent)?;
+
+    state
+        .runtime
+        .execute_command("workspace.new")
+        .map_err(|error| error.to_string())?;
+    select_picker_row(&mut state.runtime, "workspace-create:new")?;
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+    assert!(shell_ui(&state.runtime)?.pending_workspace_create);
+
+    oil_type_new_entry_and_leave_insert(&mut state, "notes.txt")?;
+
+    assert!(parent.join("notes.txt").is_file());
+    assert!(active_runtime_popup(&state.runtime)?.is_none());
+    assert!(shell_ui(&state.runtime)?.pending_workspace_create);
+    assert!(!parent.join(".git").exists());
+
+    std::fs::remove_dir_all(&parent).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn workspace_create_new_git_inits_directory_and_opens_workspace() -> Result<(), String> {
+    let parent = unique_temp_dir("workspace-create-git-init");
+    let _guard = override_project_search_root(&parent);
+    let mut state = state_with_user_library()?;
+    open_workspace_from_project(&mut state.runtime, "host", &parent)?;
+
+    state
+        .runtime
+        .execute_command("workspace.switch")
+        .map_err(|error| error.to_string())?;
+    select_picker_row(&mut state.runtime, "workspace-create:new")?;
+    state
+        .runtime
+        .execute_command("picker.submit")
+        .map_err(|error| error.to_string())?;
+
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let oil_root = shell_buffer(&state.runtime, buffer_id)?
+        .directory_state()
+        .map(|state| state.root.clone())
+        .ok_or_else(|| "create new should open oil".to_owned())?;
+    assert_eq!(oil_root, parent);
+    assert!(shell_ui(&state.runtime)?.pending_workspace_create);
+
+    oil_type_new_entry_and_leave_insert(&mut state, "fresh-app/")?;
+
+    let created = parent.join("fresh-app");
+    assert!(created.is_dir(), "oil should create the directory");
+    let popup =
+        active_runtime_popup(&state.runtime)?.ok_or_else(|| "git init popup missing".to_owned())?;
+    let command_buffer = popup.active_buffer;
+    wait_for_streamed_notification_title(&mut state, "Git Init succeeded")?;
+    wait_for_streamed_command_buffer_close(&mut state, command_buffer)?;
+
+    assert!(created.join(".git").is_dir(), "git init should create .git");
+    assert!(!shell_ui(&state.runtime)?.pending_workspace_create);
+    let active = active_workspace_root(&state.runtime)?
+        .ok_or_else(|| "new workspace missing root".to_owned())?;
+    assert_eq!(active, created);
+
+    std::fs::remove_dir_all(&parent).map_err(|error| error.to_string())?;
+    Ok(())
+}

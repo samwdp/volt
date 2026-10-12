@@ -132,9 +132,25 @@ impl ProjectCandidate {
             let project_name = self
                 .worktree_parent_name()
                 .unwrap_or_else(|| self.repository_display_name());
-            return format!("{project_name} [{}]", self.name);
+            return Self::linked_worktree_label(&project_name, &self.name);
         }
         self.name.clone()
+    }
+
+    /// Label for a linked worktree path before discovery has seen it.
+    ///
+    /// Matches [`Self::display_name`] after a restart: parent directory, then the
+    /// worktree directory in brackets.
+    pub fn linked_worktree_display_name(worktree_path: &Path) -> String {
+        let name = project_name(worktree_path);
+        match worktree_parent_name(worktree_path) {
+            Some(parent) => Self::linked_worktree_label(&parent, &name),
+            None => name,
+        }
+    }
+
+    fn linked_worktree_label(parent: &str, name: &str) -> String {
+        format!("{parent} [{name}]")
     }
 }
 

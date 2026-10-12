@@ -135,6 +135,38 @@ fn deep_inference_finds_dotnet_dll() {
 }
 
 #[test]
+fn deep_inference_prefers_existing_directory_named_dll() {
+    let root = temp_dir("dotnet-dir-dll");
+    let project = root.join("src").join("dir1").join("dotnet_api");
+    fs::create_dir_all(&project).expect("project");
+    fs::write(
+        project.join("api.csproj"),
+        r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>"#,
+    )
+    .expect("csproj");
+    let dll_dir = project.join("bin").join("Debug").join("net8.0");
+    fs::create_dir_all(&dll_dir).expect("bin");
+    fs::write(dll_dir.join("dotnet_api.dll"), "").expect("entry");
+    fs::write(dll_dir.join("Newtonsoft.Json.dll"), "").expect("dependency");
+    let file = project.join("Program.cs");
+    fs::write(&file, "Console.WriteLine(\"hi\");\n").expect("cs");
+
+    let ctx = DebugInferContext {
+        workspace_root: Some(root.as_path()),
+        active_file: Some(file.as_path()),
+        preferred_adapter_id: Some("sharpdbg"),
+        allow_deep_inference: true,
+    };
+    let inferred = infer_configurations(&ctx);
+    let expected = dll_dir.join("dotnet_api.dll");
+    assert_eq!(
+        inferred[0].configuration().target_program(),
+        Some(&expected)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn default_workspace_skips_deep_inference() {
     let root = temp_dir("default-ws");
     fs::write(

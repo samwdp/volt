@@ -207,6 +207,11 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_WORKSPACE_CREATE,
+        "Opens oil to create a directory, then git init and opens that workspace.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_WORKSPACE_FORMAT,
         "Formats the active buffer or visual selection.",
     )?;
@@ -1851,6 +1856,13 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         })
         .map_err(|error| error.to_string())?;
     runtime
+        .subscribe_hook(
+            HOOK_WORKSPACE_CREATE,
+            "shell.workspace-create",
+            |_, runtime| begin_workspace_create(runtime),
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
         .subscribe_hook(HOOK_PICKER_OPEN, "shell.open-picker", |event, runtime| {
             let picker =
                 picker::picker_overlay(runtime, event.detail.as_deref().unwrap_or("commands"))?;
@@ -3047,6 +3059,29 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 } => {
                     let result =
                         run_dap_prelaunch_then_start(runtime, &adapter_id, configuration, None);
+                    report_dap_result(runtime, "DAP start failed", result)?;
+                }
+                PickerAction::SelectDapDotnetBuild {
+                    adapter_id,
+                    configuration,
+                    command,
+                } => {
+                    let result = match command {
+                        Some(command) => run_dap_prelaunch_then_start(
+                            runtime,
+                            &adapter_id,
+                            configuration,
+                            Some(command),
+                        ),
+                        None => start_dotnet_without_compile(runtime, &adapter_id, configuration),
+                    };
+                    report_dap_result(runtime, "DAP start failed", result)?;
+                }
+                PickerAction::SelectDapDotnetProgram {
+                    adapter_id,
+                    configuration,
+                } => {
+                    let result = finish_dap_session_start(runtime, &adapter_id, configuration);
                     report_dap_result(runtime, "DAP start failed", result)?;
                 }
                 PickerAction::RemoveDapExpression { expression } => {

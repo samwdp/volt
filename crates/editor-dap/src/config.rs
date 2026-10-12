@@ -498,6 +498,9 @@ fn find_csproj(root: &Path, active_file: &Path) -> Option<PathBuf> {
 /// Resolves the Debug-build DLL path for a nearby .csproj (SharpDbg needs `program`).
 fn infer_dotnet_dll(root: &Path, active_file: &Path) -> Option<PathBuf> {
     let csproj = find_csproj(root, active_file)?;
+    if let Some(existing) = crate::dotnet::preferred_existing_dotnet_dll(&csproj) {
+        return Some(existing);
+    }
     let contents = fs::read_to_string(&csproj).ok()?;
     let assembly = parse_csproj_property(&contents, "AssemblyName").unwrap_or_else(|| {
         csproj

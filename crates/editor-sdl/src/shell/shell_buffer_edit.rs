@@ -854,12 +854,13 @@ impl ShellBuffer {
         else {
             return;
         };
-        self.viewport_lines = section_layout
+        let (base_rows, base_cols) = section_layout
             .panes
             .first()
-            .map(|pane| pane.visible_rows)
-            .unwrap_or(1)
-            .max(1);
+            .map(|pane| (pane.visible_rows.max(1), pane.wrap_cols.max(1)))
+            .unwrap_or((1, 1));
+        self.viewport_lines = base_rows;
+        self.set_scroll_layout(base_rows, base_cols, self.scroll_indent_size.max(1));
         if let Some(state) = self.plugin_section_state.as_mut() {
             for (index, pane_layout) in section_layout.panes.iter().enumerate().skip(1) {
                 if let Some(pane) = state.attached_section_mut(index) {
@@ -991,6 +992,14 @@ impl ShellBuffer {
             }
             return;
         }
+        // Section 0 stores text on the shell buffer, but its viewport is the
+        // section pane. Callers pass the whole buffer height; using that lets
+        // the cursor leave the section before scroll starts.
+        let (visible_rows, wrap_cols) = if self.has_plugin_sections() {
+            (self.viewport_lines.max(1), self.scroll_wrap_cols.max(1))
+        } else {
+            (visible_rows, wrap_cols)
+        };
         let visible_rows = visible_rows.max(1);
         let reserved_top_rows = reserved_top_rows.min(visible_rows.saturating_sub(1));
         let content_rows = visible_rows.saturating_sub(reserved_top_rows).max(1);

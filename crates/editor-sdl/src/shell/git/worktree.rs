@@ -796,11 +796,7 @@ pub(crate) fn create_git_worktree(
             remote_branch.to_owned(),
         ]
     };
-    let name = worktree_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(local_branch)
-        .to_owned();
+    let name = editor_fs::ProjectCandidate::linked_worktree_display_name(worktree_path);
     run_command(
         runtime,
         ExternalCommandSpec::git_argv(

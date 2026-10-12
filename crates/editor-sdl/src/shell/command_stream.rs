@@ -41,6 +41,12 @@ pub(super) enum StreamedCommandExitAction {
     LeaveOpenAndMaybeReloadUserLibrary {
         command: String,
     },
+    /// Close the compile popup on success, then continue a Debug Session start.
+    ContinueDapStart {
+        adapter_id: String,
+        configuration: Box<DebugConfiguration>,
+        command: String,
+    },
 }
 
 /// How an External Command is invoked.
@@ -157,7 +163,7 @@ enum StreamedCommandUpdate {
         success: bool,
         exit_code: Option<i32>,
         error: Option<String>,
-        on_exit: StreamedCommandExitAction,
+        on_exit: Box<StreamedCommandExitAction>,
         notify_on_success: bool,
         notify_on_failure: bool,
     },
@@ -457,6 +463,7 @@ pub(super) fn refresh_pending_streamed_commands(
 
     let mut changed = false;
     let mut buffers_to_close = Vec::new();
+    let mut continue_dap_start: Option<(String, DebugConfiguration, String)> = None;
     let mut refresh_git_status = false;
     let mut open_commit_after_close = false;
     let mut open_workspace_after_close: Option<(String, PathBuf)> = None;
@@ -512,7 +519,7 @@ pub(super) fn refresh_pending_streamed_commands(
                     exit_code,
                     error,
                 };
-                match on_exit {
+                match *on_exit {
                     StreamedCommandExitAction::RefreshGitStatusBuffersAndCloseBuffer => {
                         if outcome.success {
                             buffers_to_close.push(buffer_id);
@@ -606,6 +613,24 @@ pub(super) fn refresh_pending_streamed_commands(
                             );
                         }
                     }
+                    StreamedCommandExitAction::ContinueDapStart {
+                        adapter_id,
+                        configuration,
+                        command,
+                    } => {
+                        shell_ui_mut(runtime)?.apply_notification(
+                            dap_compile_notification(
+                                &command,
+                                Some(outcome.success),
+                                outcome.exit_code,
+                            ),
+                            now,
+                        );
+                        if outcome.success {
+                            buffers_to_close.push(buffer_id);
+                            continue_dap_start = Some((adapter_id, *configuration, command));
+                        }
+                    }
                     StreamedCommandExitAction::LeaveOpenAndMaybeReloadUserLibrary { command } => {
                         if outcome.success
                             && should_reload_user_library_after_compile(runtime, &command)
@@ -679,6 +704,17 @@ pub(super) fn refresh_pending_streamed_commands(
     if let Some(base_dir) = open_dashboard_after_close {
         let _ = close_active_oil_buffer(runtime);
         open_workspace_dashboard_at(runtime, &base_dir)?;
+        changed = true;
+    }
+    if let Some((adapter_id, configuration, command)) = continue_dap_start {
+        let result = if is_dotnet_build_command(&command) {
+            resolve_dotnet_program_after_build(runtime, &adapter_id, configuration, &command)
+        } else {
+            finish_dap_session_start(runtime, &adapter_id, configuration)
+        };
+        if let Err(error) = result {
+            let _ = notify_dap_failure(runtime, "DAP start failed", &error);
+        }
         changed = true;
     }
     Ok(changed)
@@ -798,7 +834,7 @@ fn run_streamed_command(
                         success: false,
                         exit_code: None,
                         error: Some(format!("Failed to start process: {error}")),
-                        on_exit,
+                        on_exit: Box::new(on_exit),
                         notify_on_success,
                         notify_on_failure,
                     },
@@ -816,7 +852,7 @@ fn run_streamed_command(
                     success: false,
                     exit_code: None,
                     error: Some("process registry mutex poisoned".to_owned()),
-                    on_exit,
+                    on_exit: Box::new(on_exit),
                     notify_on_success,
                     notify_on_failure,
                 },
@@ -880,7 +916,7 @@ fn run_streamed_command(
             success: exit_code == Some(0),
             exit_code,
             error: None,
-            on_exit,
+            on_exit: Box::new(on_exit),
             notify_on_success,
             notify_on_failure,
         },

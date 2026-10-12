@@ -136,6 +136,10 @@ pub fn package() -> PluginPackage {
 }
 
 const PROJECT_DISCOVERY_SCANNING_ID: &str = "project-discovery-scanning";
+const CREATE_NEW_WORKSPACE_ID: &str = "workspace-create:new";
+const CREATE_NEW_WORKSPACE_HOOK: &str = "workspace.create";
+/// Same `+` prefix as the worktree picker create row (`+ new worktree`).
+const CREATE_NEW_WORKSPACE_LABEL: &str = "+ Create New";
 
 fn project_search_roots_override() -> &'static Mutex<Option<Vec<ProjectSearchRoot>>> {
     static OVERRIDE: OnceLock<Mutex<Option<Vec<ProjectSearchRoot>>>> = OnceLock::new();
@@ -182,7 +186,10 @@ fn workspace_project_picker_items(
     context: &PickerProviderContext,
 ) -> Result<Vec<PickerItemSpec>, String> {
     if context.projects.is_empty() && context.project_discovery_in_progress {
-        return Ok(vec![project_discovery_scanning_item()]);
+        return Ok(vec![
+            create_new_workspace_picker_item(),
+            project_discovery_scanning_item(),
+        ]);
     }
 
     let mut projects = context
@@ -197,10 +204,20 @@ fn workspace_project_picker_items(
         )
     });
 
-    Ok(projects
-        .iter()
-        .map(|project| project_picker_item(context, project))
-        .collect())
+    let mut items = Vec::with_capacity(projects.len() + 1);
+    let mut placed_create = false;
+    for project in &projects {
+        let is_open = existing_workspace_for_project(context, project).is_some();
+        if !is_open && !placed_create {
+            items.push(create_new_workspace_picker_item());
+            placed_create = true;
+        }
+        items.push(project_picker_item(context, project));
+    }
+    if !placed_create {
+        items.push(create_new_workspace_picker_item());
+    }
+    Ok(items)
 }
 
 fn workspace_switch_picker_items(
@@ -220,9 +237,10 @@ fn workspace_switch_picker_items(
         .iter()
         .map(workspace_picker_item)
         .collect::<Vec<_>>();
-    if !items.is_empty() && (!projects.is_empty() || scanning) {
+    if !items.is_empty() {
         items.push(PickerItemSpec::divider());
     }
+    items.push(create_new_workspace_picker_item());
     if scanning && projects.is_empty() {
         items.push(project_discovery_scanning_item());
     } else {
@@ -233,6 +251,16 @@ fn workspace_switch_picker_items(
         );
     }
     Ok(items)
+}
+
+fn create_new_workspace_picker_item() -> PickerItemSpec {
+    PickerItemSpec::new(
+        CREATE_NEW_WORKSPACE_ID,
+        CREATE_NEW_WORKSPACE_LABEL,
+        "create a directory in oil, then git init",
+        PickerActionSpec::emit_hook(CREATE_NEW_WORKSPACE_HOOK, None::<&str>),
+    )
+    .with_preview("Open oil, create a directory, then git init and open the new workspace.")
 }
 
 fn project_discovery_scanning_item() -> PickerItemSpec {
@@ -618,15 +646,21 @@ mod tests {
         attach_host_projects(&mut context);
 
         let items = picker_items(&context).expect("project picker items");
-        assert_eq!(items.len(), 2);
+        assert_eq!(items.len(), 3);
         assert_eq!(items[0].label(), "zeta");
         assert_eq!(items[0].action(), &PickerActionSpec::switch_workspace(7));
-        assert_eq!(items[1].label(), "alpha");
-        assert!(matches!(
+        assert_eq!(items[1].id(), CREATE_NEW_WORKSPACE_ID);
+        assert_eq!(items[1].label(), CREATE_NEW_WORKSPACE_LABEL);
+        assert_eq!(
             items[1].action(),
+            &PickerActionSpec::emit_hook(CREATE_NEW_WORKSPACE_HOOK, None::<&str>)
+        );
+        assert_eq!(items[2].label(), "alpha");
+        assert!(matches!(
+            items[2].action(),
             PickerActionSpec::CreateWorkspace { .. }
         ));
-        assert_eq!(items[1].id(), alpha.display().to_string());
+        assert_eq!(items[2].id(), alpha.display().to_string());
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -667,9 +701,11 @@ mod tests {
         assert_eq!(items[0].label(), "default");
         assert_eq!(items[1].label(), "zeta");
         assert!(items[2].is_divider());
-        assert_eq!(items[3].label(), "alpha");
+        assert_eq!(items[3].id(), CREATE_NEW_WORKSPACE_ID);
+        assert_eq!(items[3].label(), CREATE_NEW_WORKSPACE_LABEL);
+        assert_eq!(items[4].label(), "alpha");
         assert!(matches!(
-            items[3].action(),
+            items[4].action(),
             PickerActionSpec::CreateWorkspace { .. }
         ));
         assert!(
@@ -682,6 +718,50 @@ mod tests {
             item.label() != "zeta"
                 || matches!(item.action(), PickerActionSpec::SwitchWorkspace { .. })
         }));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_switch_picker_create_new_leads_unopened_section_when_projects_are_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _lock = discovery_test_lock();
+        let (root, alpha, zeta) = two_repo_tree()?;
+        let _guard = begin_discovery_override(vec![ProjectSearchRoot::new(&root, 2)])?;
+        let scanning = project_discovery_snapshot(&project_search_roots());
+        wait_for_project_discovery(scanning.request_id(), wait_timeout())?;
+
+        let mut context = PickerProviderContext::new(
+            "workspace.switch",
+            "Workspaces and Projects",
+            PickerSource::WorkspaceSwitch,
+        );
+        context.workspaces = vec![
+            PickerWorkspaceContext {
+                id: 7,
+                name: "zeta".into(),
+                root: ROption::RSome(zeta.display().to_string().into()),
+                is_default: false,
+            },
+            PickerWorkspaceContext {
+                id: 8,
+                name: "alpha".into(),
+                root: ROption::RSome(alpha.display().to_string().into()),
+                is_default: false,
+            },
+        ]
+        .into();
+        attach_host_projects(&mut context);
+
+        let items = picker_items(&context).expect("switch picker items");
+        let divider = items
+            .iter()
+            .position(|item| item.is_divider())
+            .expect("divider");
+        assert_eq!(items[divider + 1].id(), CREATE_NEW_WORKSPACE_ID);
+        assert_eq!(items[divider + 1].label(), "+ Create New");
+        assert_eq!(items.len(), divider + 2);
 
         fs::remove_dir_all(root)?;
         Ok(())
@@ -702,9 +782,10 @@ mod tests {
         );
         attach_host_projects(&mut context);
         let items = picker_items(&context).expect("scanning items");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].id(), PROJECT_DISCOVERY_SCANNING_ID);
-        assert_eq!(items[0].action(), &PickerActionSpec::no_op());
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id(), CREATE_NEW_WORKSPACE_ID);
+        assert_eq!(items[1].id(), PROJECT_DISCOVERY_SCANNING_ID);
+        assert_eq!(items[1].action(), &PickerActionSpec::no_op());
 
         set_project_discovery_worker_blocked_for_test(false);
         fs::remove_dir_all(root)?;
@@ -734,7 +815,8 @@ mod tests {
                 .iter()
                 .all(|item| item.id() != PROJECT_DISCOVERY_SCANNING_ID)
         );
-        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id(), CREATE_NEW_WORKSPACE_ID);
+        assert_eq!(items.len(), 3);
 
         set_project_discovery_worker_blocked_for_test(false);
         fs::remove_dir_all(root)?;

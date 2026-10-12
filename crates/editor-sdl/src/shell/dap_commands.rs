@@ -472,6 +472,21 @@ fn continue_dap_start(
     configuration: DebugConfiguration,
     ask_heuristic_compile: bool,
 ) -> Result<(), String> {
+    if configuration.compile_command().is_some_and(|command| command.trim() == "dotnet build") {
+        match prepare_dotnet_build_choice(runtime, adapter_id, &configuration)? {
+            DotnetBuildPrep::PickerOpened => return Ok(()),
+            DotnetBuildPrep::Ready(configuration) => {
+                return continue_dap_start(
+                    runtime,
+                    adapter_id,
+                    configuration,
+                    ask_heuristic_compile,
+                );
+            }
+            DotnetBuildPrep::Passthrough => {}
+        }
+    }
+
     let holes = configuration_holes(&configuration);
     if !holes.is_empty() {
         return fill_dap_configuration_holes(runtime, adapter_id, configuration, holes);
@@ -486,12 +501,205 @@ fn continue_dap_start(
         if let Some(heuristic) =
             infer_compile_heuristic(ctx.workspace_root.as_deref(), ctx.active_file.as_deref())
         {
+            if heuristic == "dotnet build"
+                && let Some(root) = ctx.workspace_root.clone()
+            {
+                let targets =
+                    discover_dotnet_build_targets(&root, ctx.active_file.as_deref());
+                if targets.len() > 1 {
+                    return open_dotnet_build_picker(
+                        runtime,
+                        adapter_id,
+                        configuration,
+                        &root,
+                        &targets,
+                    );
+                }
+                if let Some(target) = targets.first()
+                    && target.path().parent() != Some(root.as_path())
+                {
+                    let command = dotnet_compile_command(&root, target.path());
+                    open_dap_compile_confirm_picker(runtime, adapter_id, configuration, command)?;
+                    return Ok(());
+                }
+            }
             open_dap_compile_confirm_picker(runtime, adapter_id, configuration, heuristic)?;
             return Ok(());
         }
     }
 
     run_dap_prelaunch_then_start(runtime, adapter_id, configuration, None)
+}
+
+enum DotnetBuildPrep {
+    Passthrough,
+    PickerOpened,
+    Ready(DebugConfiguration),
+}
+
+fn prepare_dotnet_build_choice(
+    runtime: &mut EditorRuntime,
+    adapter_id: &str,
+    configuration: &DebugConfiguration,
+) -> Result<DotnetBuildPrep, String> {
+    let ctx = dap_start_context(runtime)?;
+    let Some(root) = ctx.workspace_root.clone() else {
+        return Ok(DotnetBuildPrep::Passthrough);
+    };
+    let targets = discover_dotnet_build_targets(&root, ctx.active_file.as_deref());
+    if targets.is_empty() {
+        return Ok(DotnetBuildPrep::Passthrough);
+    }
+    if targets.len() == 1
+        && let Some(target) = targets.first()
+        && target.path().parent() != Some(root.as_path())
+    {
+        let command = dotnet_compile_command(&root, target.path());
+        return Ok(DotnetBuildPrep::Ready(
+            configuration.clone().with_compile_command(command),
+        ));
+    }
+    if targets.len() > 1 {
+        open_dotnet_build_picker(runtime, adapter_id, configuration.clone(), &root, &targets)?;
+        return Ok(DotnetBuildPrep::PickerOpened);
+    }
+    Ok(DotnetBuildPrep::Passthrough)
+}
+
+fn open_dotnet_build_picker(
+    runtime: &mut EditorRuntime,
+    adapter_id: &str,
+    configuration: DebugConfiguration,
+    root: &Path,
+    targets: &[DotnetBuildTarget],
+) -> Result<(), String> {
+    let mut entries = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        let command = dotnet_compile_command(root, target.path());
+        let detail = match target.kind() {
+            editor_dap::DotnetBuildTargetKind::Solution => "solution",
+            editor_dap::DotnetBuildTargetKind::Project => "project",
+        };
+        entries.push(PickerEntry {
+            item: PickerItem::new(
+                format!("dap-dotnet-build:{index}"),
+                command.clone(),
+                detail,
+                None::<String>,
+            ),
+            action: PickerAction::SelectDapDotnetBuild {
+                adapter_id: adapter_id.to_owned(),
+                configuration: configuration.clone(),
+                command: Some(command),
+            },
+            quickfix: None,
+        });
+    }
+    entries.push(PickerEntry {
+        item: PickerItem::new(
+            "dap-dotnet-build:skip",
+            "Start without compiling",
+            "skip compile-before-debug",
+            None::<String>,
+        ),
+        action: PickerAction::SelectDapDotnetBuild {
+            adapter_id: adapter_id.to_owned(),
+            configuration,
+            command: None,
+        },
+        quickfix: None,
+    });
+    shell_ui_mut(runtime)?.set_picker(
+        PickerOverlay::from_entries("Build with dotnet", entries)
+            .with_result_order(PickerResultOrder::Source),
+    );
+    Ok(())
+}
+
+fn start_dotnet_without_compile(
+    runtime: &mut EditorRuntime,
+    adapter_id: &str,
+    configuration: DebugConfiguration,
+) -> Result<(), String> {
+    save_workspace_for_dap_start(runtime)?;
+    let ctx = dap_start_context(runtime)?;
+    let Some(root) = ctx.workspace_root else {
+        return finish_dap_session_start(runtime, adapter_id, configuration);
+    };
+    let candidates = dotnet_workspace_program_candidates(&root);
+    present_dotnet_program_choice(runtime, adapter_id, configuration, &root, candidates, true)
+}
+
+fn present_dotnet_program_choice(
+    runtime: &mut EditorRuntime,
+    adapter_id: &str,
+    configuration: DebugConfiguration,
+    root: &Path,
+    candidates: Vec<editor_dap::DotnetProgramCandidate>,
+    allow_expected: bool,
+) -> Result<(), String> {
+    let (existing, expected): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|candidate| candidate.exists());
+    let choices = if !existing.is_empty() {
+        existing
+    } else if allow_expected {
+        expected
+    } else {
+        return Err(
+            "no runnable assembly after dotnet build; looked for a DLL named after the project directory, AssemblyName, or project file under bin/"
+                .to_owned(),
+        );
+    };
+    match choices.len() {
+        0 => Err(
+            "no runnable .NET assembly found; looked for a DLL named after the project directory, AssemblyName, or project file"
+                .to_owned(),
+        ),
+        1 => {
+            let program = choices[0].path().to_path_buf();
+            finish_dap_session_start(
+                runtime,
+                adapter_id,
+                configuration.with_target_program(program),
+            )
+        }
+        _ => open_dotnet_program_picker(runtime, adapter_id, configuration, root, &choices),
+    }
+}
+
+fn open_dotnet_program_picker(
+    runtime: &mut EditorRuntime,
+    adapter_id: &str,
+    configuration: DebugConfiguration,
+    root: &Path,
+    candidates: &[editor_dap::DotnetProgramCandidate],
+) -> Result<(), String> {
+    let entries = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let program = candidate.path().to_path_buf();
+            PickerEntry {
+                item: PickerItem::new(
+                    format!("dap-dotnet-program:{index}"),
+                    candidate.display_path(root),
+                    candidate.picker_detail(),
+                    None::<String>,
+                ),
+                action: PickerAction::SelectDapDotnetProgram {
+                    adapter_id: adapter_id.to_owned(),
+                    configuration: configuration.clone().with_target_program(program),
+                },
+                quickfix: None,
+            }
+        })
+        .collect();
+    shell_ui_mut(runtime)?.set_picker(
+        PickerOverlay::from_entries("Debug assembly", entries)
+            .with_result_order(PickerResultOrder::Source),
+    );
+    Ok(())
 }
 
 fn fill_dap_configuration_holes(
@@ -594,9 +802,110 @@ fn run_dap_prelaunch_then_start(
 ) -> Result<(), String> {
     save_workspace_for_dap_start(runtime)?;
     if let Some(command) = compile_command {
-        run_dap_compile_before_debug(runtime, &command)?;
+        return begin_dap_compile_stream(runtime, adapter_id, configuration, &command);
     }
     finish_dap_session_start(runtime, adapter_id, configuration)
+}
+
+fn begin_dap_compile_stream(
+    runtime: &mut EditorRuntime,
+    adapter_id: &str,
+    configuration: DebugConfiguration,
+    command: &str,
+) -> Result<(), String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return finish_dap_session_start(runtime, adapter_id, configuration);
+    }
+    let cwd = active_workspace_root(runtime)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    shell_ui_mut(runtime)?.apply_notification(
+        dap_compile_notification(command, None, None),
+        Instant::now(),
+    );
+    let spec = ExternalCommandSpec {
+        popup_title: "Compiling".to_owned(),
+        buffer_name: "*compile-before-debug*".to_owned(),
+        command_label: Some(command.to_owned()),
+        invocation: ExternalCommandInvocation::Shell(command.to_owned()),
+        env: Vec::new(),
+        cwd,
+        stream: true,
+        on_exit: StreamedCommandExitAction::ContinueDapStart {
+            adapter_id: adapter_id.to_owned(),
+            configuration: Box::new(configuration),
+            command: command.to_owned(),
+        },
+        notify_on_success: false,
+        notify_on_failure: false,
+        use_git_editor: false,
+    };
+    if let Err(error) = run_command(runtime, spec) {
+        shell_ui_mut(runtime)?.apply_notification(
+            dap_compile_notification(command, Some(false), None),
+            Instant::now(),
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn dap_compile_notification(
+    command: &str,
+    success: Option<bool>,
+    exit_code: Option<i32>,
+) -> NotificationUpdate {
+    let (title, severity, active, body_lines) = match success {
+        None => (
+            "Compiling",
+            NotificationSeverity::Info,
+            true,
+            vec![command.to_owned()],
+        ),
+        Some(true) => (
+            "Compile finished",
+            NotificationSeverity::Success,
+            false,
+            vec![command.to_owned()],
+        ),
+        Some(false) => {
+            let mut lines = vec![command.to_owned()];
+            if let Some(exit_code) = exit_code {
+                lines.push(format!("Exit code: {exit_code}"));
+            }
+            ("Compile failed", NotificationSeverity::Error, false, lines)
+        }
+    };
+    NotificationUpdate {
+        key: "dap.compile".to_owned(),
+        severity,
+        title: title.to_owned(),
+        body_lines,
+        progress: active.then_some(NotificationProgress { percentage: None }),
+        active,
+        action: None,
+        workspace_id: None,
+    }
+}
+
+fn resolve_dotnet_program_after_build(
+    runtime: &mut EditorRuntime,
+    adapter_id: &str,
+    configuration: DebugConfiguration,
+    command: &str,
+) -> Result<(), String> {
+    let ctx = dap_start_context(runtime)?;
+    let Some(root) = ctx.workspace_root else {
+        return finish_dap_session_start(runtime, adapter_id, configuration);
+    };
+    let Some(candidates) =
+        dotnet_program_candidates_for_build_command(&root, command, ctx.active_file.as_deref())
+    else {
+        return finish_dap_session_start(runtime, adapter_id, configuration);
+    };
+    present_dotnet_program_choice(runtime, adapter_id, configuration, &root, candidates, false)
 }
 
 fn save_workspace_for_dap_start(runtime: &mut EditorRuntime) -> Result<(), String> {
@@ -604,77 +913,6 @@ fn save_workspace_for_dap_start(runtime: &mut EditorRuntime) -> Result<(), Strin
         .or_else(|| runtime.model().active_workspace_id().ok())
         .ok_or_else(|| "dap.start needs an active Workspace to save".to_owned())?;
     save_workspace(runtime, workspace_id)
-}
-
-fn run_dap_compile_before_debug(runtime: &mut EditorRuntime, command: &str) -> Result<(), String> {
-    let command = command.trim();
-    if command.is_empty() {
-        return Ok(());
-    }
-    let buffer_id = open_command_output_buffer(runtime)?;
-    {
-        let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.replace_with_lines_follow_output(vec![
-            "# compile-before-debug".to_owned(),
-            format!("$ {command}"),
-            String::new(),
-        ]);
-    }
-    let terminal_config = shell_user_library(runtime).terminal_config();
-    let cwd = active_workspace_root(runtime)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let mut args = terminal_config.args;
-    let shell_program = terminal_config.program;
-    args.extend(
-        shell_command_eval_args(&shell_program)
-            .into_iter()
-            .map(str::to_owned),
-    );
-    args.push(command.to_owned());
-    {
-        let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.append_output_lines(&[format!("$ {command}"), String::new()]);
-    }
-    let workspace_id = runtime
-        .model()
-        .active_workspace_id()
-        .map_err(|error| error.to_string())?;
-    let spec = JobSpec::command("dap-prelaunch", shell_program, args)
-        .with_cwd(cwd)
-        .with_workspace(editor_jobs::WorkspaceId::from_raw(workspace_id.get()));
-    let manager = runtime
-        .services()
-        .get::<Mutex<JobManager>>()
-        .ok_or_else(|| "job manager service missing".to_owned())?;
-    let mut manager = manager
-        .lock()
-        .map_err(|_| "job manager lock poisoned".to_owned())?;
-    let handle = manager.spawn(spec).map_err(|error| error.to_string())?;
-    drop(manager);
-    let result = handle.wait().map_err(|error| error.to_string())?;
-    let transcript = result.transcript();
-    let output_lines: Vec<String> = transcript.lines().map(str::to_owned).collect();
-    let status_line = if result.succeeded() {
-        "── ✓ compile-before-debug succeeded ───────────────────────────────────".to_owned()
-    } else {
-        format!(
-            "── ✗ compile-before-debug failed (exit {}) ──────────────────────────",
-            result.exit_code().unwrap_or(-1)
-        )
-    };
-    {
-        let buffer = shell_buffer_mut(runtime, buffer_id)?;
-        buffer.append_output_lines(&output_lines);
-        buffer.append_output_lines(&[status_line]);
-    }
-    if !result.succeeded() {
-        return Err(format!(
-            "compile-before-debug failed for `{command}`; see command output"
-        ));
-    }
-    Ok(())
 }
 
 fn finish_dap_session_start(

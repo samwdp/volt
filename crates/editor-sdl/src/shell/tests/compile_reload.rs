@@ -323,3 +323,215 @@ fn dap_heuristic_compile_opens_confirm_picker() -> Result<(), String> {
     let _ = fs::remove_dir_all(&root);
     Ok(())
 }
+
+fn write_dotnet_project(
+    dir: &std::path::Path,
+    file_name: &str,
+    output_type: &str,
+) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    fs::write(
+        dir.join(file_name),
+        format!(
+            r#"<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>{output_type}</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>"#
+        ),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn write_entry_dll(project_dir: &std::path::Path, name: &str) -> Result<(), String> {
+    let dir = project_dir.join("bin").join("Debug").join("net8.0");
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    fs::write(dir.join(name), "").map_err(|error| error.to_string())
+}
+
+#[test]
+fn dap_dotnet_multi_project_opens_build_picker() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-dotnet-build");
+    let solution = root.join("src").join("dir1");
+    let api = solution.join("dotnet_api");
+    let tests = solution.join("dotnet_test_library");
+    let shared = solution.join("dotnet_shared_library");
+    write_dotnet_project(&api, "api.csproj", "Exe")?;
+    write_dotnet_project(&tests, "test.csproj", "Library")?;
+    write_dotnet_project(&shared, "shared.csproj", "Library")?;
+    fs::write(
+        solution.join("a.sln"),
+        "Microsoft Visual Studio Solution File, Format Version 12.00\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let program = api.join("Program.cs");
+    fs::write(&program, "class Program {}\n").map_err(|error| error.to_string())?;
+    let _workspace = open_workspace_from_project(&mut state.runtime, "dotnet", &root)?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+
+    let configuration = DebugConfiguration::new("Debug (dotnet)", DebugRequestKind::Launch)
+        .with_target_program(program)
+        .with_compile_command("dotnet build")
+        .with_cwd(root.clone());
+    continue_dap_start(&mut state.runtime, "sharpdbg", configuration, true)?;
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "expected dotnet build picker".to_owned())?;
+    assert_eq!(picker.session().title(), "Build with dotnet");
+    let labels = picker
+        .session()
+        .matches()
+        .iter()
+        .map(|row| row.item().label().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        labels[0].contains("api.csproj"),
+        "nearest project should be first: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label.contains("a.sln")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label.contains("test.csproj")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|label| label.contains("shared.csproj")),
+        "{labels:?}"
+    );
+    assert_eq!(
+        labels.last().map(String::as_str),
+        Some("Start without compiling")
+    );
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_compile_shows_working_notice_before_session_starts() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-compile-progress");
+    let _workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
+    let program = root.join("main.rs");
+    fs::write(&program, "fn main() {}\n").map_err(|error| error.to_string())?;
+    let _buffer = open_workspace_file(&mut state.runtime, &program)?;
+    let (_port, fake) = install_fake_tcp_dap_manager(&mut state.runtime)?;
+
+    let configuration = DebugConfiguration::new("Debug", DebugRequestKind::Launch)
+        .with_target_program(program)
+        .with_cwd(root.clone());
+    run_dap_prelaunch_then_start(
+        &mut state.runtime,
+        "fake-dap",
+        configuration,
+        Some("echo dap-compile-progress".to_owned()),
+    )?;
+
+    assert!(
+        !shell_ui(&state.runtime)?.is_debug_layout_active(),
+        "session must wait until compile finishes"
+    );
+    let notices = shell_ui(&state.runtime)?.visible_notifications(std::time::Instant::now());
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.active && notice.title == "Compiling"),
+        "compiling notice missing"
+    );
+    assert!(
+        active_runtime_popup(&state.runtime)?.is_some(),
+        "compile output popup missing"
+    );
+
+    let started = std::time::Instant::now();
+    loop {
+        refresh_pending_streamed_commands(&mut state.runtime)?;
+        if shell_ui(&state.runtime)?.is_debug_layout_active() {
+            break;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(8) {
+            return Err("debug session did not start after compile".to_owned());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    stop_dap_for_active_workspace(&mut state.runtime)?;
+    let _ = fake.join();
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn dap_dotnet_assembly_picker_lists_entry_dlls_only() -> Result<(), String> {
+    let mut state = state_with_user_library()?;
+    let root = unique_temp_dir("dap-dotnet-dll");
+    let solution = root.join("src").join("dir1");
+    let api = solution.join("dotnet_api");
+    let tests = solution.join("dotnet_test_library");
+    let shared = solution.join("dotnet_shared_library");
+    write_dotnet_project(&api, "api.csproj", "Exe")?;
+    write_dotnet_project(&tests, "test.csproj", "Library")?;
+    write_dotnet_project(&shared, "shared.csproj", "Library")?;
+    fs::write(
+        solution.join("a.sln"),
+        r#"Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "dotnet_api", "dotnet_api\api.csproj", "{11111111-1111-1111-1111-111111111111}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "dotnet_test_library", "dotnet_test_library\test.csproj", "{22222222-2222-2222-2222-222222222222}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "dotnet_shared_library", "dotnet_shared_library\shared.csproj", "{33333333-3333-3333-3333-333333333333}"
+EndProject
+"#,
+    )
+    .map_err(|error| error.to_string())?;
+    write_entry_dll(&api, "dotnet_api.dll")?;
+    write_entry_dll(&api, "Newtonsoft.Json.dll")?;
+    write_entry_dll(&tests, "dotnet_test_library.dll")?;
+    write_entry_dll(&shared, "dotnet_shared_library.dll")?;
+    let _workspace = open_workspace_from_project(&mut state.runtime, "dotnet-dll", &root)?;
+    let command = dotnet_compile_command(&root, &solution.join("a.sln"));
+    let candidates = dotnet_program_candidates_for_build_command(&root, &command, None)
+        .ok_or_else(|| "expected dotnet candidates".to_owned())?;
+    let configuration = DebugConfiguration::new("Debug (dotnet)", DebugRequestKind::Launch)
+        .with_compile_command(command)
+        .with_cwd(root.clone());
+    present_dotnet_program_choice(
+        &mut state.runtime,
+        "sharpdbg",
+        configuration,
+        &root,
+        candidates,
+        false,
+    )?;
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "expected assembly picker".to_owned())?;
+    assert_eq!(picker.session().title(), "Debug assembly");
+    let labels = picker
+        .session()
+        .matches()
+        .iter()
+        .map(|row| row.item().label().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        labels[0].contains("dotnet_api.dll"),
+        "executable assembly should be first: {labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.contains("dotnet_test_library.dll")),
+        "{labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.contains("dotnet_shared_library.dll")),
+        "{labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .all(|label| !label.contains("Newtonsoft.Json.dll")),
+        "{labels:?}"
+    );
+    let _ = fs::remove_dir_all(&root);
+    Ok(())
+}

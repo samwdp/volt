@@ -113,8 +113,10 @@ use editor_core::{
 use editor_dap::{
     BreakpointState, DapClientError, DapClientManager, DapEvaluateContext, DapLogDirection,
     DapLogSnapshot, DapSessionEvent, DebugAdapterRegistry, DebugConfiguration,
-    DebugConfigurationCandidate, DebugInferContext, DebugRequestKind,
-    collect_configuration_candidates, configuration_holes, infer_compile_heuristic,
+    DebugConfigurationCandidate, DebugInferContext, DebugRequestKind, DotnetBuildTarget,
+    collect_configuration_candidates, configuration_holes, discover_dotnet_build_targets,
+    dotnet_compile_command, dotnet_program_candidates_for_build_command,
+    dotnet_workspace_program_candidates, infer_compile_heuristic, is_dotnet_build_command,
 };
 use editor_db::{
     DbActionOutcome, DbAutocompleteCandidate, DbBrowserBufferView, DbExecutionOutput, DbService,
@@ -259,6 +261,7 @@ include!("compile.rs");
 include!("refresh.rs");
 include!("workspace.rs");
 include!("workspace_clone.rs");
+include!("workspace_create.rs");
 include!("help.rs");
 include!("syntax_refresh.rs");
 include!("files.rs");
