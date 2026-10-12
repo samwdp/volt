@@ -101,7 +101,11 @@ pub(super) fn render_plugin_section_buffer_body(
     let PluginSectionDraw {
         buffer,
         view_state: base_view_state,
-        pane: PaneSlot { rect, active },
+        pane: PaneSlot {
+            rect,
+            active,
+            modeline_rect: _,
+        },
         layout,
         visual_selection,
         yank_flash,

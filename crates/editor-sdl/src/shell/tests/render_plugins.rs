@@ -149,7 +149,7 @@ fn render_plugin_sections_active_header_keeps_neutral_background() -> Result<(),
         PluginSectionDraw {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             layout,
             visual_selection: None,
             yank_flash: None,
@@ -220,7 +220,7 @@ fn render_plugin_sections_apply_window_opacity_to_panel_chrome() -> Result<(), S
         PluginSectionDraw {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             layout,
             visual_selection: None,
             yank_flash: None,

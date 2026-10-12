@@ -216,15 +216,9 @@ fn start_visual_block_insert(runtime: &mut EditorRuntime, append: bool) -> Resul
     Ok(())
 }
 
-fn line_flash_selection_for_range(
-    buffer: &ShellBuffer,
-    range: TextRange,
-) -> Option<VisualSelection> {
+fn flash_selection_for_range(range: TextRange) -> Option<VisualSelection> {
     let range = range.normalized();
-    let line_count = range.end().line.saturating_sub(range.start().line) + 1;
-    buffer
-        .line_span_range(range.start().line, line_count)
-        .map(VisualSelection::Range)
+    (range.start() != range.end()).then_some(VisualSelection::Range(range))
 }
 
 fn transform_case_text(text: &str, operator: VimOperator) -> String {

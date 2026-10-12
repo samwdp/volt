@@ -754,10 +754,8 @@ pub(super) fn render_terminal_buffer(
         yank_flash,
     } = draw;
     let BufferBodyPalette {
-        theme_registry,
         base_background,
         foreground: text_color,
-        border_color,
         selection: selection_color,
         yank_flash_color,
         cursor: cursor_color,
@@ -773,7 +771,6 @@ pub(super) fn render_terminal_buffer(
         cell_width,
         line_height,
     } = metrics;
-    let window_effects = current_window_effect_settings(theme_registry);
     let text_x = rect.x() + 12;
     let content_right = rect.x().saturating_add(rect.width() as i32);
     for (row_index, line) in terminal_render
@@ -931,19 +928,6 @@ pub(super) fn render_terminal_buffer(
         }
     }
 
-    // CONTEXT: terminal footer chrome stays fully opaque when window.opacity < 1,
-    // matching cell backgrounds and the editor modeline band.
-    let _ = window_effects;
-    fill_rect(
-        target,
-        PixelRectToRect::rect(
-            rect.x() + 8,
-            layout.statusline_y - 6,
-            rect.width().saturating_sub(16),
-            1,
-        ),
-        Color::RGBA(border_color.r, border_color.g, border_color.b, 255),
-    )?;
     draw_text(
         target,
         rect.x() + 12,
@@ -956,16 +940,6 @@ pub(super) fn render_terminal_buffer(
         },
     )?;
     let _ = text_color;
-    fill_rect(
-        target,
-        PixelRectToRect::rect(
-            rect.x(),
-            rect.y() + rect.height() as i32 - 2,
-            rect.width(),
-            1,
-        ),
-        Color::RGBA(border_color.r, border_color.g, border_color.b, 255),
-    )?;
     Ok(())
 }
 

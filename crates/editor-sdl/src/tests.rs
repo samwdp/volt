@@ -14,7 +14,7 @@ use crate::{
     },
     state::{BlockSelection, InputMode, VisualSelection, VisualSelectionKind},
 };
-use editor_buffer::{TextBuffer, TextPoint};
+use editor_buffer::{TextBuffer, TextPoint, TextRange};
 use editor_core::{BufferKind, HookEvent};
 use editor_render::RenderBackend;
 use editor_syntax::SyntaxRegistry;
@@ -1158,14 +1158,67 @@ fn vim_yanks_set_flash_selections() -> Result<(), Box<dyn std::error::Error>> {
 
     state.handle_text_input("y")?;
     state.handle_text_input("w")?;
-    let line_flash = state.ui()?.yank_flash(buffer_id, Instant::now());
     assert_eq!(
-        line_flash,
+        state.ui()?.yank_flash(buffer_id, Instant::now()),
+        Some(VisualSelection::Range(TextRange::new(
+            TextPoint::new(0, 0),
+            TextPoint::new(0, 6),
+        )))
+    );
+
+    state.handle_text_input("y")?;
+    state.handle_text_input("e")?;
+    assert_eq!(
+        state.ui()?.yank_flash(buffer_id, Instant::now()),
+        Some(VisualSelection::Range(TextRange::new(
+            TextPoint::new(0, 0),
+            TextPoint::new(0, 5),
+        )))
+    );
+
+    state.handle_text_input("y")?;
+    state.handle_text_input("i")?;
+    state.handle_text_input("w")?;
+    assert_eq!(
+        state.ui()?.yank_flash(buffer_id, Instant::now()),
+        Some(VisualSelection::Range(TextRange::new(
+            TextPoint::new(0, 0),
+            TextPoint::new(0, 5),
+        )))
+    );
+
+    state.handle_text_input("y")?;
+    state.handle_text_input("a")?;
+    state.handle_text_input("w")?;
+    assert_eq!(
+        state.ui()?.yank_flash(buffer_id, Instant::now()),
+        Some(VisualSelection::Range(TextRange::new(
+            TextPoint::new(0, 0),
+            TextPoint::new(0, 6),
+        )))
+    );
+
+    state.handle_text_input("y")?;
+    state.handle_text_input("y")?;
+    assert_eq!(
+        state.ui()?.yank_flash(buffer_id, Instant::now()),
         Some(VisualSelection::Range(
             state
                 .active_buffer_mut()?
-                .line_range(0)
+                .line_span_range(0, 1)
                 .ok_or("missing line range")?
+        ))
+    );
+
+    state.handle_text_input("y")?;
+    state.handle_text_input("j")?;
+    assert_eq!(
+        state.ui()?.yank_flash(buffer_id, Instant::now()),
+        Some(VisualSelection::Range(
+            state
+                .active_buffer_mut()?
+                .line_span_range(0, 2)
+                .ok_or("missing span")?
         ))
     );
 

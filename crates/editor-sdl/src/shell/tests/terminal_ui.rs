@@ -90,7 +90,7 @@ fn render_terminal_buffer_path_draws_command_line_separator_without_footer_fill(
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -779,12 +779,11 @@ fn render_terminal_buffer_keeps_terminal_content_opaque_with_window_opacity() ->
                 && rect.height == 16
                 && *color == to_render_color(Color::RGB(24, 36, 48))
     )));
-    assert!(scene.iter().any(|command| matches!(
+    assert!(!scene.iter().any(|command| matches!(
         command,
-        DrawCommand::FillRect { rect, color }
-            if rect.y == layout.statusline_y - 6
-                && rect.height == 1
-                && color.a == 255
+        DrawCommand::FillRect { rect, .. }
+            if rect.height == 1
+                && (rect.y == layout.statusline_y - 6 || rect.y == 178)
     )));
     assert!(scene.iter().any(|command| matches!(
         command,

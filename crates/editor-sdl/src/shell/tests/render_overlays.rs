@@ -543,7 +543,7 @@ fn render_buffer_draws_command_line_row_without_active_overlay() -> Result<(), S
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,

@@ -106,7 +106,11 @@ pub(super) fn render_buffer(
     let BufferDrawRequest {
         buffer,
         view_state,
-        pane: PaneSlot { rect, active },
+        pane: PaneSlot {
+            rect,
+            active,
+            modeline_rect,
+        },
         decorations:
             BufferDecorations {
                 visual_selection,
@@ -316,6 +320,14 @@ pub(super) fn render_buffer(
     if buffer_is_terminal(&buffer.kind)
         && let Some(terminal_render) = buffer.terminal_render()
     {
+        if modeline_rect.is_some() {
+            let band = modeline_band(rect, modeline_rect, layout.statusline_y, line_height);
+            fill_rect(
+                target,
+                PixelRectToRect::rect(band.x, band.y, band.width, band.height),
+                Color::RGBA(base_background.r, base_background.g, base_background.b, 255),
+            )?;
+        }
         render_terminal_buffer(
             target,
             TerminalBufferDraw {
@@ -455,7 +467,7 @@ pub(super) fn render_buffer(
             PluginSectionDraw {
                 buffer,
                 view_state,
-                pane: PaneSlot { rect, active },
+                pane: PaneSlot::new(rect, active),
                 layout,
                 visual_selection,
                 yank_flash,
@@ -1202,34 +1214,23 @@ pub(super) fn render_buffer(
         }
     }
 
-    render_footer_separator(
-        target,
-        rect,
-        layout.statusline_y - BUFFER_FOOTER_SEPARATOR_OFFSET,
-        border_color,
-        window_effects,
-    )?;
     // CONTEXT: modeline stays fully opaque even when window.opacity < 1 so the
     // status row remains readable over acrylic/mica. Pane fills still use
     // window opacity; only this band forces alpha 255.
+    let band = modeline_band(rect, modeline_rect, layout.statusline_y, line_height);
     fill_rect(
         target,
-        PixelRectToRect::rect(
-            rect.x(),
-            layout.statusline_y,
-            rect.width(),
-            line_height.max(1) as u32,
-        ),
+        PixelRectToRect::rect(band.x, band.y, band.width, band.height),
         Color::RGBA(base_background.r, base_background.g, base_background.b, 255),
     )?;
-    let statusline_x = rect.x() + 12;
+    let statusline_x = band.x + 12;
     draw_modeline(
         target,
         &modeline_segments,
         ModelineDraw {
             x: statusline_x,
             y: layout.statusline_y,
-            max_width: rect.width().saturating_sub(24),
+            max_width: band.width.saturating_sub(24),
             default_color: statusline_text_color,
             apply_tokens: active,
             theme_registry,
@@ -1276,17 +1277,6 @@ pub(super) fn render_buffer(
     )?;
 
     let _ = ascent;
-    fill_window_surface_rect(
-        target,
-        PixelRectToRect::rect(
-            rect.x(),
-            rect.y() + rect.height() as i32 - 2,
-            rect.width(),
-            1,
-        ),
-        border_color,
-        window_effects,
-    )?;
     Ok(())
 }
 

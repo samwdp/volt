@@ -122,6 +122,19 @@ pub(super) struct CommandLineSlot<'a> {
 pub(super) struct PaneSlot {
     pub rect: Rect,
     pub active: bool,
+    /// Outer frame for the modeline band. Body layout stays on `rect`.
+    /// Popups pass the popup rect so the band meets the popup edges.
+    pub modeline_rect: Option<Rect>,
+}
+
+impl PaneSlot {
+    pub(super) fn new(rect: Rect, active: bool) -> Self {
+        Self {
+            rect,
+            active,
+            modeline_rect: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

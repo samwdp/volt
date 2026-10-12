@@ -216,7 +216,7 @@ fn render_buffer_draws_show_paren_match_highlight() -> Result<(), String> {
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -292,7 +292,7 @@ fn render_buffer_draws_show_paren_html_tag_highlight() -> Result<(), String> {
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -368,7 +368,7 @@ fn render_buffer_skips_show_paren_html_tag_highlight_for_csharp() -> Result<(), 
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -432,7 +432,7 @@ fn render_plugin_sections_draw_visual_selection_highlight() -> Result<(), String
         PluginSectionDraw {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             layout,
             visual_selection: Some(VisualSelection::Range(TextRange::new(
                 TextPoint::new(0, 0),

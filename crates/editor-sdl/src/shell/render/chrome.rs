@@ -245,6 +245,7 @@ pub(super) fn render_runtime_popup_overlay(
                 pane: PaneSlot {
                     rect: popup_content_rect(popup_rect),
                     active: popup_focus,
+                    modeline_rect: Some(popup_rect),
                 },
                 decorations: BufferDecorations {
                     visual_selection: visual_range,

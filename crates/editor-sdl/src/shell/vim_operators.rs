@@ -53,7 +53,7 @@ fn apply_text_object_operator(
         (
             range,
             original_cursor,
-            line_flash_selection_for_range(buffer, range),
+            flash_selection_for_range(range),
         )
     };
     apply_operator_to_range(
@@ -388,7 +388,7 @@ fn apply_operator_motion(
                     | ShellMotion::LastLine
             ),
             original_cursor,
-            line_flash_selection_for_range(buffer, range),
+            flash_selection_for_range(range),
         )
     };
 
@@ -721,7 +721,7 @@ fn resolve_find_target(
             (
                 range,
                 original_cursor,
-                line_flash_selection_for_range(buffer, range),
+                flash_selection_for_range(range),
             )
         };
         apply_operator_to_range(

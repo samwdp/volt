@@ -120,10 +120,10 @@ pub(super) fn render_shell_state(
                 BufferDrawRequest {
                     buffer,
                     view_state,
-                    pane: PaneSlot {
-                        rect: PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
+                    pane: PaneSlot::new(
+                        PixelRectToRect::rect(rect.x, rect.y, rect.width, rect.height),
                         active,
-                    },
+                    ),
                     decorations: BufferDecorations {
                         visual_selection: visual_range,
                         yank_flash,

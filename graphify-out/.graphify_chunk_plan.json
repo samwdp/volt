@@ -1,0 +1,260 @@
+[
+  {
+    "n": 1,
+    "files": [
+      "P:\\volt\\issues\\ISS-003-add-when-asm-is-added.md",
+      "P:\\volt\\issues\\ISS-004-can-t-get-this-to-work-goal-is-to-indent-at-the.md",
+      "P:\\volt\\issues\\ISS-005-missing-local-reference-usage-tuned-for-each-rel.md",
+      "P:\\volt\\issues\\ISS-006-when-nvim-treesitter-has-postcss-and-less-parser.md",
+      "P:\\volt\\issues\\ISS-007-context-blocks-for.md",
+      "P:\\volt\\issues\\ISS-008-ideally-only-for-identifiers-under-a-variable-bl.md",
+      "P:\\volt\\issues\\ISS-009-update-grammar.md",
+      "P:\\volt\\issues\\ISS-010-update-grammar.md",
+      "P:\\volt\\issues\\ISS-011-https-github-com-nvim-treesitter-nvim-treesitter.md",
+      "P:\\volt\\issues\\ISS-012-inaccessible-node.md",
+      "P:\\volt\\issues\\ISS-013-this-will-highlight-the-keyword-outside-of-lambd.md",
+      "P:\\volt\\issues\\ISS-014-this-will-highlight-the-keyword-outside-of-gette.md",
+      "P:\\volt\\issues\\ISS-015-only-match-raw.md",
+      "P:\\volt\\issues\\ISS-016-add-once-coffeescript-parser-is-added.md",
+      "P:\\volt\\issues\\ISS-017-class-literals-with-pascalcase.md",
+      "P:\\volt\\issues\\ISS-018-while-try.md",
+      "P:\\volt\\issues\\ISS-019-complete-terminals-in-grammar-and-then-simplify.md"
+    ]
+  },
+  {
+    "n": 2,
+    "files": [
+      "P:\\volt\\issues\\ISS-020-highlight-builtin-methods-table-unpack-etc-as-fu.md",
+      "P:\\volt\\issues\\ISS-021-in-decl-class.md",
+      "P:\\volt\\issues\\ISS-022-string-and-print-numbered-format-injection.md",
+      "P:\\volt\\issues\\ISS-023-https-github-com-nvim-treesitter-nvim-treesitter.md",
+      "P:\\volt\\issues\\ISS-024-add-method-call-expression-to-grammar-and.md",
+      "P:\\volt\\issues\\ISS-025-inaccessible-nodes.md",
+      "P:\\volt\\issues\\ISS-026-todo-in-crates-volt-assets-grammars-queries-dart.md",
+      "P:\\volt\\issues\\ISS-027-todo-in-crates-volt-assets-grammars-queries-dart.md",
+      "P:\\volt\\issues\\ISS-028-uncomment-when-asm-is-added.md",
+      "P:\\volt\\issues\\ISS-029-special-casing-for-the-macro.md",
+      "P:\\volt\\issues\\ISS-030-do-all-these-items-belong-here.md",
+      "P:\\volt\\issues\\ISS-031-add-comment-highlight.md",
+      "P:\\volt\\issues\\ISS-032-add-comment-highlight.md",
+      "P:\\volt\\issues\\ISS-033-fix-parameter-highlighting.md",
+      "P:\\volt\\issues\\ISS-034-reproduce-bug-and-file-ticket.md",
+      "P:\\volt\\issues\\ISS-035-add-when-asm-is-added.md",
+      "P:\\volt\\issues\\ISS-owned-process-lifecycle-spec.md"
+    ]
+  },
+  {
+    "n": 3,
+    "files": [
+      "P:\\volt\\docs\\docs\\plugins\\acp.md",
+      "P:\\volt\\docs\\docs\\plugins\\autocomplete.md",
+      "P:\\volt\\docs\\docs\\plugins\\browser.md",
+      "P:\\volt\\docs\\docs\\plugins\\buffer.md",
+      "P:\\volt\\docs\\docs\\plugins\\calculator.md",
+      "P:\\volt\\docs\\docs\\plugins\\catalog.md",
+      "P:\\volt\\docs\\docs\\plugins\\compile.md",
+      "P:\\volt\\docs\\docs\\plugins\\dap.md",
+      "P:\\volt\\docs\\docs\\plugins\\db.md",
+      "P:\\volt\\docs\\docs\\plugins\\dotnet.md",
+      "P:\\volt\\docs\\docs\\plugins\\git.md",
+      "P:\\volt\\docs\\docs\\plugins\\help.md",
+      "P:\\volt\\docs\\docs\\plugins\\hover.md",
+      "P:\\volt\\docs\\docs\\plugins\\image.md",
+      "P:\\volt\\docs\\docs\\plugins\\interactive.md"
+    ]
+  },
+  {
+    "n": 4,
+    "files": [
+      "P:\\volt\\docs\\docs\\plugins\\issues.md",
+      "P:\\volt\\docs\\docs\\plugins\\lsp.md",
+      "P:\\volt\\docs\\docs\\plugins\\multicursor.md",
+      "P:\\volt\\docs\\docs\\plugins\\oil.md",
+      "P:\\volt\\docs\\docs\\plugins\\pane.md",
+      "P:\\volt\\docs\\docs\\plugins\\pdf.md",
+      "P:\\volt\\docs\\docs\\plugins\\picker.md",
+      "P:\\volt\\docs\\docs\\plugins\\rainbow-parens.md",
+      "P:\\volt\\docs\\docs\\plugins\\show-paren.md",
+      "P:\\volt\\docs\\docs\\plugins\\terminal.md",
+      "P:\\volt\\docs\\docs\\plugins\\treesitter.md",
+      "P:\\volt\\docs\\docs\\plugins\\undotree.md",
+      "P:\\volt\\docs\\docs\\plugins\\vim.md",
+      "P:\\volt\\docs\\docs\\plugins\\workspace-dock.md",
+      "P:\\volt\\docs\\docs\\plugins\\workspace.md"
+    ]
+  },
+  {
+    "n": 5,
+    "files": [
+      "P:\\volt\\docs\\docs\\user-packages\\after-scaffold.md",
+      "P:\\volt\\docs\\docs\\user-packages\\autocomplete.md",
+      "P:\\volt\\docs\\docs\\user-packages\\build.md",
+      "P:\\volt\\docs\\docs\\user-packages\\concepts.md",
+      "P:\\volt\\docs\\docs\\user-packages\\create-plugin.md",
+      "P:\\volt\\docs\\docs\\user-packages\\edit-plugin.md",
+      "P:\\volt\\docs\\docs\\user-packages\\hot-reload.md",
+      "P:\\volt\\docs\\docs\\user-packages\\overview.md",
+      "P:\\volt\\docs\\docs\\user-packages\\troubleshooting.md",
+      "P:\\volt\\docs\\docs\\guides\\builtin-themes.md",
+      "P:\\volt\\docs\\docs\\guides\\change-keybindings.md",
+      "P:\\volt\\docs\\docs\\guides\\change-terminal-shell.md",
+      "P:\\volt\\docs\\docs\\guides\\change-theme.md",
+      "P:\\volt\\docs\\docs\\guides\\changelog.md",
+      "P:\\volt\\docs\\docs\\configuration.md",
+      "P:\\volt\\docs\\docs\\getting-started.md",
+      "P:\\volt\\docs\\docs\\index.md",
+      "P:\\volt\\docs\\docs\\search.md",
+      "P:\\volt\\docs\\docs\\languages\\add-language.md"
+    ]
+  },
+  {
+    "n": 6,
+    "files": [
+      "P:\\volt\\Agents.md",
+      "P:\\volt\\CLAUDE.md",
+      "P:\\volt\\CONTEXT.md",
+      "P:\\volt\\README.md",
+      "P:\\volt\\.agents\\skills\\commit-volt-docs\\SKILL.md",
+      "P:\\volt\\.agents\\skills\\update-volt-docs\\SKILL.md",
+      "P:\\volt\\.cursor\\skills\\commit-volt-docs\\SKILL.md",
+      "P:\\volt\\.cursor\\skills\\update-volt-docs\\SKILL.md",
+      "P:\\volt\\.github\\copilot-instructions.md",
+      "P:\\volt\\.github\\workflows\\ci.yml",
+      "P:\\volt\\.github\\workflows\\release.yml",
+      "P:\\volt\\crates\\volt\\assets\\browser\\README.md",
+      "P:\\volt\\docs\\README.md",
+      "P:\\volt\\docs\\.agents\\skills\\create-volt-docs\\SKILL.md",
+      "P:\\volt\\docs\\.agents\\skills\\create-volt-docs\\page-templates.md",
+      "P:\\volt\\docs\\.agents\\skills\\refresh-volt-docs\\SKILL.md",
+      "P:\\volt\\docs\\.cursor\\skills\\create-volt-docs\\SKILL.md",
+      "P:\\volt\\docs\\.cursor\\skills\\refresh-volt-docs\\SKILL.md",
+      "P:\\volt\\docs\\.github\\workflows\\deploy.yml",
+      "P:\\volt\\user\\README.md",
+      "P:\\volt\\user\\config.yaml",
+      "P:\\volt\\user\\config\\acp.yaml",
+      "P:\\volt\\user\\config\\oil.yaml",
+      "P:\\volt\\user\\config\\ui.yaml",
+      "P:\\volt\\user\\config\\workspace.yaml"
+    ]
+  },
+  {
+    "n": 7,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\acp\\agent.svg"
+    ]
+  },
+  {
+    "n": 8,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\acp\\codex.svg"
+    ]
+  },
+  {
+    "n": 9,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\acp\\copilot.svg"
+    ]
+  },
+  {
+    "n": 10,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\acp\\opencode.svg"
+    ]
+  },
+  {
+    "n": 11,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\acp\\pi.svg"
+    ]
+  },
+  {
+    "n": 12,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\banner.png"
+    ]
+  },
+  {
+    "n": 13,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\browser\\bookmark.svg"
+    ]
+  },
+  {
+    "n": 14,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\browser\\buffer.svg"
+    ]
+  },
+  {
+    "n": 15,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\browser\\tab.svg"
+    ]
+  },
+  {
+    "n": 16,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\logo.png"
+    ]
+  },
+  {
+    "n": 17,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\logo.svg"
+    ]
+  },
+  {
+    "n": 18,
+    "files": [
+      "P:\\volt\\crates\\volt\\assets\\logo_32x32.png"
+    ]
+  },
+  {
+    "n": 19,
+    "files": [
+      "P:\\volt\\docs\\assets\\banner.png"
+    ]
+  },
+  {
+    "n": 20,
+    "files": [
+      "P:\\volt\\docs\\assets\\logo.png"
+    ]
+  },
+  {
+    "n": 21,
+    "files": [
+      "P:\\volt\\docs\\assets\\logo.svg"
+    ]
+  },
+  {
+    "n": 22,
+    "files": [
+      "P:\\volt\\docs\\assets\\logo_32x32.png"
+    ]
+  },
+  {
+    "n": 23,
+    "files": [
+      "P:\\volt\\docs\\docs\\public\\assets\\banner.png"
+    ]
+  },
+  {
+    "n": 24,
+    "files": [
+      "P:\\volt\\docs\\docs\\public\\assets\\logo.png"
+    ]
+  },
+  {
+    "n": 25,
+    "files": [
+      "P:\\volt\\docs\\docs\\public\\assets\\logo.svg"
+    ]
+  },
+  {
+    "n": 26,
+    "files": [
+      "P:\\volt\\docs\\docs\\public\\assets\\logo_32x32.png"
+    ]
+  }
+]

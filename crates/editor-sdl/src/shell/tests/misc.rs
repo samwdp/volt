@@ -1898,7 +1898,7 @@ fn render_buffer_headerline_reserves_rows_above_buffer_body() -> Result<(), Stri
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -1966,7 +1966,7 @@ fn render_buffer_headerline_keeps_cursor_below_sticky_row() -> Result<(), String
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -2074,7 +2074,7 @@ fn render_buffer_headerline_truncates_preserving_tail_scope() -> Result<(), Stri
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -2154,7 +2154,7 @@ fn render_buffer_headerline_divider_sits_below_last_headerline_row() -> Result<(
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -2238,7 +2238,7 @@ fn render_buffer_headerline_only_activates_once_scope_header_leaves_viewport() -
         BufferDrawRequest {
             buffer: shell_buffer(&state.runtime, buffer_id)?,
             view_state: (shell_buffer(&state.runtime, buffer_id)?).view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -2287,7 +2287,7 @@ fn render_buffer_headerline_only_activates_once_scope_header_leaves_viewport() -
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -2560,7 +2560,7 @@ fn render_buffer_uses_theme_commandline_background_token() -> Result<(), String>
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -4592,7 +4592,7 @@ fn render_buffer_multicursor_draws_one_cursor_per_range() -> Result<(), String> 
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,

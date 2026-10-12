@@ -119,6 +119,11 @@ fn command_line_footer_layout_reserves_row_below_statusline() -> Result<(), Stri
 
     assert!(layout.statusline_y < commandline_y);
     assert_eq!(commandline_y - layout.statusline_y, 26);
+    assert_eq!(
+        commandline_y + 18,
+        rect.y() + rect.height() as i32,
+        "command line must end at the pane bottom"
+    );
     Ok(())
 }
 
@@ -155,7 +160,7 @@ fn render_buffer_falls_back_to_statusline_theme_tokens_for_text() -> Result<(), 
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -200,10 +205,7 @@ fn render_buffer_falls_back_to_statusline_theme_tokens_for_text() -> Result<(), 
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot {
-                rect,
-                active: false,
-            },
+            pane: PaneSlot::new(rect, false),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -319,7 +321,7 @@ fn render_buffer_paints_modeline_mode_chip_and_right_aligned_segment() -> Result
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -424,7 +426,7 @@ fn render_buffer_paints_opaque_modeline_band_when_window_is_transparent() -> Res
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -464,6 +466,7 @@ fn render_buffer_paints_opaque_modeline_band_when_window_is_transparent() -> Res
                     && fill.y == layout.statusline_y
                     && fill.width == rect.width()
                     && fill.height == 16
+                    && fill.y + fill.height as i32 == rect.y() + rect.height() as i32
                     && *color
                         == to_render_color(Color::RGBA(
                             base_background.r,
@@ -473,6 +476,82 @@ fn render_buffer_paints_opaque_modeline_band_when_window_is_transparent() -> Res
                         ))
         )),
         "modeline band must stay fully opaque when window.opacity < 1"
+    );
+    assert!(
+        !scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRect { rect: fill, .. }
+                if fill.height == 1
+                    && (fill.y == layout.statusline_y - 6 || fill.y == rect.y() + rect.height() as i32 - 2)
+        )),
+        "statusline separator and pane-bottom hairline must stay hidden"
+    );
+    Ok(())
+}
+
+#[test]
+fn render_buffer_popup_modeline_meets_outer_popup_edges() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    let content = PixelRectToRect::rect(26, 40, 200, 120);
+    let popup = PixelRectToRect::rect(20, 26, 212, 140);
+    let layout = buffer_footer_layout(buffer, content, 16, 8);
+    let mut scene = Vec::new();
+    let mut target = DrawTarget::Scene(&mut scene);
+    render_buffer(
+        &mut target,
+        BufferDrawRequest {
+            buffer,
+            view_state: buffer.view_state(),
+            pane: PaneSlot {
+                rect: content,
+                active: true,
+                modeline_rect: Some(popup),
+            },
+            decorations: BufferDecorations {
+                visual_selection: None,
+                yank_flash: None,
+                input_mode: InputMode::Normal,
+                multicursor: None,
+                vim_targets_input: false,
+                recording_macro: None,
+                typing_active: false,
+            },
+            command_line: CommandLineSlot {
+                input: None,
+                row_visible: false,
+            },
+        },
+        BufferChrome {
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            workspace_name: "test-workspace",
+            lsp_server: None,
+            lsp_workspace_loaded: false,
+            acp_connected: false,
+            git_summary: None,
+        },
+        TextMetrics {
+            cell_width: 8,
+            line_height: 16,
+            ascent: 12,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let popup_bottom = popup.y() + popup.height() as i32;
+    assert!(
+        scene.iter().any(|command| matches!(
+            command,
+            DrawCommand::FillRect { rect: fill, .. }
+                if fill.x == popup.x()
+                    && fill.width == popup.width()
+                    && fill.y == layout.statusline_y
+                    && fill.y + fill.height as i32 == popup_bottom
+        )),
+        "popup modeline band must meet the outer popup edges"
     );
     Ok(())
 }
@@ -518,7 +597,7 @@ fn render_buffer_uses_statusline_foreground_tokens() -> Result<(), String> {
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot { rect, active: true },
+            pane: PaneSlot::new(rect, true),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,
@@ -563,10 +642,7 @@ fn render_buffer_uses_statusline_foreground_tokens() -> Result<(), String> {
         BufferDrawRequest {
             buffer,
             view_state: buffer.view_state(),
-            pane: PaneSlot {
-                rect,
-                active: false,
-            },
+            pane: PaneSlot::new(rect, false),
             decorations: BufferDecorations {
                 visual_selection: None,
                 yank_flash: None,

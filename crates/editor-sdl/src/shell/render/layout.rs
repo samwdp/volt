@@ -1,6 +1,5 @@
 const BUFFER_BODY_TOP_PADDING: i32 = 10;
 const BUFFER_BODY_BOTTOM_PADDING: i32 = 10;
-const BUFFER_STATUSLINE_BOTTOM_PADDING: i32 = 8;
 const BUFFER_STATUSLINE_COMMANDLINE_GAP: i32 = 8;
 const BUFFER_FOOTER_SEPARATOR_OFFSET: i32 = 6;
 const BUFFER_INPUT_BOX_EXTRA_HEIGHT: i32 = 8;
@@ -46,10 +45,7 @@ pub(super) fn buffer_footer_layout_with_command_line(
     } else {
         0
     };
-    let statusline_y = rect.y() + rect.height() as i32
-        - line_height
-        - command_line_reserved
-        - BUFFER_STATUSLINE_BOTTOM_PADDING;
+    let statusline_y = rect.y() + rect.height() as i32 - line_height - command_line_reserved;
     let commandline_y = command_line_visible
         .then_some(statusline_y + line_height + BUFFER_STATUSLINE_COMMANDLINE_GAP);
     let available_input_cols = if cell_width > 0 {
@@ -107,6 +103,40 @@ pub(super) fn buffer_footer_layout_with_command_line(
         input_hint_gap,
         visible_rows,
         pane_bottom: input_y - BUFFER_OVERLAY_BOTTOM_GAP,
+    }
+}
+
+struct ModelineBand {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+/// Modeline frame. `outer` stretches the band to a popup edge while text stays
+/// on the content statusline row.
+fn modeline_band(
+    content: Rect,
+    outer: Option<Rect>,
+    statusline_y: i32,
+    line_height: i32,
+) -> ModelineBand {
+    let line_height = line_height.max(1);
+    let Some(outer) = outer else {
+        return ModelineBand {
+            x: content.x(),
+            y: statusline_y,
+            width: content.width(),
+            height: line_height as u32,
+        };
+    };
+    let bottom = outer.y().saturating_add(outer.height() as i32);
+    let y = statusline_y.min(bottom.saturating_sub(line_height));
+    ModelineBand {
+        x: outer.x(),
+        y,
+        width: outer.width(),
+        height: bottom.saturating_sub(y).max(line_height) as u32,
     }
 }
 
