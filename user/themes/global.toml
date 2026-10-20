@@ -201,6 +201,11 @@ indent = 4
 format_on_save = false
 use_tabs = false
 
+[langs.powershell]
+indent = 4
+format_on_save = false
+use_tabs = false
+
 [langs.php]
 indent = 4
 format_on_save = false

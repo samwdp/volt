@@ -155,8 +155,8 @@ pub fn seti_file_icon(path: &Path) -> &'static str {
         Some("css") | Some("scss") | Some("less") => symbols::seti::SETI_CSS,
         Some("js") | Some("mjs") | Some("cjs") | Some("jsx") => symbols::seti::SETI_JAVASCRIPT,
         Some("ts") | Some("tsx") => symbols::seti::SETI_TYPESCRIPT,
-        Some("sh") | Some("bash") | Some("zsh") | Some("fish") | Some("ps1") | Some("bat")
-        | Some("cmd") => symbols::seti::SETI_SHELL,
+        Some("sh") | Some("bash") | Some("zsh") | Some("fish") | Some("ps1") | Some("psm1")
+        | Some("psd1") | Some("bat") | Some("cmd") => symbols::seti::SETI_SHELL,
         Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("svg")
         | Some("ico") | Some("bmp") | Some("tif") | Some("tiff") => symbols::seti::SETI_IMAGE,
         Some("pdf") => symbols::seti::SETI_PDF,

@@ -54,6 +54,8 @@ pub mod odin;
 pub mod perl;
 /// PHP language support and theme mappings.
 pub mod php;
+/// PowerShell language support and theme mappings.
+pub mod powershell;
 /// Protocol Buffers language support and theme mappings.
 pub mod proto;
 /// Python language support and theme mappings.
@@ -118,6 +120,7 @@ pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
         odin::package(),
         perl::package(),
         php::package(),
+        powershell::package(),
         proto::package(),
         python::package(),
         r::package(),
@@ -169,6 +172,7 @@ pub fn syntax_languages() -> Vec<LanguageConfiguration> {
         odin::syntax_language(),
         perl::syntax_language(),
         php::syntax_language(),
+        powershell::syntax_language(),
         proto::syntax_language(),
         python::syntax_language(),
         r::syntax_language(),

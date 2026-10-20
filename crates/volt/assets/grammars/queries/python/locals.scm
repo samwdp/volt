@@ -3,16 +3,14 @@
 
 (class_definition
   body: (block
-    (expression_statement
-      (assignment
-        left: (identifier) @local.definition.field)))) @local.scope
+    (assignment
+      left: (identifier) @local.definition.field))) @local.scope
 
 (class_definition
   body: (block
-    (expression_statement
-      (assignment
-        left: (_
-          (identifier) @local.definition.field))))) @local.scope
+    (assignment
+      left: (_
+        (identifier) @local.definition.field)))) @local.scope
 
 ; Imports
 (aliased_import

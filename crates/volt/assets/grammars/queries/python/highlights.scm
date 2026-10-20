@@ -79,8 +79,12 @@
   (escape_interpolation)
 ] @string.escape
 
-; doc-strings
-(expression_statement
+; doc-strings (expression_statement is a grammar supertype — match string under module/block)
+(module
+  (string
+    (string_content) @spell) @string.documentation)
+
+(block
   (string
     (string_content) @spell) @string.documentation)
 
@@ -364,17 +368,15 @@
 
 ((class_definition
   body: (block
-    (expression_statement
-      (assignment
-        left: (identifier) @variable.member))))
+    (assignment
+      left: (identifier) @variable.member)))
   (#lua-match? @variable.member "^[%l_].*$"))
 
 ((class_definition
   body: (block
-    (expression_statement
-      (assignment
-        left: (_
-          (identifier) @variable.member)))))
+    (assignment
+      left: (_
+        (identifier) @variable.member))))
   (#lua-match? @variable.member "^[%l_].*$"))
 
 ((class_definition

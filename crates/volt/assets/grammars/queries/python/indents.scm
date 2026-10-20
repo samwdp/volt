@@ -51,8 +51,7 @@
   ":"
   (ERROR
     (block
-      (expression_statement
-        (identifier) @_except) @indent.branch))
+      (identifier) @_except @indent.branch))
   (#eq? @_except "except"))
 
 ((function_definition) @indent.begin

@@ -301,6 +301,42 @@ fn csharp_grammar_available() -> bool {
         .exists()
 }
 
+fn python_config() -> LanguageConfiguration {
+    LanguageConfiguration::from_grammar(
+        "python",
+        ["py"],
+        GrammarSource::new(
+            "https://github.com/tree-sitter/tree-sitter-python.git",
+            ".",
+            "src",
+            "tree-sitter-python",
+            "tree_sitter_python",
+        ),
+        [
+            CaptureThemeMapping::new("comment", "syntax.comment"),
+            CaptureThemeMapping::new("function", "syntax.function"),
+            CaptureThemeMapping::new("keyword", "syntax.keyword"),
+            CaptureThemeMapping::new("string", "syntax.string"),
+            CaptureThemeMapping::new("string.documentation", "syntax.string"),
+            CaptureThemeMapping::new("type", "syntax.type"),
+            CaptureThemeMapping::new("variable", "syntax.variable"),
+        ],
+    )
+}
+
+fn python_grammar_available() -> bool {
+    let install_root = default_grammars_root();
+    install_root
+        .join(if cfg!(target_os = "windows") {
+            "libtree-sitter-python.dll"
+        } else if cfg!(target_os = "macos") {
+            "libtree-sitter-python.dylib"
+        } else {
+            "libtree-sitter-python.so"
+        })
+        .exists()
+}
+
 fn typescript_config() -> LanguageConfiguration {
     LanguageConfiguration::from_grammar(
         "typescript",
@@ -512,6 +548,45 @@ fn csharp_flat_grammar_uses_bundled_queries() {
         !snapshot.highlight_spans.is_empty(),
         "csharp bundled highlights produced no spans"
     );
+}
+
+/// Bundled python highlights must compile against the installed grammar.
+///
+/// Guards the `expression_statement` supertype change in tree-sitter-python
+/// (Impossible pattern on `(expression_statement (string …))`).
+#[test]
+fn python_bundled_highlights_query_compiles() {
+    let install_root = default_grammars_root();
+    if !python_grammar_available() {
+        eprintln!(
+            "SKIP: python grammar not found at {}",
+            install_root.display()
+        );
+        return;
+    }
+
+    let mut registry = SyntaxRegistry::with_install_root(&install_root);
+    registry.set_query_asset_root(Some(query_asset_root()));
+    must(registry.register(python_config()));
+
+    let buffer = TextBuffer::from_text(
+        "\"\"\"module doc\"\"\"\n\ndef greet(name):\n    \"\"\"say hi\"\"\"\n    return f\"hi {name}\"\n",
+    );
+    let snapshot = must(registry.highlight_buffer_for_language("python", &buffer));
+    assert_eq!(snapshot.language_id, "python");
+    assert!(!snapshot.has_errors);
+    assert!(
+        snapshot
+            .highlight_spans
+            .iter()
+            .any(|span| span.capture_name.as_ref() == "string"
+                || span.capture_name.as_ref() == "string.documentation"),
+        "expected python string highlights, got {:?}",
+        snapshot.highlight_spans
+    );
+
+    must(registry.desired_indent_for_language("python", &buffer, 3, 4));
+    must(registry.locals_query_for_language("python"));
 }
 
 #[test]

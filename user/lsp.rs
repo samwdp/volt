@@ -58,6 +58,7 @@ pub const SERVER_ELIXIR_LS: &str = "elixir-ls";
 pub const SERVER_CLOJURE_LSP: &str = "clojure-lsp";
 pub const SERVER_BUFLS: &str = "bufls";
 pub const SERVER_XML_LANGUAGE_SERVER: &str = "xml-language-server";
+pub const SERVER_POWERSHELL_EDITOR_SERVICES: &str = "powershell-editor-services";
 pub const SHOW_BUFFER_DIAGNOSTICS: bool = true;
 pub const DIAGNOSTIC_LINE_LIMIT: usize = 8;
 pub const DIAGNOSTIC_ICON: &str = md::MD_ALERT_CIRCLE_OUTLINE;
@@ -380,6 +381,12 @@ pub fn package() -> PluginPackage {
             "Starts xml-language-server for the active XML file.",
             HOOK_LSP_START,
             Some(SERVER_XML_LANGUAGE_SERVER),
+        ),
+        hook_command(
+            "lsp.start-powershell-editor-services",
+            "Starts PowerShell Editor Services for the active PowerShell file.",
+            HOOK_LSP_START,
+            Some(SERVER_POWERSHELL_EDITOR_SERVICES),
         ),
         hook_command(
             "lsp.start-copilot-language-server",
@@ -1098,6 +1105,24 @@ pub fn package() -> PluginPackage {
             "lsp.start",
             Some(".rng"),
         ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-ps1",
+            "lsp.start",
+            Some(".ps1"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-psm1",
+            "lsp.start",
+            Some(".psm1"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-psd1",
+            "lsp.start",
+            Some(".psd1"),
+        ),
     ])
 }
 
@@ -1548,6 +1573,25 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             "xml-language-server",
             ["--stdio"],
         ),
+        LanguageServerSpec::new(
+            SERVER_POWERSHELL_EDITOR_SERVICES,
+            "powershell",
+            ["ps1", "psm1", "psd1"],
+            SERVER_POWERSHELL_EDITOR_SERVICES,
+            [
+                "-Stdio",
+                "-LogLevel",
+                "Error",
+                "-HostName",
+                "volt",
+                "-HostProfileId",
+                "0",
+                "-HostVersion",
+                "1.0.0",
+            ],
+        )
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["*.psd1", "PSScriptAnalyzerSettings.psd1"]),
     ];
     servers.push(copilot_language_server(&servers));
     servers
@@ -1640,6 +1684,11 @@ fn install_recipe_for_language_server(server_id: &str) -> Option<InstallRecipe> 
             "elixir-ls.zip",
         )),
         SERVER_CLOJURE_LSP => clojure_lsp_recipe(),
+        SERVER_POWERSHELL_EDITOR_SERVICES => Some(InstallRecipe::github_release_binary(
+            "PowerShell/PowerShellEditorServices",
+            "PowerShellEditorServices.zip",
+            "PowerShellEditorServices/Start-EditorServices.ps1",
+        )),
         _ => None,
     }
 }

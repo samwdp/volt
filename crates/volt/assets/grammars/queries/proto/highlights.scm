@@ -1,3 +1,4 @@
+; Keywords/nodes limited to mitchellh/tree-sitter-proto (proto3).
 (full_ident
   (identifier) @variable)
 
@@ -18,20 +19,16 @@
   (identifier) @property)
 
 [
-  "extend"
-  "extensions"
   "oneof"
   "option"
   "reserved"
   "syntax"
-  "edition"
   "to"
   "max"
 ] @keyword
 
 [
   "enum"
-  "group"
   "service"
   "message"
   "map"
@@ -42,11 +39,8 @@
 "returns" @keyword.return
 
 [
-  "export"
-  "local"
   "optional"
   "repeated"
-  "required"
   "stream"
   "weak"
   "public"
@@ -72,10 +66,7 @@
 
 (string) @string
 
-[
-  "\"proto3\""
-  "\"proto2\""
-] @string.special
+"\"proto3\"" @string.special
 
 (escape_sequence) @string.escape
 

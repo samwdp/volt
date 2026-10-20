@@ -70,8 +70,24 @@ fn shim_path(bin: &Path, program: &str) -> PathBuf {
 }
 
 fn shim_contents(target: &Path) -> String {
+    let is_powershell_script = target
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("ps1"));
     if cfg!(windows) {
-        format!("@echo off\r\n\"{}\" %*\r\n", target.display())
+        if is_powershell_script {
+            format!(
+                "@echo off\r\npwsh -NoLogo -NoProfile -File \"{}\" %*\r\n",
+                target.display()
+            )
+        } else {
+            format!("@echo off\r\n\"{}\" %*\r\n", target.display())
+        }
+    } else if is_powershell_script {
+        format!(
+            "#!/bin/sh\nexec pwsh -NoLogo -NoProfile -File \"{}\" \"$@\"\n",
+            target.display()
+        )
     } else {
         format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", target.display())
     }

@@ -1,7 +1,7 @@
 use editor_plugin_api::LanguageConfiguration;
 use editor_plugin_api::PluginPackage;
 
-use super::common;
+use super::common::{self, GrammarSourceSpec};
 
 const EXTENSIONS: &[&str] = &["php", "inc", "php4", "php5", "phtml", "ctp"];
 
@@ -10,12 +10,17 @@ pub fn package() -> PluginPackage {
 }
 
 pub fn syntax_language() -> LanguageConfiguration {
-    common::syntax_language(
+    common::syntax_language_with_source_and_path_matchers(
         "php",
         EXTENSIONS,
-        "https://github.com/tree-sitter/tree-sitter-php.git",
-        "tree-sitter-php",
-        "tree_sitter_php",
+        &[],
+        &[],
+        GrammarSourceSpec::new(
+            "https://github.com/tree-sitter/tree-sitter-php.git",
+            "tree-sitter-php",
+            "tree_sitter_php",
+        )
+        .with_source_paths("php", "src"),
     )
 }
 
@@ -72,7 +77,7 @@ mod tests {
         );
         assert_eq!(grammar.install_dir_name(), "tree-sitter-php");
         assert_eq!(grammar.symbol_name(), "tree_sitter_php");
-        assert_eq!(grammar.grammar_dir(), Path::new("."));
+        assert_eq!(grammar.grammar_dir(), Path::new("php"));
         assert_eq!(grammar.source_dir(), Path::new("src"));
     }
 }

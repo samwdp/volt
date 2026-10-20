@@ -117,7 +117,10 @@ function: (extract_operator
 (function_definition
   name: "\\" @operator)
 
-(return) @keyword.return
+; `return` is a normal call in tree-sitter-r (no dedicated return node).
+((call
+  function: (identifier) @keyword.return)
+  (#eq? @keyword.return "return"))
 
 [
   "if"

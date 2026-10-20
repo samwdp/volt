@@ -45,6 +45,7 @@ mod hover_ui;
 mod idle_pacing;
 mod input_shortcuts;
 mod keys;
+mod large_json_timing;
 mod line_wrap;
 mod markdown_paint;
 mod misc;
