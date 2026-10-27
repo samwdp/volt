@@ -79,111 +79,69 @@ fn normalize_acp_plan_entries(entries: &mut [PlanEntry]) {
     }
 }
 
+#[cfg(test)]
 fn acp_build_output_lines(
     items: &[AcpOutputItem],
     mut markdown: Option<AcpMarkdownPaint<'_>>,
     buffer_enabled: Option<bool>,
 ) -> Vec<AcpRenderedLine> {
+    acp_build_output_lines_with_subagents(items, None, None, markdown.as_mut(), buffer_enabled)
+}
+
+fn acp_build_output_lines_from_state(
+    state: &AcpBufferState,
+    mut markdown: Option<AcpMarkdownPaint<'_>>,
+    buffer_enabled: Option<bool>,
+) -> Vec<AcpRenderedLine> {
+    acp_build_output_lines_with_subagents(
+        &state.output_items,
+        Some(&state.subagents),
+        state.current_subagent_id.as_deref(),
+        markdown.as_mut(),
+        buffer_enabled,
+    )
+}
+
+fn acp_build_output_lines_with_subagents(
+    items: &[AcpOutputItem],
+    subagents: Option<&BTreeMap<String, AcpSubagentState>>,
+    current_subagent_id: Option<&str>,
+    markdown: Option<&mut AcpMarkdownPaint<'_>>,
+    buffer_enabled: Option<bool>,
+) -> Vec<AcpRenderedLine> {
     let mut lines = Vec::new();
     let mut bubble_group = 1u32;
+    let mut markdown = markdown;
     for (index, item) in items.iter().enumerate() {
         if index > 0 {
             lines.push(AcpRenderedLine::Spacer);
         }
         match item {
-            AcpOutputItem::UserPrompt(prompt) => {
-                let prefix = vec![
-                    acp_icon_segment(editor_icons::symbols::cod::COD_PERSON, AcpColorRole::Accent),
-                    acp_text_segment(" ", AcpColorRole::Default),
-                ];
-                lines.extend(acp_mark_chat(
-                    acp_multiline_text_lines(prefix, prompt, AcpColorRole::Accent),
-                    AcpChatAlign::End,
-                    bubble_group,
-                ));
-            }
-            AcpOutputItem::SystemMessage(message) => {
-                let prefix = vec![
-                    acp_icon_segment(editor_icons::symbols::cod::COD_INFO, AcpColorRole::Muted),
-                    acp_text_segment(" ", AcpColorRole::Default),
-                ];
-                lines.extend(acp_mark_chat(
-                    acp_multiline_text_lines(prefix, message, AcpColorRole::Muted),
-                    AcpChatAlign::Start,
-                    bubble_group,
-                ));
-            }
-            AcpOutputItem::AgentBlocks(blocks) => {
-                let mut agent_lines = Vec::new();
-                for block in blocks {
-                    let prefix = vec![
-                        acp_icon_segment(
-                            editor_icons::symbols::cod::COD_COMMENT,
-                            AcpColorRole::Accent,
-                        ),
-                        acp_text_segment(" ", AcpColorRole::Default),
-                    ];
-                    if let (Some(paint), ContentBlock::Text(text)) = (markdown.as_mut(), block) {
-                        agent_lines.extend(acp_render_markdown_text_block(
-                            prefix,
-                            &text.text,
-                            AcpColorRole::Default,
-                            paint,
-                            buffer_enabled,
-                        ));
-                    } else {
-                        agent_lines.extend(acp_render_content_block(
-                            block,
-                            prefix,
-                            AcpColorRole::Default,
-                        ));
-                    }
-                }
-                lines.extend(acp_mark_chat(
-                    agent_lines,
-                    AcpChatAlign::Start,
-                    bubble_group,
-                ));
-            }
-            AcpOutputItem::ToolCall(tool_call) => {
-                let mut tool_lines = Vec::new();
-                let mut prefix = acp_status_segments(tool_call.status);
-                prefix.push(acp_text_segment(" ", AcpColorRole::Default));
-                prefix.push(acp_icon_segment(
-                    acp_tool_kind_icon(tool_call.kind),
-                    AcpColorRole::Accent,
-                ));
-                prefix.push(acp_text_segment(" ", AcpColorRole::Default));
-                let title_role = if matches!(tool_call.status, ToolCallStatus::Completed) {
-                    AcpColorRole::Muted
-                } else {
-                    AcpColorRole::Default
+            AcpOutputItem::SubagentAnchor { session_id } => {
+                let Some(subagents) = subagents else {
+                    continue;
                 };
-                tool_lines.push(AcpRenderedLine::Text(
-                    acp_text_line(prefix, tool_call.title.clone(), title_role)
-                        .with_row_fill(acp_tool_status_row_fill(tool_call.status)),
+                let Some(subagent) = subagents.get(session_id) else {
+                    continue;
+                };
+                let selected = current_subagent_id == Some(session_id.as_str());
+                lines.extend(acp_render_subagent_region(
+                    session_id,
+                    subagent,
+                    selected,
+                    markdown.as_deref_mut(),
+                    buffer_enabled,
+                    &mut bubble_group,
                 ));
-                for content in &tool_call.content {
-                    tool_lines.extend(acp_render_tool_content(content));
-                }
-                for location in &tool_call.locations {
-                    let line = location
-                        .line
-                        .map(|line| format!("{}:{line}", location.path.display()))
-                        .unwrap_or_else(|| location.path.display().to_string());
-                    tool_lines.push(AcpRenderedLine::Text(acp_text_line(
-                        vec![
-                            acp_icon_segment(
-                                editor_icons::symbols::cod::COD_SEARCH,
-                                AcpColorRole::Muted,
-                            ),
-                            acp_text_segment(" ", AcpColorRole::Default),
-                        ],
-                        line,
-                        AcpColorRole::Muted,
-                    )));
-                }
-                lines.extend(acp_mark_chat(tool_lines, AcpChatAlign::Start, bubble_group));
+            }
+            item => {
+                lines.extend(acp_render_output_item(
+                    item,
+                    markdown.as_deref_mut(),
+                    buffer_enabled,
+                    bubble_group,
+                    false,
+                ));
             }
         }
         bubble_group = bubble_group.saturating_add(1);
@@ -203,6 +161,210 @@ fn acp_build_output_lines(
         ));
     }
     lines
+}
+
+fn acp_render_subagent_region(
+    session_id: &str,
+    subagent: &AcpSubagentState,
+    selected: bool,
+    mut markdown: Option<&mut AcpMarkdownPaint<'_>>,
+    buffer_enabled: Option<bool>,
+    bubble_group: &mut u32,
+) -> Vec<AcpRenderedLine> {
+    let mut lines = Vec::new();
+    let fold_icon = if subagent.collapsed {
+        editor_icons::symbols::cod::COD_CHEVRON_RIGHT
+    } else {
+        editor_icons::symbols::cod::COD_CHEVRON_DOWN
+    };
+    let title = subagent.title.as_deref().unwrap_or(session_id);
+    let state_label = match subagent.work_state {
+        AcpSubagentWorkState::Running => "running",
+        AcpSubagentWorkState::RequiresAction => "needs action",
+        AcpSubagentWorkState::Idle => "idle",
+        AcpSubagentWorkState::Unknown => "unknown",
+    };
+    let mut header = format!("{title} ({state_label})");
+    if selected {
+        header.push_str(" *");
+    }
+    let header_role = if selected {
+        AcpColorRole::Accent
+    } else {
+        AcpColorRole::Muted
+    };
+    lines.extend(acp_mark_chat(
+        vec![AcpRenderedLine::Text(acp_text_line(
+            vec![
+                acp_icon_segment(fold_icon, header_role),
+                acp_text_segment(" ", AcpColorRole::Default),
+                acp_icon_segment(editor_icons::symbols::cod::COD_ORGANIZATION, header_role),
+                acp_text_segment(" ", AcpColorRole::Default),
+            ],
+            header,
+            header_role,
+        ))],
+        AcpChatAlign::Start,
+        *bubble_group,
+    ));
+    if let Some(description) = subagent.description.as_deref()
+        && !description.is_empty()
+    {
+        lines.extend(acp_mark_chat(
+            acp_multiline_text_lines(
+                vec![acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted)],
+                description,
+                AcpColorRole::Muted,
+            ),
+            AcpChatAlign::Start,
+            *bubble_group,
+        ));
+    }
+    if subagent.collapsed {
+        return lines;
+    }
+    if !subagent.plan_entries.is_empty() {
+        for entry in &subagent.plan_entries {
+            let mut prefix = vec![acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted)];
+            prefix.extend(acp_plan_status_segments(
+                entry.status.clone(),
+                entry.priority.clone(),
+            ));
+            prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+            lines.push(AcpRenderedLine::Text(acp_text_line(
+                prefix,
+                entry.content.clone(),
+                AcpColorRole::Muted,
+            )));
+        }
+    }
+    for (index, item) in subagent.output_items.iter().enumerate() {
+        if index > 0 || !subagent.plan_entries.is_empty() {
+            lines.push(AcpRenderedLine::Spacer);
+        }
+        *bubble_group = bubble_group.saturating_add(1);
+        let nested = acp_render_output_item(
+            item,
+            markdown.as_deref_mut(),
+            buffer_enabled,
+            *bubble_group,
+            true,
+        );
+        lines.extend(nested);
+    }
+    lines
+}
+
+fn acp_render_output_item(
+    item: &AcpOutputItem,
+    mut markdown: Option<&mut AcpMarkdownPaint<'_>>,
+    buffer_enabled: Option<bool>,
+    bubble_group: u32,
+    nested: bool,
+) -> Vec<AcpRenderedLine> {
+    let nest_prefix = if nested {
+        vec![acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted)]
+    } else {
+        Vec::new()
+    };
+    match item {
+        AcpOutputItem::UserPrompt(prompt) => {
+            let mut prefix = nest_prefix;
+            prefix.push(acp_icon_segment(
+                editor_icons::symbols::cod::COD_PERSON,
+                AcpColorRole::Accent,
+            ));
+            prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+            acp_mark_chat(
+                acp_multiline_text_lines(prefix, prompt, AcpColorRole::Accent),
+                AcpChatAlign::End,
+                bubble_group,
+            )
+        }
+        AcpOutputItem::SystemMessage(message) => {
+            let mut prefix = nest_prefix;
+            prefix.push(acp_icon_segment(
+                editor_icons::symbols::cod::COD_INFO,
+                AcpColorRole::Muted,
+            ));
+            prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+            acp_mark_chat(
+                acp_multiline_text_lines(prefix, message, AcpColorRole::Default),
+                AcpChatAlign::Start,
+                bubble_group,
+            )
+        }
+        AcpOutputItem::AgentBlocks(blocks) => {
+            let mut agent_lines = Vec::new();
+            for block in blocks {
+                let mut prefix = nest_prefix.clone();
+                prefix.push(acp_icon_segment(
+                    editor_icons::symbols::cod::COD_COMMENT,
+                    AcpColorRole::Accent,
+                ));
+                prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+                if let (Some(paint), ContentBlock::Text(text)) = (markdown.as_mut(), block) {
+                    agent_lines.extend(acp_render_markdown_text_block(
+                        prefix,
+                        &text.text,
+                        AcpColorRole::Default,
+                        paint,
+                        buffer_enabled,
+                    ));
+                } else {
+                    agent_lines.extend(acp_render_content_block(
+                        block,
+                        prefix,
+                        AcpColorRole::Default,
+                    ));
+                }
+            }
+            acp_mark_chat(agent_lines, AcpChatAlign::Start, bubble_group)
+        }
+        AcpOutputItem::ToolCall(tool_call) => {
+            let mut tool_lines = Vec::new();
+            let mut prefix = nest_prefix;
+            prefix.extend(acp_status_segments(tool_call.status));
+            prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+            prefix.push(acp_icon_segment(
+                acp_tool_kind_icon(tool_call.kind),
+                AcpColorRole::Accent,
+            ));
+            prefix.push(acp_text_segment(" ", AcpColorRole::Default));
+            let title_role = if matches!(tool_call.status, ToolCallStatus::Completed) {
+                AcpColorRole::Muted
+            } else {
+                AcpColorRole::Default
+            };
+            tool_lines.push(AcpRenderedLine::Text(
+                acp_text_line(prefix, tool_call.title.clone(), title_role)
+                    .with_row_fill(acp_tool_status_row_fill(tool_call.status)),
+            ));
+            for content in &tool_call.content {
+                tool_lines.extend(acp_render_tool_content(content));
+            }
+            for location in &tool_call.locations {
+                let line = location
+                    .line
+                    .map(|line| format!("{}:{line}", location.path.display()))
+                    .unwrap_or_else(|| location.path.display().to_string());
+                tool_lines.push(AcpRenderedLine::Text(acp_text_line(
+                    vec![
+                        acp_text_segment(ACP_TOOL_NEST_PAD, AcpColorRole::Muted),
+                        acp_icon_segment(
+                            editor_icons::symbols::cod::COD_SEARCH,
+                            AcpColorRole::Muted,
+                        ),
+                        acp_text_segment(" ", AcpColorRole::Default),
+                    ],
+                    line,
+                    AcpColorRole::Muted,
+                )));
+            }
+            acp_mark_chat(tool_lines, AcpChatAlign::Start, bubble_group)
+        }
+        AcpOutputItem::SubagentAnchor { .. } => Vec::new(),
+    }
 }
 
 fn acp_render_tool_content(content: &ToolCallContent) -> Vec<AcpRenderedLine> {

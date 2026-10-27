@@ -361,6 +361,31 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_ACP_SUBAGENT_NEXT,
+        "Selects the next ACP Subagent region in the active buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_SUBAGENT_PREVIOUS,
+        "Selects the previous ACP Subagent region in the active buffer.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_SUBAGENT_TOGGLE_FOLD,
+        "Toggles fold for the current ACP Subagent region.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_CANCEL,
+        "Cancels the current ACP Subagent when cancel-capable, otherwise the root session.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_ACP_CAPABILITIES,
+        "Shows ACP initialize and live session capabilities for the active buffer.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_IMAGE_ZOOM_IN,
         "Zooms the active native image buffer in.",
     )?;
@@ -1920,6 +1945,9 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
             if let Some(PickerKind::AcpPermission { request_id }) = picker_kind {
                 acp::acp_permission_picker_closed(runtime, request_id)?;
             }
+            if let Some(PickerKind::AcpCursor { request_id }) = picker_kind {
+                acp::acp_cancel_cursor(runtime, request_id)?;
+            }
             Ok(())
         })
         .map_err(|error| error.to_string())?;
@@ -2604,6 +2632,52 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(
+            HOOK_ACP_SUBAGENT_NEXT,
+            "shell.acp-subagent-next",
+            |_, runtime| {
+                acp::acp_subagent_next(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_ACP_SUBAGENT_PREVIOUS,
+            "shell.acp-subagent-previous",
+            |_, runtime| {
+                acp::acp_subagent_previous(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_ACP_SUBAGENT_TOGGLE_FOLD,
+            "shell.acp-subagent-toggle-fold",
+            |_, runtime| {
+                acp::acp_subagent_toggle_fold(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_ACP_CANCEL, "shell.acp-cancel", |_, runtime| {
+            acp::acp_cancel(runtime)?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_ACP_CAPABILITIES,
+            "shell.acp-capabilities",
+            |_, runtime| {
+                acp::acp_show_capabilities(runtime)?;
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
             HOOK_ACP_COMPLETE_SLASH,
             "shell.acp-complete-slash",
             |_, runtime| {
@@ -3016,6 +3090,30 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                     option_id,
                 } => {
                     acp::acp_resolve_permission_option(runtime, request_id, &option_id)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::AcpCursorAnswer {
+                    request_id,
+                    question_id,
+                    option_id,
+                } => {
+                    acp::acp_answer_cursor_question(
+                        runtime,
+                        request_id,
+                        question_id,
+                        option_id,
+                    )?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::AcpCursorSkip { request_id } => {
+                    acp::acp_skip_cursor(runtime, request_id)?;
+                    sync_active_buffer(runtime)?;
+                }
+                PickerAction::AcpCursorPlan {
+                    request_id,
+                    accepted,
+                } => {
+                    acp::acp_resolve_cursor_plan(runtime, request_id, accepted)?;
                     sync_active_buffer(runtime)?;
                 }
                 PickerAction::CopyToClipboard(text) => {

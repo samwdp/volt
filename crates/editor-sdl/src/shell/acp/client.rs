@@ -2,13 +2,13 @@ use std::{cell::RefCell, path::Path, rc::Rc};
 
 use agent_client_protocol::Client;
 use agent_client_protocol::{
-    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, Error, KillTerminalRequest,
-    KillTerminalResponse, PermissionOptionKind, ReadTextFileRequest, ReadTextFileResponse,
-    ReleaseTerminalRequest, ReleaseTerminalResponse, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, SessionUpdate,
-    TerminalExitStatus, TerminalId, TerminalOutputRequest, TerminalOutputResponse,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    ContentBlock, CreateTerminalRequest, CreateTerminalResponse, Error, ExtNotification,
+    ExtRequest, ExtResponse, KillTerminalRequest, KillTerminalResponse, PermissionOptionKind,
+    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SessionNotification, SessionUpdate, TerminalExitStatus, TerminalId, TerminalOutputRequest,
+    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use async_trait::async_trait;
 use tokio::{
@@ -16,6 +16,7 @@ use tokio::{
     sync::oneshot,
 };
 
+use super::cursor_ext::*;
 use super::launch::*;
 use super::runtime::*;
 
@@ -249,6 +250,23 @@ impl Client for AcpClient {
             .insert(args.terminal_id, terminal);
         Ok(KillTerminalResponse::new())
     }
+
+    async fn ext_method(&self, args: ExtRequest) -> agent_client_protocol::Result<ExtResponse> {
+        match args.method.as_ref() {
+            CURSOR_ASK_QUESTION => self.cursor_ask(args.params).await,
+            CURSOR_CREATE_PLAN => self.cursor_plan(args.params).await,
+            CURSOR_UPDATE_TODOS | CURSOR_TASK | CURSOR_GENERATE_IMAGE => {
+                self.cursor_notify(args.method.as_ref(), &args.params);
+                immediate_cursor_response(args.method.as_ref(), &args.params)
+            }
+            _ => ext_response(serde_json::Value::Null),
+        }
+    }
+
+    async fn ext_notification(&self, args: ExtNotification) -> agent_client_protocol::Result<()> {
+        self.cursor_notify(args.method.as_ref(), &args.params);
+        Ok(())
+    }
 }
 
 pub(crate) struct AcpClient {
@@ -270,6 +288,78 @@ impl AcpClient {
         *next = next.saturating_add(1);
         id
     }
+
+    async fn cursor_ask(
+        &self,
+        params: std::sync::Arc<serde_json::value::RawValue>,
+    ) -> agent_client_protocol::Result<ExtResponse> {
+        let ask = parse_cursor_ask(&params).map_err(|error| Error::invalid_params().data(error))?;
+        let Some(session_id) = connection_session_id(&self.state.borrow()) else {
+            return ext_response(named_outcome("cancelled"));
+        };
+        let (request_id, rx) = begin_cursor_request(&self.state);
+        self.state.borrow().emit(AcpEvent::CursorAsk {
+            request_id,
+            session_id,
+            title: ask.title,
+            questions: ask.questions,
+        });
+        let outcome = rx.await.unwrap_or_else(|_| named_outcome("cancelled"));
+        ext_response(outcome)
+    }
+
+    async fn cursor_plan(
+        &self,
+        params: std::sync::Arc<serde_json::value::RawValue>,
+    ) -> agent_client_protocol::Result<ExtResponse> {
+        let plan =
+            parse_cursor_plan(&params).map_err(|error| Error::invalid_params().data(error))?;
+        let Some(session_id) = connection_session_id(&self.state.borrow()) else {
+            return ext_response(named_outcome("cancelled"));
+        };
+        let (request_id, rx) = begin_cursor_request(&self.state);
+        self.state.borrow().emit(AcpEvent::CursorPlan {
+            request_id,
+            session_id,
+            name: plan.name,
+            overview: plan.overview,
+            plan: plan.plan,
+            todos: plan.todos,
+        });
+        let outcome = rx.await.unwrap_or_else(|_| named_outcome("cancelled"));
+        ext_response(outcome)
+    }
+
+    fn cursor_notify(&self, method: &str, params: &serde_json::value::RawValue) {
+        let Some(session_id) = connection_session_id(&self.state.borrow()) else {
+            return;
+        };
+        let event = match method {
+            CURSOR_UPDATE_TODOS => {
+                parse_cursor_todos(params)
+                    .ok()
+                    .map(|update| AcpEvent::CursorTodos {
+                        session_id,
+                        todos: update.todos,
+                        merge: update.merge,
+                    })
+            }
+            CURSOR_TASK => parse_cursor_task(params)
+                .ok()
+                .map(|task| AcpEvent::CursorTask { session_id, task }),
+            CURSOR_GENERATE_IMAGE => parse_cursor_image(params)
+                .ok()
+                .map(|notice| AcpEvent::CursorImage { session_id, notice }),
+            _ => None,
+        };
+        if let Some(event) = event {
+            self.state.borrow().emit(event);
+        }
+    }
+}
+
+fn connection_session_id(state: &AcpRuntimeState) -> Option<agent_client_protocol::SessionId> {
+    state.sessions.keys().next().cloned()
 }
 
 pub(crate) fn handle_session_update(
@@ -333,6 +423,23 @@ pub(crate) fn handle_session_update(
             state
                 .borrow()
                 .emit(AcpEvent::SessionInfoUpdated { session_id, update });
+        }
+        SessionUpdate::SubagentUpdate(update) => {
+            state.borrow().emit(AcpEvent::SubagentUpdate {
+                parent_session_id: session_id,
+                update,
+            });
+        }
+        SessionUpdate::SessionMessage(message) => {
+            state.borrow().emit(AcpEvent::SessionMessage {
+                session_id,
+                message,
+            });
+        }
+        SessionUpdate::SessionMessageChunk(chunk) => {
+            state
+                .borrow()
+                .emit(AcpEvent::SessionMessageChunk { session_id, chunk });
         }
         _ => {}
     }

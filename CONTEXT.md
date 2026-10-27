@@ -46,6 +46,10 @@ _Avoid_: popup (when meaning this dock), sidebar (as the spoken product term)
 The vertical list of ACP buffers for the active Workspace, always on the right edge. Distinct from Workspace Dock and Popup. While focused, it is its own Minor Mode so chords such as j/k cycle ACP buffers. Enter with Ctrl+l when open; leave with Ctrl+h.
 _Avoid_: sidebar (as the spoken product term), ACP popup
 
+**ACP Subagent**:
+A child ACP session the agent creates and owns under a parent ACP session (`subagent_update` association). Its traffic uses its own session id on the same connection. In Volt v1 it is shown and navigated inside the parent ACP buffer, not as its own ACP Dock entry. Many ACP Subagent session ids may map to one parent ACP buffer; the ACP Dock lists only root buffers. When the association advertises cancel, the user may cancel that child’s current work without cancelling the parent turn.
+_Avoid_: subagent (alone), child session (as the spoken product term), nested workspace, Cursor Task
+
 **Worktree**:
 A git worktree checkout path that can be opened as a Project Workspace root. Distinct from the open editor Workspace itself.
 _Avoid_: project (when meaning the checkout path), branch (when meaning the directory), workspace (when meaning the on-disk checkout)

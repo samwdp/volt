@@ -12,11 +12,7 @@ impl ShellBuffer {
     }
 
     /// Reset ACP panes for `session/load` history replay without a fresh Connected banner.
-    pub(crate) fn acp_prepare_session_replay(
-        &mut self,
-        client_label: &str,
-        logo: Option<String>,
-    ) {
+    pub(crate) fn acp_prepare_session_replay(&mut self, client_label: &str, logo: Option<String>) {
         self.text = TextBuffer::new();
         self.undo_tree = UndoTree::new(&self.text);
         self.scroll_row = 0;
@@ -42,6 +38,14 @@ impl ShellBuffer {
             return false;
         };
         state.active_pane = AcpPane::Input;
+        true
+    }
+
+    pub(crate) fn acp_focus_output_pane(&mut self) -> bool {
+        let Some(state) = self.acp_state.as_mut() else {
+            return false;
+        };
+        state.active_pane = AcpPane::Output;
         true
     }
 
@@ -190,7 +194,16 @@ impl ShellBuffer {
         follow_output
     }
 
+    #[cfg(test)]
     pub(crate) fn acp_append_agent_chunk(&mut self, content: ContentBlock) -> bool {
+        self.acp_append_agent_chunk_to(None, content)
+    }
+
+    pub(crate) fn acp_append_agent_chunk_to(
+        &mut self,
+        subagent_id: Option<&str>,
+        content: ContentBlock,
+    ) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -201,16 +214,24 @@ impl ShellBuffer {
             })
             .unwrap_or(true);
         if let Some(state) = self.acp_state.as_mut() {
-            match state.output_items.last_mut() {
-                Some(AcpOutputItem::AgentBlocks(blocks)) => match (blocks.last_mut(), content) {
-                    (Some(ContentBlock::Text(existing)), ContentBlock::Text(text)) => {
-                        existing.text.push_str(&text.text);
+            let items = match subagent_id {
+                Some(id) => state
+                    .subagent_mut(id)
+                    .map(|subagent| &mut subagent.output_items),
+                None => Some(&mut state.output_items),
+            };
+            if let Some(items) = items {
+                match items.last_mut() {
+                    Some(AcpOutputItem::AgentBlocks(blocks)) => {
+                        match (blocks.last_mut(), content) {
+                            (Some(ContentBlock::Text(existing)), ContentBlock::Text(text)) => {
+                                existing.text.push_str(&text.text);
+                            }
+                            (_, content) => blocks.push(content),
+                        }
                     }
-                    (_, content) => blocks.push(content),
-                },
-                _ => state
-                    .output_items
-                    .push(AcpOutputItem::AgentBlocks(vec![content])),
+                    _ => items.push(AcpOutputItem::AgentBlocks(vec![content])),
+                }
             }
         }
         self.acp_rebuild_output_view(follow_output);
@@ -218,11 +239,50 @@ impl ShellBuffer {
     }
 
     pub(crate) fn acp_set_plan(&mut self, plan: Plan) {
+        self.acp_apply_plan_entries(plan.entries, false);
+    }
+
+    pub(crate) fn acp_apply_plan_entries(&mut self, entries: Vec<PlanEntry>, merge: bool) {
         if let Some(state) = self.acp_state.as_mut() {
-            state.plan_entries = plan.entries;
+            if merge {
+                for entry in entries {
+                    let id = plan_entry_cursor_id(&entry);
+                    if let Some(id) = id
+                        && let Some(existing) = state.plan_entries.iter_mut().find(|candidate| {
+                            plan_entry_cursor_id(candidate).as_deref() == Some(id.as_str())
+                        })
+                    {
+                        *existing = entry;
+                        continue;
+                    }
+                    state.plan_entries.push(entry);
+                }
+            } else {
+                state.plan_entries = entries;
+            }
             normalize_acp_plan_entries(&mut state.plan_entries);
         }
         self.acp_rebuild_plan_view();
+    }
+
+    pub(crate) fn acp_set_subagent_plan(&mut self, subagent_id: &str, plan: Plan) -> bool {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut()
+            && let Some(subagent) = state.subagent_mut(subagent_id)
+        {
+            subagent.plan_entries = plan.entries;
+            normalize_acp_plan_entries(&mut subagent.plan_entries);
+        }
+        self.acp_rebuild_output_view(follow_output);
+        follow_output
     }
 
     pub(crate) fn acp_complete_plan(&mut self) {
@@ -252,7 +312,16 @@ impl ShellBuffer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn acp_upsert_tool_call(&mut self, tool_call: ToolCall) -> bool {
+        self.acp_upsert_tool_call_to(None, tool_call)
+    }
+
+    pub(crate) fn acp_upsert_tool_call_to(
+        &mut self,
+        subagent_id: Option<&str>,
+        tool_call: ToolCall,
+    ) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -264,21 +333,38 @@ impl ShellBuffer {
             .unwrap_or(true);
         if let Some(state) = self.acp_state.as_mut() {
             let tool_key = tool_call.tool_call_id.to_string();
-            if let Some(index) = state.tool_item_indices.get(tool_key.as_str()).copied() {
-                state.output_items[index] = AcpOutputItem::ToolCall(Box::new(tool_call));
+            let (items, indices) = match subagent_id {
+                Some(id) => match state.subagent_mut(id) {
+                    Some(subagent) => (&mut subagent.output_items, &mut subagent.tool_item_indices),
+                    None => {
+                        self.acp_rebuild_output_view(follow_output);
+                        return follow_output;
+                    }
+                },
+                None => (&mut state.output_items, &mut state.tool_item_indices),
+            };
+            if let Some(index) = indices.get(tool_key.as_str()).copied() {
+                items[index] = AcpOutputItem::ToolCall(Box::new(tool_call));
             } else {
-                let index = state.output_items.len();
-                state.tool_item_indices.insert(tool_key, index);
-                state
-                    .output_items
-                    .push(AcpOutputItem::ToolCall(Box::new(tool_call)));
+                let index = items.len();
+                indices.insert(tool_key, index);
+                items.push(AcpOutputItem::ToolCall(Box::new(tool_call)));
             }
         }
         self.acp_rebuild_output_view(follow_output);
         follow_output
     }
 
+    #[cfg(test)]
     pub(crate) fn acp_update_tool_call(&mut self, update: ToolCallUpdate) -> bool {
+        self.acp_update_tool_call_to(None, update)
+    }
+
+    pub(crate) fn acp_update_tool_call_to(
+        &mut self,
+        subagent_id: Option<&str>,
+        update: ToolCallUpdate,
+    ) -> bool {
         let follow_output = self
             .acp_state
             .as_ref()
@@ -290,23 +376,162 @@ impl ShellBuffer {
             .unwrap_or(true);
         if let Some(state) = self.acp_state.as_mut() {
             let tool_key = update.tool_call_id.to_string();
-            if let Some(index) = state.tool_item_indices.get(tool_key.as_str()).copied() {
-                if let Some(AcpOutputItem::ToolCall(tool_call)) = state.output_items.get_mut(index)
-                {
+            let (items, indices) = match subagent_id {
+                Some(id) => match state.subagent_mut(id) {
+                    Some(subagent) => (&mut subagent.output_items, &mut subagent.tool_item_indices),
+                    None => {
+                        self.acp_rebuild_output_view(follow_output);
+                        return follow_output;
+                    }
+                },
+                None => (&mut state.output_items, &mut state.tool_item_indices),
+            };
+            if let Some(index) = indices.get(tool_key.as_str()).copied() {
+                if let Some(AcpOutputItem::ToolCall(tool_call)) = items.get_mut(index) {
                     tool_call.update(update.fields.clone());
                 }
             } else {
                 let tool_call = ToolCall::try_from(update.clone())
                     .unwrap_or_else(|_| acp_tool_call_from_partial_update(&update));
-                let index = state.output_items.len();
-                state.tool_item_indices.insert(tool_key, index);
-                state
-                    .output_items
-                    .push(AcpOutputItem::ToolCall(Box::new(tool_call)));
+                let index = items.len();
+                indices.insert(tool_key, index);
+                items.push(AcpOutputItem::ToolCall(Box::new(tool_call)));
             }
         }
         self.acp_rebuild_output_view(follow_output);
         follow_output
+    }
+
+    pub(crate) fn acp_upsert_subagent(
+        &mut self,
+        session_id: String,
+        title: Option<String>,
+        description: Option<String>,
+        work_state: Option<AcpSubagentWorkState>,
+        cancel_capable: Option<bool>,
+    ) -> bool {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            state.upsert_subagent(session_id, title, description, work_state, cancel_capable);
+        }
+        self.acp_rebuild_output_view(follow_output);
+        follow_output
+    }
+
+    pub(crate) fn acp_push_user_prompt_to(
+        &mut self,
+        subagent_id: Option<&str>,
+        prompt: impl Into<String>,
+    ) -> bool {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            let items = match subagent_id {
+                Some(id) => state
+                    .subagent_mut(id)
+                    .map(|subagent| &mut subagent.output_items),
+                None => Some(&mut state.output_items),
+            };
+            if let Some(items) = items {
+                items.push(AcpOutputItem::UserPrompt(prompt.into()));
+            }
+        }
+        self.acp_rebuild_output_view(follow_output);
+        follow_output
+    }
+
+    pub(crate) fn acp_push_system_message_to(
+        &mut self,
+        subagent_id: Option<&str>,
+        message: impl Into<String>,
+    ) -> bool {
+        let follow_output = self
+            .acp_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .output_pane
+                    .should_follow_output(self.acp_output_viewport_lines())
+            })
+            .unwrap_or(true);
+        if let Some(state) = self.acp_state.as_mut() {
+            let items = match subagent_id {
+                Some(id) => state
+                    .subagent_mut(id)
+                    .map(|subagent| &mut subagent.output_items),
+                None => Some(&mut state.output_items),
+            };
+            if let Some(items) = items {
+                items.push(AcpOutputItem::SystemMessage(message.into()));
+            }
+        }
+        self.acp_rebuild_output_view(follow_output);
+        follow_output
+    }
+
+    pub(crate) fn acp_select_next_subagent(&mut self) -> bool {
+        let changed = self
+            .acp_state
+            .as_mut()
+            .is_some_and(AcpBufferState::select_next_subagent);
+        if changed {
+            self.acp_rebuild_output_view(false);
+        }
+        changed
+    }
+
+    pub(crate) fn acp_select_previous_subagent(&mut self) -> bool {
+        let changed = self
+            .acp_state
+            .as_mut()
+            .is_some_and(AcpBufferState::select_previous_subagent);
+        if changed {
+            self.acp_rebuild_output_view(false);
+        }
+        changed
+    }
+
+    pub(crate) fn acp_toggle_current_subagent_fold(&mut self) -> bool {
+        let changed = self
+            .acp_state
+            .as_mut()
+            .is_some_and(AcpBufferState::toggle_current_subagent_fold);
+        if changed {
+            self.acp_rebuild_output_view(false);
+        }
+        changed
+    }
+
+    pub(crate) fn acp_cancel_target_subagent_id(&self) -> Option<String> {
+        self.acp_state
+            .as_ref()
+            .and_then(AcpBufferState::cancel_target_session_id)
+            .map(|(session_id, _)| session_id)
+    }
+
+    pub(crate) fn acp_modeline_subagent_info(&self) -> (Option<String>, usize) {
+        let Some(state) = self.acp_state.as_ref() else {
+            return (None, 0);
+        };
+        (
+            state.current_subagent_title().map(str::to_owned),
+            state.running_subagent_count(),
+        )
     }
 
     fn acp_rebuild_plan_view(&mut self) {
@@ -334,7 +559,7 @@ impl ShellBuffer {
         let Some(state) = self.acp_state.as_ref() else {
             return;
         };
-        let render_lines = acp_build_output_lines(&state.output_items, markdown, buffer_enabled);
+        let render_lines = acp_build_output_lines_from_state(state, markdown, buffer_enabled);
         let Some(state) = self.acp_state.as_mut() else {
             return;
         };
@@ -1379,4 +1604,13 @@ impl ShellBuffer {
         self.syntax_requested_at = None;
         self.last_edit_at = None;
     }
+}
+
+fn plan_entry_cursor_id(entry: &PlanEntry) -> Option<String> {
+    entry
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("cursorTodoId"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
 }

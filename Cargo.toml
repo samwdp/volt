@@ -27,3 +27,9 @@ codegen-units = 1
 [profile.bench]
 inherits = "release"
 lto = "thin"
+
+# Volt fork of ACP schema 0.11.4: adds `subagent_update` / session messages /
+# `clientCapabilities.subagents` without migrating the 0.10 connection SDK to 3.x.
+[patch.crates-io]
+agent-client-protocol-schema = { path = "vendor/agent-client-protocol-schema" }
+

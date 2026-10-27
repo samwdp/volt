@@ -27,6 +27,10 @@ pub struct ModelineContext<'a> {
     pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
     /// Whether an ACP client is connected.
     pub acp_connected: bool,
+    /// Sticky current ACP Subagent title when an ACP buffer is focused.
+    pub current_subagent_title: Option<&'a str>,
+    /// ACP Subagents currently Running or RequiresAction on the focused buffer.
+    pub running_subagent_count: usize,
     /// Git modeline info, if available.
     pub git: Option<GitModelineInfo<'a>>,
 }
@@ -89,6 +93,18 @@ pub fn compose_modeline(context: &ModelineContext<'_>) -> Vec<ModelineSegment> {
             crate::icon_font::symbols::fa::FA_CONNECTDEVELOP,
             TOKEN_FOREGROUND,
         )]));
+        if let Some(title) = context.current_subagent_title {
+            left.push(ModelineSegment::left(vec![ModelinePart::fg(
+                format!("sub:{title}"),
+                TOKEN_FOREGROUND,
+            )]));
+        }
+        if context.running_subagent_count > 0 {
+            left.push(ModelineSegment::left(vec![ModelinePart::fg(
+                format!("×{}", context.running_subagent_count),
+                TOKEN_MUTED,
+            )]));
+        }
     }
     if let Some(register) = context.recording_macro {
         left.push(ModelineSegment::left(vec![ModelinePart::fg(
@@ -269,6 +285,8 @@ mod tests {
             lsp_server: Some("rust-analyzer"),
             lsp_diagnostics: None,
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: None,
         });
 
@@ -292,6 +310,8 @@ mod tests {
             lsp_server: None,
             lsp_diagnostics: None,
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: None,
         });
 
@@ -312,6 +332,8 @@ mod tests {
             lsp_server: None,
             lsp_diagnostics: None,
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: None,
         });
 
@@ -334,6 +356,8 @@ mod tests {
             lsp_server: None,
             lsp_diagnostics: None,
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: None,
         });
 
@@ -361,6 +385,8 @@ mod tests {
             lsp_server: None,
             lsp_diagnostics: None,
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: Some(super::GitModelineInfo {
                 branch: "main",
                 added: 12,
@@ -393,6 +419,8 @@ mod tests {
             lsp_server: None,
             lsp_diagnostics: None,
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: Some(super::GitModelineInfo {
                 branch: "main",
                 added: 12,
@@ -424,6 +452,8 @@ mod tests {
                 warnings: 1,
             }),
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: None,
         });
 
@@ -476,6 +506,8 @@ mod tests {
             lsp_server: None,
             lsp_diagnostics: None,
             acp_connected: false,
+            current_subagent_title: None,
+            running_subagent_count: 0,
             git: None,
         });
         assert_eq!(

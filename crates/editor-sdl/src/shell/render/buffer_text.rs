@@ -288,6 +288,8 @@ pub(super) fn render_buffer(
     let statusline_column = terminal_cursor
         .map(|cursor| cursor.col() as usize + 1)
         .unwrap_or(cursor_col + 1);
+    let (current_subagent_title_owned, running_subagent_count) =
+        buffer.acp_modeline_subagent_info();
     let statusline_context = HostStatuslineContext {
         vim_mode: statusline_mode_label(input_mode, multicursor.is_some()),
         recording_macro,
@@ -300,6 +302,8 @@ pub(super) fn render_buffer(
         lsp_server,
         lsp_diagnostics,
         acp_connected,
+        current_subagent_title: current_subagent_title_owned.as_deref(),
+        running_subagent_count,
         git_branch,
         git_added,
         git_removed,

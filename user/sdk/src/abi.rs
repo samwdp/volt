@@ -2625,6 +2625,8 @@ pub struct AbiStatuslineContext {
     pub lsp_server: ROption<RString>,
     pub lsp_diagnostics: ROption<AbiLspDiagnosticsInfo>,
     pub acp_connected: bool,
+    pub current_subagent_title: ROption<RString>,
+    pub running_subagent_count: usize,
     pub git_branch: ROption<RString>,
     pub git_added: usize,
     pub git_removed: usize,
@@ -2650,6 +2652,11 @@ impl From<StatuslineContext<'_>> for AbiStatuslineContext {
                 .into(),
             lsp_diagnostics: value.lsp_diagnostics.map(Into::into).into(),
             acp_connected: value.acp_connected,
+            current_subagent_title: value
+                .current_subagent_title
+                .map(|value| RString::from(value.to_owned()))
+                .into(),
+            running_subagent_count: value.running_subagent_count,
             git_branch: value
                 .git_branch
                 .map(|value| RString::from(value.to_owned()))

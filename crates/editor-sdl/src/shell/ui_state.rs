@@ -197,6 +197,18 @@ enum PickerAction {
         request_id: u64,
         option_id: String,
     },
+    AcpCursorAnswer {
+        request_id: u64,
+        question_id: String,
+        option_id: String,
+    },
+    AcpCursorSkip {
+        request_id: u64,
+    },
+    AcpCursorPlan {
+        request_id: u64,
+        accepted: bool,
+    },
     CopyToClipboard(String),
     StopLspSession {
         server_id: String,
@@ -253,6 +265,7 @@ enum PickerKind {
     AcpSlash { buffer_id: BufferId },
     AcpFile { buffer_id: BufferId },
     AcpPermission { request_id: u64 },
+    AcpCursor { request_id: u64 },
 }
 
 impl PickerKind {
@@ -261,7 +274,9 @@ impl PickerKind {
             PickerKind::AcpSlash { buffer_id } | PickerKind::AcpFile { buffer_id } => {
                 Some(buffer_id)
             }
-            PickerKind::Generic | PickerKind::AcpPermission { .. } => None,
+            PickerKind::Generic
+            | PickerKind::AcpPermission { .. }
+            | PickerKind::AcpCursor { .. } => None,
         }
     }
 

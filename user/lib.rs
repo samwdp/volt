@@ -237,6 +237,8 @@ fn user_modeline_context<'a>(context: &StatuslineContext<'a>) -> modeline::Model
                 warnings: diagnostics.warnings,
             }),
         acp_connected: context.acp_connected,
+        current_subagent_title: context.current_subagent_title,
+        running_subagent_count: context.running_subagent_count,
         git: context.git_branch.map(|branch| modeline::GitModelineInfo {
             branch,
             added: context.git_added,
@@ -989,6 +991,12 @@ fn statusline_context_from_abi(context: &AbiStatuslineContext) -> StatuslineCont
             .map(|value| value.as_str()),
         lsp_diagnostics: context.lsp_diagnostics.into_option().map(Into::into),
         acp_connected: context.acp_connected,
+        current_subagent_title: context
+            .current_subagent_title
+            .as_ref()
+            .into_option()
+            .map(|value| value.as_str()),
+        running_subagent_count: context.running_subagent_count,
         git_branch: context
             .git_branch
             .as_ref()

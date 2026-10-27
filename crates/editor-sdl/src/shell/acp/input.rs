@@ -13,6 +13,7 @@ use editor_plugin_api::AcpClient as AcpClientConfig;
 use super::super::*;
 
 use super::client::*;
+use super::cursor_ext::*;
 use super::manager::*;
 use super::runtime::*;
 use super::session::*;
@@ -291,7 +292,10 @@ pub(crate) fn format_acp_model_label(model_id: &ModelId) -> String {
 
 /// Host-owned slash commands available for every ACP client.
 pub(crate) fn universal_acp_slash_commands() -> Vec<AvailableCommand> {
-    vec![AvailableCommand::new("clear", "Start a new ACP session")]
+    vec![
+        AvailableCommand::new("clear", "Start a new ACP session"),
+        AvailableCommand::new("capabilities", "Show ACP session capabilities"),
+    ]
 }
 
 /// Merge host universal slash commands ahead of agent-provided ones.
@@ -323,6 +327,15 @@ pub(crate) fn try_run_universal_acp_slash(
     buffer_id: BufferId,
     text: &str,
 ) -> Result<bool, String> {
+    let trimmed = text.trim();
+    if trimmed == "acp.capabilities" {
+        {
+            let buffer = shell_buffer_mut(runtime, buffer_id)?;
+            buffer.clear_input();
+        }
+        show_acp_capabilities_on_buffer(runtime, buffer_id)?;
+        return Ok(true);
+    }
     let Some(name) = acp_leading_slash_command_name(text) else {
         return Ok(false);
     };
@@ -336,6 +349,14 @@ pub(crate) fn try_run_universal_acp_slash(
             runtime
                 .execute_command("acp.new-session")
                 .map_err(|error| error.to_string())?;
+            Ok(true)
+        }
+        "capabilities" => {
+            {
+                let buffer = shell_buffer_mut(runtime, buffer_id)?;
+                buffer.clear_input();
+            }
+            show_acp_capabilities_on_buffer(runtime, buffer_id)?;
             Ok(true)
         }
         _ => Ok(false),
@@ -934,6 +955,158 @@ pub(crate) fn acp_permission_picker_submitted(
     Ok(())
 }
 
+pub(crate) fn acp_subagent_next(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let _ = buffer.acp_select_next_subagent();
+    Ok(())
+}
+
+pub(crate) fn acp_subagent_previous(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let _ = buffer.acp_select_previous_subagent();
+    Ok(())
+}
+
+pub(crate) fn acp_subagent_toggle_fold(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let buffer = shell_buffer_mut(runtime, buffer_id)?;
+    let _ = buffer.acp_toggle_current_subagent_fold();
+    Ok(())
+}
+
+pub(crate) fn acp_cancel(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let current_subagent_id = {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.acp_cancel_target_subagent_id()
+    };
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    let Some((connection_session_id, target_session_id)) =
+        manager.cancel_target_for_buffer(buffer_id, current_subagent_id.as_deref())
+    else {
+        return Ok(());
+    };
+    manager.cancel(connection_session_id, target_session_id)
+}
+
+pub(crate) fn acp_show_capabilities(runtime: &mut EditorRuntime) -> Result<(), String> {
+    let buffer_id = resolve_acp_capabilities_buffer(runtime)?;
+    show_acp_capabilities_on_buffer(runtime, buffer_id)
+}
+
+fn resolve_acp_capabilities_buffer(runtime: &EditorRuntime) -> Result<BufferId, String> {
+    if let Ok(buffer_id) = active_shell_buffer_id(runtime)
+        && shell_buffer_is_acp(runtime, buffer_id)
+    {
+        return Ok(buffer_id);
+    }
+    let ids = workspace_acp_buffer_ids(runtime)?;
+    if ids.is_empty() {
+        return Err("no ACP buffer in the active workspace".to_owned());
+    }
+    if ids.len() == 1 {
+        return Ok(ids[0]);
+    }
+    if let Some(manager) = runtime.services().get::<Arc<Mutex<AcpManager>>>().cloned() {
+        let manager = manager
+            .lock()
+            .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+        if let Some(buffer_id) = ids
+            .iter()
+            .copied()
+            .find(|buffer_id| manager.session_for_buffer(*buffer_id).is_some())
+        {
+            return Ok(buffer_id);
+        }
+    }
+    Ok(ids[0])
+}
+
+fn shell_buffer_is_acp(runtime: &EditorRuntime, buffer_id: BufferId) -> bool {
+    shell_buffer(runtime, buffer_id).ok().is_some_and(|buffer| {
+        matches!(
+            &buffer.kind,
+            BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND
+        )
+    })
+}
+
+fn workspace_acp_buffer_ids(runtime: &EditorRuntime) -> Result<Vec<BufferId>, String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let workspace = runtime
+        .model()
+        .workspace(workspace_id)
+        .map_err(|error| error.to_string())?;
+    Ok(workspace
+        .buffers()
+        .filter_map(|buffer| match buffer.kind() {
+            BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => Some(buffer.id()),
+            _ => None,
+        })
+        .collect())
+}
+
+fn capabilities_footer_line(report: &str) -> String {
+    let bits = report
+        .lines()
+        .filter(|line| {
+            line.starts_with("client:")
+                || line.starts_with("protocol:")
+                || line.starts_with("agent:")
+                || line.starts_with("ACP session")
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if bits.is_empty() {
+        "ACP capabilities".to_owned()
+    } else {
+        bits.join(" · ")
+    }
+}
+
+pub(crate) fn show_acp_capabilities_on_buffer(
+    runtime: &mut EditorRuntime,
+    buffer_id: BufferId,
+) -> Result<(), String> {
+    focus_acp_buffer(runtime, buffer_id)?;
+    let report = {
+        let manager = runtime
+            .services()
+            .get::<Arc<Mutex<AcpManager>>>()
+            .ok_or_else(|| "acp manager service missing".to_owned())?
+            .clone();
+        let manager = manager
+            .lock()
+            .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+        manager
+            .capabilities_report_for_buffer(buffer_id)
+            .unwrap_or_else(|| "ACP capabilities\nACP session is not connected.".to_owned())
+    };
+    let footer = capabilities_footer_line(&report);
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.acp_focus_output_pane();
+        buffer.acp_push_system_message(report);
+        if let Some(footer_pane) = buffer.acp_footer_pane_mut() {
+            footer_pane.replace_lines(vec![footer], true);
+        }
+    }
+    refresh_acp_output_markdown(runtime, buffer_id, true)?;
+    Ok(())
+}
+
 pub(crate) fn acp_switch_pane(runtime: &mut EditorRuntime) -> Result<(), String> {
     let buffer_id = active_shell_buffer_id(runtime)?;
     let (is_input, read_only) = {
@@ -981,6 +1154,144 @@ pub(crate) fn resolve_permission(
         return Ok(());
     };
     manager.resolve_permission(request_id, decision);
+    Ok(())
+}
+
+pub(crate) fn open_cursor_question_picker(
+    runtime: &mut EditorRuntime,
+    request_id: u64,
+    title: Option<&str>,
+    question: &CursorQuestion,
+) -> Result<(), String> {
+    let detail = if question.allow_multiple {
+        format!("{} · send one choice", question.prompt)
+    } else {
+        question.prompt.clone()
+    };
+    let mut entries = question
+        .options
+        .iter()
+        .map(|option| PickerEntry {
+            item: PickerItem::new(
+                option.id.clone(),
+                option.label.clone(),
+                detail.clone(),
+                None::<String>,
+            ),
+            action: PickerAction::AcpCursorAnswer {
+                request_id,
+                question_id: question.id.clone(),
+                option_id: option.id.clone(),
+            },
+            quickfix: None,
+        })
+        .collect::<Vec<_>>();
+    entries.push(PickerEntry {
+        item: PickerItem::new("skip", "Skip", "Continue without an answer", None::<String>),
+        action: PickerAction::AcpCursorSkip { request_id },
+        quickfix: None,
+    });
+    let heading = title
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Cursor question");
+    let picker = PickerOverlay::from_entries(format!("{heading} · {}", question.prompt), entries)
+        .with_kind(PickerKind::AcpCursor { request_id });
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+pub(crate) fn open_cursor_plan_picker(
+    runtime: &mut EditorRuntime,
+    request_id: u64,
+    name: Option<&str>,
+) -> Result<(), String> {
+    let title = name
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Cursor plan");
+    let entries = vec![
+        PickerEntry {
+            item: PickerItem::new("accept", "Accept plan", title, None::<String>),
+            action: PickerAction::AcpCursorPlan {
+                request_id,
+                accepted: true,
+            },
+            quickfix: None,
+        },
+        PickerEntry {
+            item: PickerItem::new("reject", "Reject plan", title, None::<String>),
+            action: PickerAction::AcpCursorPlan {
+                request_id,
+                accepted: false,
+            },
+            quickfix: None,
+        },
+    ];
+    let picker = PickerOverlay::from_entries(format!("Cursor plan · {title}"), entries)
+        .with_kind(PickerKind::AcpCursor { request_id });
+    shell_ui_mut(runtime)?.set_picker(picker);
+    Ok(())
+}
+
+pub(crate) fn acp_answer_cursor_question(
+    runtime: &mut EditorRuntime,
+    request_id: u64,
+    question_id: String,
+    option_id: String,
+) -> Result<(), String> {
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.answer_cursor_question(runtime, request_id, question_id, option_id)
+}
+
+pub(crate) fn acp_skip_cursor(runtime: &mut EditorRuntime, request_id: u64) -> Result<(), String> {
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.resolve_cursor(request_id, named_outcome("skipped"));
+    Ok(())
+}
+
+pub(crate) fn acp_resolve_cursor_plan(
+    runtime: &mut EditorRuntime,
+    request_id: u64,
+    accepted: bool,
+) -> Result<(), String> {
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.resolve_cursor(request_id, plan_outcome(accepted));
+    Ok(())
+}
+
+pub(crate) fn acp_cancel_cursor(
+    runtime: &mut EditorRuntime,
+    request_id: u64,
+) -> Result<(), String> {
+    let manager = runtime
+        .services()
+        .get::<Arc<Mutex<AcpManager>>>()
+        .ok_or_else(|| "acp manager service missing".to_owned())?
+        .clone();
+    let mut manager = manager
+        .lock()
+        .map_err(|_| "acp manager lock was poisoned".to_owned())?;
+    manager.resolve_cursor(request_id, named_outcome("cancelled"));
     Ok(())
 }
 

@@ -197,6 +197,36 @@ pub fn package() -> PluginPackage {
             "ui.acp-dock.next",
             None,
         ),
+        hook_command(
+            "acp.subagent.next",
+            "Selects the next ACP Subagent region in the active buffer.",
+            "ui.acp.subagent.next",
+            None,
+        ),
+        hook_command(
+            "acp.subagent.previous",
+            "Selects the previous ACP Subagent region in the active buffer.",
+            "ui.acp.subagent.previous",
+            None,
+        ),
+        hook_command(
+            "acp.subagent.toggle-fold",
+            "Toggles fold for the current ACP Subagent region.",
+            "ui.acp.subagent.toggle-fold",
+            None,
+        ),
+        hook_command(
+            "acp.cancel",
+            "Cancels the current ACP Subagent when cancel-capable, otherwise the root session.",
+            "ui.acp.cancel",
+            None,
+        ),
+        hook_command(
+            "acp.capabilities",
+            "Shows ACP agent and session capabilities for the active ACP buffer.",
+            "ui.acp.capabilities",
+            None,
+        ),
     ];
 
     let key_bindings = vec![
@@ -207,6 +237,7 @@ pub fn package() -> PluginPackage {
             .with_vim_mode(PluginVimMode::Normal),
         PluginKeyBinding::new("Ctrl+s", "acp.pick-session", PluginKeymapScope::Workspace)
             .with_vim_mode(PluginVimMode::Normal),
+        PluginKeyBinding::new("Ctrl+x", "acp.cancel", PluginKeymapScope::Workspace),
         PluginKeyBinding::new("j", "acp.dock.next", PluginKeymapScope::AcpDock),
         PluginKeyBinding::new("k", "acp.dock.previous", PluginKeymapScope::AcpDock),
     ];
@@ -218,6 +249,16 @@ pub fn package() -> PluginPackage {
             PluginBuffer::new(ACP_BUFFER_KIND, Vec::<String>::new()).with_key_bindings(vec![
                 PluginKeyBinding::new("I", "acp.focus-input", PluginKeymapScope::Workspace)
                     .with_vim_mode(PluginVimMode::Normal),
+                PluginKeyBinding::new("]", "acp.subagent.next", PluginKeymapScope::Workspace)
+                    .with_vim_mode(PluginVimMode::Normal),
+                PluginKeyBinding::new("[", "acp.subagent.previous", PluginKeymapScope::Workspace)
+                    .with_vim_mode(PluginVimMode::Normal),
+                PluginKeyBinding::new(
+                    "za",
+                    "acp.subagent.toggle-fold",
+                    PluginKeymapScope::Workspace,
+                )
+                .with_vim_mode(PluginVimMode::Normal),
             ]),
         ])
 }

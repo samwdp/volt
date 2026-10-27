@@ -327,13 +327,13 @@ pub(super) fn rebuild_acp_output_markdown(
     follow_output: bool,
 ) -> Result<(), String> {
     let config = markdown_pretty::user_library_pretty_config(&*shell_user_library(runtime));
-    let (items, visible_rows, buffer_enabled) = {
+    let (snapshot, visible_rows, buffer_enabled) = {
         let buffer = shell_buffer_mut(runtime, buffer_id)?;
         let Some(state) = buffer.acp_state.as_ref() else {
             return Ok(());
         };
         (
-            state.output_items.clone(),
+            state.clone(),
             buffer.acp_output_viewport_lines(),
             buffer.markdown_pretty_enabled(),
         )
@@ -346,7 +346,7 @@ pub(super) fn rebuild_acp_output_markdown(
             }),
             Err(_) => None,
         };
-        acp_build_output_lines(&items, markdown, buffer_enabled)
+        acp_build_output_lines_from_state(&snapshot, markdown, buffer_enabled)
     };
     let buffer = shell_buffer_mut(runtime, buffer_id)?;
     if let Some(state) = buffer.acp_state.as_mut() {

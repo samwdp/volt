@@ -8,15 +8,18 @@ use std::{
     time::Duration,
 };
 
+use super::cursor_ext::{CursorImageNotice, CursorQuestion, CursorTaskNotice, CursorTodo};
 use agent_client_protocol::{Agent, ClientSideConnection};
 use agent_client_protocol::{
-    AuthCapabilities, AvailableCommand, ClientCapabilities, ContentBlock, FileSystemCapabilities,
-    Implementation, InitializeRequest, ListSessionsRequest, LoadSessionRequest, Meta, ModelId,
-    NewSessionRequest, PermissionOption, PermissionOptionId, PermissionOptionKind, Plan,
-    ProtocolVersion, RequestPermissionOutcome, SelectedPermissionOutcome, SessionConfigId,
-    SessionConfigOption, SessionConfigValueId, SessionInfo, SessionInfoUpdate, SessionModeId,
+    AgentCapabilities, AuthCapabilities, AuthMethod, AvailableCommand, CancelNotification,
+    ClientCapabilities, ContentBlock, FileSystemCapabilities, Implementation, InitializeRequest,
+    ListSessionsRequest, LoadSessionRequest, Meta, ModelId, NewSessionRequest, PermissionOption,
+    PermissionOptionId, PermissionOptionKind, Plan, ProtocolVersion, RequestPermissionOutcome,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigOption, SessionConfigValueId,
+    SessionInfo, SessionInfoUpdate, SessionMessage, SessionMessageChunk, SessionModeId,
     SessionModeState, SessionModelState, SetSessionConfigOptionRequest, SetSessionModeRequest,
-    SetSessionModelRequest, StopReason, TerminalExitStatus, TerminalId, ToolCall, ToolCallUpdate,
+    SetSessionModelRequest, StopReason, SubagentCapabilities, SubagentUpdate, TerminalExitStatus,
+    TerminalId, ToolCall, ToolCallUpdate,
 };
 use editor_jobs::{OwnedProcessId, ProcessRegistry, WorkspaceId as ProcessWorkspaceId};
 use editor_plugin_api::AcpClient as AcpClientConfig;
@@ -44,18 +47,27 @@ pub(crate) struct PendingAcpLoadSession {
     pub(crate) title: Option<String>,
 }
 
+#[derive(Clone)]
 pub(crate) struct AcpSessionInfo {
     pub(crate) client_id: String,
     pub(crate) buffer_id: BufferId,
     pub(crate) workspace_id: WorkspaceId,
     pub(crate) workspace_name: String,
     pub(crate) title: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) parent_session_id: Option<agent_client_protocol::SessionId>,
+    pub(crate) cancel_capable: bool,
     pub(crate) available_commands: Vec<AvailableCommand>,
     pub(crate) mode_state: Option<SessionModeState>,
     pub(crate) model_state: Option<SessionModelState>,
     pub(crate) config_options: Vec<SessionConfigOption>,
     pub(crate) mode_config_id: Option<SessionConfigId>,
     pub(crate) model_config_id: Option<SessionConfigId>,
+    /// Set on the root session from `initialize` (not copied onto ACP Subagents).
+    pub(crate) protocol_version: Option<ProtocolVersion>,
+    pub(crate) agent_info: Option<Implementation>,
+    pub(crate) agent_capabilities: Option<Box<AgentCapabilities>>,
+    pub(crate) auth_methods: Vec<AuthMethod>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +75,7 @@ pub(crate) struct AcpPendingPermissionUi {
     pub(crate) request_id: u64,
     pub(crate) session_id: agent_client_protocol::SessionId,
     pub(crate) workspace_name: String,
+    pub(crate) subagent_title: Option<String>,
     pub(crate) tool_call: ToolCallUpdate,
     pub(crate) options: Vec<PermissionOption>,
 }
@@ -81,11 +94,19 @@ impl AcpPendingPermissionUi {
     }
 
     pub(crate) fn notification_title(&self) -> String {
-        format!(
-            "{} {} is requesting permission",
-            self.workspace_name,
-            self.title()
-        )
+        match self.subagent_title.as_deref() {
+            Some(subagent) if !subagent.is_empty() => format!(
+                "{} [{}] {} is requesting permission",
+                self.workspace_name,
+                subagent,
+                self.title()
+            ),
+            _ => format!(
+                "{} {} is requesting permission",
+                self.workspace_name,
+                self.title()
+            ),
+        }
     }
 }
 
@@ -96,6 +117,10 @@ pub(crate) enum AcpEvent {
         session_id: agent_client_protocol::SessionId,
         modes: Option<SessionModeState>,
         models: Option<SessionModelState>,
+        protocol_version: ProtocolVersion,
+        agent_info: Option<Implementation>,
+        agent_capabilities: Box<AgentCapabilities>,
+        auth_methods: Vec<AuthMethod>,
     },
     ClientFailed {
         buffer_id: BufferId,
@@ -125,6 +150,18 @@ pub(crate) enum AcpEvent {
         session_id: agent_client_protocol::SessionId,
         update: ToolCallUpdate,
     },
+    SubagentUpdate {
+        parent_session_id: agent_client_protocol::SessionId,
+        update: SubagentUpdate,
+    },
+    SessionMessage {
+        session_id: agent_client_protocol::SessionId,
+        message: SessionMessage,
+    },
+    SessionMessageChunk {
+        session_id: agent_client_protocol::SessionId,
+        chunk: SessionMessageChunk,
+    },
     SessionInfoUpdated {
         session_id: agent_client_protocol::SessionId,
         update: SessionInfoUpdate,
@@ -139,6 +176,33 @@ pub(crate) enum AcpEvent {
         request_id: u64,
         session_id: agent_client_protocol::SessionId,
         message: String,
+    },
+    CursorAsk {
+        request_id: u64,
+        session_id: agent_client_protocol::SessionId,
+        title: Option<String>,
+        questions: Vec<CursorQuestion>,
+    },
+    CursorPlan {
+        request_id: u64,
+        session_id: agent_client_protocol::SessionId,
+        name: Option<String>,
+        overview: Option<String>,
+        plan: String,
+        todos: Vec<CursorTodo>,
+    },
+    CursorTodos {
+        session_id: agent_client_protocol::SessionId,
+        todos: Vec<CursorTodo>,
+        merge: bool,
+    },
+    CursorTask {
+        session_id: agent_client_protocol::SessionId,
+        task: CursorTaskNotice,
+    },
+    CursorImage {
+        session_id: agent_client_protocol::SessionId,
+        notice: CursorImageNotice,
     },
     SessionFinished {
         session_id: agent_client_protocol::SessionId,
@@ -326,6 +390,12 @@ pub(crate) enum AcpCommand {
     Disconnect {
         session_id: agent_client_protocol::SessionId,
     },
+    Cancel {
+        /// Root connection session used to look up the live ACP connection.
+        connection_session_id: agent_client_protocol::SessionId,
+        /// Session id placed in `session/cancel` (root or ACP Subagent).
+        target_session_id: agent_client_protocol::SessionId,
+    },
     ResolvePermission {
         request_id: u64,
         decision: PermissionDecision,
@@ -333,6 +403,10 @@ pub(crate) enum AcpCommand {
     ResolvePermissionOption {
         request_id: u64,
         option_id: PermissionOptionId,
+    },
+    ResolveCursor {
+        request_id: u64,
+        outcome: serde_json::Value,
     },
 }
 
@@ -516,6 +590,23 @@ pub(crate) async fn acp_runtime_loop(
                     disconnect_acp_session(state, session_id).await;
                 });
             }
+            AcpCommand::Cancel {
+                connection_session_id,
+                target_session_id,
+            } => {
+                let state = state.clone();
+                tokio::task::spawn_local(async move {
+                    if let Err(error) = cancel_acp_session(
+                        state.clone(),
+                        connection_session_id,
+                        target_session_id.clone(),
+                    )
+                    .await
+                    {
+                        send_session_lines(state, &target_session_id, vec![error]);
+                    }
+                });
+            }
             AcpCommand::ResolvePermission {
                 request_id,
                 decision,
@@ -527,6 +618,12 @@ pub(crate) async fn acp_runtime_loop(
                 option_id,
             } => {
                 resolve_permission_option(state.clone(), request_id, option_id);
+            }
+            AcpCommand::ResolveCursor {
+                request_id,
+                outcome,
+            } => {
+                resolve_cursor_request(state.clone(), request_id, outcome);
             }
         }
     }
@@ -586,13 +683,14 @@ pub(crate) async fn connect_acp_client(
             .write_text_file(true))
         .terminal(true)
         .auth(AuthCapabilities::new().terminal(true))
+        .subagents(SubagentCapabilities::new())
         .meta(capability_meta);
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST)
         .client_capabilities(capabilities)
         .client_info(
             Implementation::new("volt", core::env!("CARGO_PKG_VERSION")).title("Volt SDL shell"),
         );
-    connection
+    let init = connection
         .initialize(init_request)
         .await
         .map_err(|error| format!("ACP initialize failed: {error}"))?;
@@ -618,7 +716,31 @@ pub(crate) async fn connect_acp_client(
         session_id,
         modes,
         models,
+        protocol_version: init.protocol_version,
+        agent_info: init.agent_info,
+        agent_capabilities: Box::new(init.agent_capabilities),
+        auth_methods: init.auth_methods,
     });
+    Ok(())
+}
+
+pub(crate) async fn cancel_acp_session(
+    state: Rc<RefCell<AcpRuntimeState>>,
+    connection_session_id: agent_client_protocol::SessionId,
+    target_session_id: agent_client_protocol::SessionId,
+) -> Result<(), String> {
+    let connection = {
+        state
+            .borrow()
+            .sessions
+            .get(&connection_session_id)
+            .map(|session| session.connection.clone())
+    }
+    .ok_or_else(|| "ACP session is not connected".to_owned())?;
+    connection
+        .cancel(CancelNotification::new(target_session_id))
+        .await
+        .map_err(|error| format!("ACP cancel failed: {error}"))?;
     Ok(())
 }
 
@@ -875,6 +997,28 @@ pub(crate) fn resolve_permission_response(
     });
 }
 
+pub(crate) fn begin_cursor_request(
+    state: &Rc<RefCell<AcpRuntimeState>>,
+) -> (u64, oneshot::Receiver<serde_json::Value>) {
+    let (tx, rx) = oneshot::channel();
+    let mut state = state.borrow_mut();
+    let request_id = state.next_cursor_request_id;
+    state.next_cursor_request_id = state.next_cursor_request_id.saturating_add(1);
+    state.pending_cursor.insert(request_id, tx);
+    (request_id, rx)
+}
+
+pub(crate) fn resolve_cursor_request(
+    state: Rc<RefCell<AcpRuntimeState>>,
+    request_id: u64,
+    outcome: serde_json::Value,
+) {
+    let pending = state.borrow_mut().pending_cursor.remove(&request_id);
+    if let Some(pending) = pending {
+        let _ = pending.send(outcome);
+    }
+}
+
 pub(crate) fn resolve_permission_option(
     state: Rc<RefCell<AcpRuntimeState>>,
     request_id: u64,
@@ -999,6 +1143,8 @@ pub(crate) struct AcpRuntimeState {
     pub(crate) terminals: HashMap<TerminalId, AcpTerminal>,
     pub(crate) pending_permissions: VecDeque<PendingPermission>,
     pub(crate) next_permission_request_id: u64,
+    pub(crate) pending_cursor: HashMap<u64, oneshot::Sender<serde_json::Value>>,
+    pub(crate) next_cursor_request_id: u64,
     pub(crate) event_tx: mpsc::Sender<AcpEvent>,
 }
 
@@ -1013,6 +1159,8 @@ impl AcpRuntimeState {
             terminals: HashMap::new(),
             pending_permissions: VecDeque::new(),
             next_permission_request_id: 1,
+            pending_cursor: HashMap::new(),
+            next_cursor_request_id: 1,
             event_tx,
         }
     }

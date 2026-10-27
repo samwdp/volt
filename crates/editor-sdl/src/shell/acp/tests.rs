@@ -24,6 +24,7 @@ fn test_acp_manager() -> (AcpManager, tokio_mpsc::UnboundedReceiver<AcpCommand>)
             pending_permissions: VecDeque::new(),
             active_permission_request: None,
             permission_queue_paused: false,
+            cursor_asks: HashMap::new(),
         },
         command_rx,
     )
@@ -125,6 +126,7 @@ fn test_pending_permission_request(
         request_id,
         session_id: agent_client_protocol::SessionId::new(session_id),
         workspace_name: "project".to_owned(),
+        subagent_title: None,
         tool_call: test_tool_call_update(title),
         options: test_permission_options(),
     }
@@ -172,6 +174,10 @@ fn session_load_replay_keeps_history_and_names_buffer() -> Result<(), String> {
             session_id: temp_session_id.clone(),
             modes: None,
             models: None,
+            protocol_version: agent_client_protocol::ProtocolVersion::V1,
+            agent_info: None,
+            agent_capabilities: Box::new(agent_client_protocol::AgentCapabilities::new()),
+            auth_methods: Vec::new(),
         },
     )?;
 
@@ -320,6 +326,7 @@ fn drain_events_shows_incremental_plan_progress_across_frames() -> Result<(), St
         pending_permissions: VecDeque::new(),
         active_permission_request: None,
         permission_queue_paused: false,
+        cursor_asks: HashMap::new(),
     };
     let session_id = agent_client_protocol::SessionId::new("session-progress");
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
@@ -333,12 +340,19 @@ fn drain_events_shows_incremental_plan_progress_across_frames() -> Result<(), St
             workspace_id,
             workspace_name: "project".to_owned(),
             title: Some("Plan run".to_owned()),
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
             available_commands: Vec::new(),
             mode_state: None,
             model_state: None,
             config_options: Vec::new(),
             mode_config_id: None,
             model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
         },
     );
 
@@ -556,10 +570,11 @@ fn merge_acp_slash_commands_puts_universal_clear_first_and_dedupes_agent_clear()
         AvailableCommand::new("status", "Show status"),
     ]);
 
-    assert_eq!(merged.len(), 2);
+    assert_eq!(merged.len(), 3);
     assert_eq!(merged[0].name, "clear");
     assert_eq!(merged[0].description, "Start a new ACP session");
-    assert_eq!(merged[1].name, "status");
+    assert_eq!(merged[1].name, "capabilities");
+    assert_eq!(merged[2].name, "status");
 }
 
 #[test]
@@ -618,12 +633,19 @@ fn close_buffer_disconnects_sessions_and_clears_reuse_state() -> Result<(), Stri
             workspace_id,
             workspace_name: "project".to_owned(),
             title: None,
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
             available_commands: Vec::new(),
             mode_state: None,
             model_state: None,
             config_options: Vec::new(),
             mode_config_id: None,
             model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
         },
     );
     manager.buffers.insert(buffer_id, session_id.clone());
@@ -670,6 +692,10 @@ fn connected_event_for_closed_buffer_disconnects_orphaned_session() -> Result<()
             session_id: session_id.clone(),
             modes: None,
             models: None,
+            protocol_version: agent_client_protocol::ProtocolVersion::V1,
+            agent_info: None,
+            agent_capabilities: Box::new(agent_client_protocol::AgentCapabilities::new()),
+            auth_methods: Vec::new(),
         },
     )?;
 
@@ -699,12 +725,19 @@ fn permission_requests_queue_and_advance_after_resolution() -> Result<(), String
             workspace_id,
             workspace_name: "project".to_owned(),
             title: None,
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
             available_commands: Vec::new(),
             mode_state: None,
             model_state: None,
             config_options: Vec::new(),
             mode_config_id: None,
             model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
         },
     );
 
@@ -785,12 +818,19 @@ fn session_finished_marks_plan_entries_completed() -> Result<(), String> {
             workspace_id,
             workspace_name: "project".to_owned(),
             title: Some("Plan run".to_owned()),
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
             available_commands: Vec::new(),
             mode_state: None,
             model_state: None,
             config_options: Vec::new(),
             mode_config_id: None,
             model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
         },
     );
 
@@ -1030,4 +1070,460 @@ fn compose_acp_prompt_blocks_embeds_pasted_images() {
         }
         other => panic!("expected image block, got {other:?}"),
     }
+}
+
+#[test]
+fn acp_subagent_upsert_fold_and_nav() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let (_workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.init_acp_view("copilot", None);
+        let follow = buffer.acp_upsert_subagent(
+            "child-1".to_owned(),
+            Some("Explorer".to_owned()),
+            Some("walk tree".to_owned()),
+            Some(AcpSubagentWorkState::Running),
+            Some(true),
+        );
+        assert!(follow);
+        let follow = buffer.acp_upsert_subagent(
+            "child-2".to_owned(),
+            Some("Idle worker".to_owned()),
+            None,
+            Some(AcpSubagentWorkState::Idle),
+            Some(false),
+        );
+        assert!(follow);
+        let acp = buffer
+            .acp_state
+            .as_ref()
+            .ok_or_else(|| "missing acp state".to_owned())?;
+        assert_eq!(acp.subagent_order.len(), 2);
+        assert!(!acp.subagents["child-1"].collapsed);
+        assert!(acp.subagents["child-2"].collapsed);
+        assert!(
+            acp.output_items
+                .iter()
+                .any(|item| matches!(item, AcpOutputItem::SubagentAnchor { session_id } if session_id == "child-1"))
+        );
+    }
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        assert!(buffer.acp_select_next_subagent());
+        assert_eq!(
+            buffer.acp_cancel_target_subagent_id().as_deref(),
+            Some("child-1")
+        );
+        assert!(buffer.acp_select_next_subagent());
+        assert_eq!(
+            buffer
+                .acp_state
+                .as_ref()
+                .and_then(|state| state.current_subagent_id.as_deref()),
+            Some("child-2")
+        );
+        // child-2 is not cancel-capable
+        assert!(buffer.acp_cancel_target_subagent_id().is_none());
+        assert!(buffer.acp_toggle_current_subagent_fold());
+        let child_two_collapsed = buffer
+            .acp_state
+            .as_ref()
+            .and_then(|state| state.subagents.get("child-2"))
+            .map(|subagent| subagent.collapsed);
+        assert_eq!(child_two_collapsed, Some(false));
+    }
+    Ok(())
+}
+
+#[test]
+fn subagent_update_registers_child_without_buffer_map_entry() -> Result<(), String> {
+    let (mut manager, _command_rx) = test_acp_manager();
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let (_workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        buffer.init_acp_view("copilot", None);
+    }
+    let parent_id = agent_client_protocol::SessionId::new("parent");
+    let child_id = agent_client_protocol::SessionId::new("child");
+    let workspace_id = test_workspace_id()?;
+    manager.sessions.insert(
+        parent_id.clone(),
+        AcpSessionInfo {
+            client_id: "copilot".to_owned(),
+            buffer_id,
+            workspace_id,
+            workspace_name: "project".to_owned(),
+            title: Some("Root".to_owned()),
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
+            available_commands: Vec::new(),
+            mode_state: None,
+            model_state: None,
+            config_options: Vec::new(),
+            mode_config_id: None,
+            model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
+        },
+    );
+    manager.buffers.insert(buffer_id, parent_id.clone());
+
+    let mut update = agent_client_protocol::SubagentUpdate::new(child_id.clone());
+    update.title = Some("Nested".to_owned());
+    let mut capabilities = agent_client_protocol::SubagentSessionCapabilities::new();
+    capabilities.cancel = Some(serde_json::Map::new());
+    update.capabilities = Some(capabilities);
+    update.state = Some(agent_client_protocol::SubagentStateUpdate::Running {});
+    manager.handle_event(
+        &mut state.runtime,
+        AcpEvent::SubagentUpdate {
+            parent_session_id: parent_id.clone(),
+            update,
+        },
+    )?;
+
+    assert!(manager.buffers.get(&buffer_id) == Some(&parent_id));
+    assert!(!manager.buffers.values().any(|id| *id == child_id));
+    let child = manager
+        .sessions
+        .get(&child_id)
+        .ok_or_else(|| "child session missing".to_owned())?;
+    assert_eq!(child.buffer_id, buffer_id);
+    assert_eq!(child.parent_session_id.as_ref(), Some(&parent_id));
+    assert!(child.cancel_capable);
+    assert_eq!(child.title.as_deref(), Some("Nested"));
+
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    let acp = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "missing acp state".to_owned())?;
+    assert!(acp.subagents.contains_key(child_id.to_string().as_str()));
+    Ok(())
+}
+
+#[test]
+fn cancel_target_prefers_current_cancel_capable_subagent() -> Result<(), String> {
+    let (manager, _command_rx) = test_acp_manager();
+    let buffer_id = test_buffer_id()?;
+    let workspace_id = test_workspace_id()?;
+    let parent_id = agent_client_protocol::SessionId::new("parent");
+    let child_id = agent_client_protocol::SessionId::new("child");
+    let mut manager = manager;
+    manager.sessions.insert(
+        parent_id.clone(),
+        AcpSessionInfo {
+            client_id: "copilot".to_owned(),
+            buffer_id,
+            workspace_id,
+            workspace_name: "project".to_owned(),
+            title: None,
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
+            available_commands: Vec::new(),
+            mode_state: None,
+            model_state: None,
+            config_options: Vec::new(),
+            mode_config_id: None,
+            model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
+        },
+    );
+    manager.sessions.insert(
+        child_id.clone(),
+        AcpSessionInfo {
+            client_id: "copilot".to_owned(),
+            buffer_id,
+            workspace_id,
+            workspace_name: "project".to_owned(),
+            title: Some("Nested".to_owned()),
+            description: None,
+            parent_session_id: Some(parent_id.clone()),
+            cancel_capable: true,
+            available_commands: Vec::new(),
+            mode_state: None,
+            model_state: None,
+            config_options: Vec::new(),
+            mode_config_id: None,
+            model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
+        },
+    );
+    manager.buffers.insert(buffer_id, parent_id.clone());
+
+    let (connection, target) = manager
+        .cancel_target_for_buffer(buffer_id, Some(child_id.to_string().as_str()))
+        .ok_or_else(|| "expected cancel target".to_owned())?;
+    assert_eq!(connection, parent_id);
+    assert_eq!(target, child_id);
+
+    let (connection, target) = manager
+        .cancel_target_for_buffer(buffer_id, None)
+        .ok_or_else(|| "expected root cancel target".to_owned())?;
+    assert_eq!(connection, parent_id);
+    assert_eq!(target, parent_id);
+    Ok(())
+}
+
+#[test]
+fn close_buffer_removes_child_sessions_and_disconnects_root() -> Result<(), String> {
+    let (mut manager, mut command_rx) = test_acp_manager();
+    let buffer_id = test_buffer_id()?;
+    let workspace_id = test_workspace_id()?;
+    let parent_id = agent_client_protocol::SessionId::new("parent");
+    let child_id = agent_client_protocol::SessionId::new("child");
+    manager.sessions.insert(
+        parent_id.clone(),
+        AcpSessionInfo {
+            client_id: "copilot".to_owned(),
+            buffer_id,
+            workspace_id,
+            workspace_name: "project".to_owned(),
+            title: None,
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
+            available_commands: Vec::new(),
+            mode_state: None,
+            model_state: None,
+            config_options: Vec::new(),
+            mode_config_id: None,
+            model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
+        },
+    );
+    manager.sessions.insert(
+        child_id.clone(),
+        AcpSessionInfo {
+            client_id: "copilot".to_owned(),
+            buffer_id,
+            workspace_id,
+            workspace_name: "project".to_owned(),
+            title: Some("Nested".to_owned()),
+            description: None,
+            parent_session_id: Some(parent_id.clone()),
+            cancel_capable: true,
+            available_commands: Vec::new(),
+            mode_state: None,
+            model_state: None,
+            config_options: Vec::new(),
+            mode_config_id: None,
+            model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
+        },
+    );
+    manager.buffers.insert(buffer_id, parent_id.clone());
+
+    manager.close_buffer(buffer_id);
+
+    assert!(manager.sessions.is_empty());
+    assert!(manager.buffers.is_empty());
+    assert!(matches!(
+        command_rx.try_recv().expect("disconnect queued"),
+        AcpCommand::Disconnect { session_id } if session_id == parent_id
+    ));
+    assert!(command_rx.try_recv().is_err());
+    Ok(())
+}
+
+#[test]
+fn capabilities_report_includes_agent_caps_and_subagents() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let (workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+    let session = AcpSessionInfo {
+        client_id: "copilot".to_owned(),
+        buffer_id,
+        workspace_id,
+        workspace_name: "ws".to_owned(),
+        title: None,
+        description: None,
+        parent_session_id: None,
+        cancel_capable: true,
+        available_commands: Vec::new(),
+        mode_state: None,
+        model_state: None,
+        config_options: Vec::new(),
+        mode_config_id: None,
+        model_config_id: None,
+        protocol_version: Some(agent_client_protocol::ProtocolVersion::V1),
+        agent_info: Some(
+            agent_client_protocol::Implementation::new("demo-agent", "1.2.3").title("Demo"),
+        ),
+        agent_capabilities: Some(Box::new(
+            agent_client_protocol::AgentCapabilities::new()
+                .load_session(true)
+                .prompt_capabilities(agent_client_protocol::PromptCapabilities::new().image(true)),
+        )),
+        auth_methods: Vec::new(),
+    };
+    let report = format_acp_capabilities_report(
+        &session,
+        &[("child-1".to_owned(), "Investigator".to_owned(), true)],
+    );
+    assert!(report.contains("protocol: 1"));
+    assert!(report.contains("agent: Demo (1.2.3)"));
+    assert!(report.contains("session/load: yes"));
+    assert!(report.contains("prompt image: yes"));
+    assert!(report.contains("subagents {}"));
+    assert!(report.contains("Investigator (`child-1`) cancel: yes"));
+    assert!(report.contains("not an agent initialize capability"));
+    Ok(())
+}
+
+#[test]
+fn show_capabilities_lands_in_acp_output_when_another_buffer_is_focused() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let (workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+    let notes_id = state
+        .runtime
+        .model_mut()
+        .create_buffer(workspace_id, "notes", BufferKind::Scratch, None)
+        .map_err(|error| error.to_string())?;
+    state
+        .runtime
+        .model_mut()
+        .focus_buffer(workspace_id, notes_id)
+        .map_err(|error| error.to_string())?;
+    shell_ui_mut(&mut state.runtime)?.focus_buffer(notes_id);
+
+    let session_id = agent_client_protocol::SessionId::new("root-session");
+    let (mut manager, _command_rx) = test_acp_manager();
+    manager.buffers.insert(buffer_id, session_id.clone());
+    manager.sessions.insert(
+        session_id,
+        AcpSessionInfo {
+            client_id: "copilot".to_owned(),
+            buffer_id,
+            workspace_id,
+            workspace_name: "ws".to_owned(),
+            title: None,
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
+            available_commands: Vec::new(),
+            mode_state: None,
+            model_state: None,
+            config_options: Vec::new(),
+            mode_config_id: None,
+            model_config_id: None,
+            protocol_version: Some(agent_client_protocol::ProtocolVersion::V1),
+            agent_info: Some(
+                agent_client_protocol::Implementation::new("demo-agent", "1.2.3").title("Demo"),
+            ),
+            agent_capabilities: Some(Box::new(agent_client_protocol::AgentCapabilities::new())),
+            auth_methods: Vec::new(),
+        },
+    );
+    state
+        .runtime
+        .services_mut()
+        .insert(std::sync::Arc::new(std::sync::Mutex::new(manager)));
+
+    acp_show_capabilities(&mut state.runtime)?;
+
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    let state_view = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "ACP state missing".to_owned())?;
+    assert_eq!(state_view.active_pane, AcpPane::Output);
+    let report = state_view.output_items.iter().rev().find_map(|item| {
+        if let AcpOutputItem::SystemMessage(message) = item {
+            Some(message.as_str())
+        } else {
+            None
+        }
+    });
+    let report = report.ok_or_else(|| "capabilities report missing".to_owned())?;
+    assert!(report.contains("ACP capabilities"));
+    assert!(report.contains("protocol: 1"));
+    assert!(report.contains("agent: Demo (1.2.3)"));
+    let footer = state_view.footer_pane.text.text();
+    assert!(footer.contains("protocol: 1"));
+    assert!(footer.contains("agent: Demo (1.2.3)"));
+    Ok(())
+}
+
+#[test]
+fn cursor_task_notice_opens_subagent_region() -> Result<(), String> {
+    let raw = serde_json::value::RawValue::from_string(
+        r#"{"toolCallId":"task_01","description":"Find HTML files","prompt":"Search the repo","subagentType":"explore","agentId":"agent_01","durationMs":1200}"#
+            .to_owned(),
+    )
+    .map_err(|error| error.to_string())?;
+    let task = super::cursor_ext::parse_cursor_task(&raw)?;
+    assert_eq!(
+        super::cursor_ext::cursor_task_region_id(&task),
+        "cursor:agent_01"
+    );
+
+    let (manager, _command_rx) = test_acp_manager();
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let (workspace_id, buffer_id) = install_acp_test_buffer(&mut state)?;
+    let parent_id = agent_client_protocol::SessionId::new("parent");
+    let mut manager = manager;
+    manager.sessions.insert(
+        parent_id.clone(),
+        AcpSessionInfo {
+            client_id: "cursor".to_owned(),
+            buffer_id,
+            workspace_id,
+            workspace_name: "project".to_owned(),
+            title: None,
+            description: None,
+            parent_session_id: None,
+            cancel_capable: true,
+            available_commands: Vec::new(),
+            mode_state: None,
+            model_state: None,
+            config_options: Vec::new(),
+            mode_config_id: None,
+            model_config_id: None,
+            protocol_version: None,
+            agent_info: None,
+            agent_capabilities: None,
+            auth_methods: Vec::new(),
+        },
+    );
+    manager.buffers.insert(buffer_id, parent_id.clone());
+    manager.handle_event(
+        &mut state.runtime,
+        AcpEvent::CursorTask {
+            session_id: parent_id,
+            task,
+        },
+    )?;
+
+    let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+    let acp = buffer
+        .acp_state
+        .as_ref()
+        .ok_or_else(|| "missing acp state".to_owned())?;
+    let region = acp
+        .subagents
+        .get("cursor:agent_01")
+        .ok_or_else(|| "cursor task region missing".to_owned())?;
+    assert_eq!(region.title.as_deref(), Some("Find HTML files"));
+    assert_eq!(region.description.as_deref(), Some("explore"));
+    assert!(region.collapsed);
+    assert!(matches!(region.work_state, AcpSubagentWorkState::Idle));
+    Ok(())
 }

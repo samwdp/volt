@@ -6,7 +6,8 @@ use std::{
 
 use agent_client_protocol::{
     AvailableCommand, ContentBlock, ImageContent, ModelId, ResourceLink, SessionConfigValueId,
-    SessionModeId, SessionModeState, SessionModelState,
+    SessionMessage, SessionMessageChunk, SessionModeId, SessionModeState, SessionModelState,
+    SubagentStateUpdate,
 };
 use base64::Engine as _;
 use editor_jobs::ProcessRegistry;
@@ -15,9 +16,112 @@ use editor_plugin_api::AcpClient as AcpClientConfig;
 
 use super::super::*;
 
+use super::cursor_ext::*;
 use super::input::*;
 use super::launch::*;
 use super::runtime::*;
+use super::session::focus_acp_buffer;
+
+pub(crate) fn format_acp_capabilities_report(
+    session: &AcpSessionInfo,
+    subagents: &[(String, String, bool)],
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("ACP capabilities".to_owned());
+    lines.push(format!("client: {}", session.client_id));
+    if let Some(version) = session.protocol_version.as_ref() {
+        lines.push(format!("protocol: {version}"));
+    }
+    if let Some(info) = session.agent_info.as_ref() {
+        let title = info.title.as_deref().unwrap_or(info.name.as_str());
+        lines.push(format!("agent: {title} ({})", info.version));
+        if info.title.is_some() && info.title.as_deref() != Some(info.name.as_str()) {
+            lines.push(format!("agent id: {}", info.name));
+        }
+    } else {
+        lines.push("agent: (not reported)".to_owned());
+    }
+
+    lines.push(String::new());
+    lines.push("Volt advertises (client):".to_owned());
+    lines.push("- fs read/write text file".to_owned());
+    lines.push("- terminal".to_owned());
+    lines.push("- auth.terminal".to_owned());
+    lines.push("- subagents {}".to_owned());
+
+    lines.push(String::new());
+    lines.push("Agent capabilities:".to_owned());
+    match session.agent_capabilities.as_ref() {
+        Some(caps) => {
+            lines.push(format!("- session/load: {}", yes_no(caps.load_session)));
+            lines.push(format!(
+                "- session/list: {}",
+                yes_no(caps.session_capabilities.list.is_some())
+            ));
+            lines.push(format!(
+                "- prompt image: {}",
+                yes_no(caps.prompt_capabilities.image)
+            ));
+            lines.push(format!(
+                "- prompt audio: {}",
+                yes_no(caps.prompt_capabilities.audio)
+            ));
+            lines.push(format!(
+                "- prompt embedded context: {}",
+                yes_no(caps.prompt_capabilities.embedded_context)
+            ));
+            lines.push(format!(
+                "- mcp http: {}",
+                yes_no(caps.mcp_capabilities.http)
+            ));
+            lines.push(format!("- mcp sse: {}", yes_no(caps.mcp_capabilities.sse)));
+        }
+        None => lines.push("- (not captured yet; reconnect)".to_owned()),
+    }
+
+    if !session.auth_methods.is_empty() {
+        lines.push(String::new());
+        lines.push("Auth methods:".to_owned());
+        for method in &session.auth_methods {
+            let detail = method
+                .description()
+                .map(|description| format!(" — {description}"))
+                .unwrap_or_default();
+            lines.push(format!("- {} ({}){detail}", method.name(), method.id()));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("ACP Subagents:".to_owned());
+    lines.push(
+        "- not an agent initialize capability; exposed when the agent sends subagent_update"
+            .to_owned(),
+    );
+    if subagents.is_empty() {
+        lines.push("- known: none yet".to_owned());
+    } else {
+        for (id, title, cancel_capable) in subagents {
+            lines.push(format!(
+                "- {title} (`{id}`) cancel: {}",
+                yes_no(*cancel_capable)
+            ));
+        }
+    }
+
+    if let Some(mode) = session.mode_state.as_ref() {
+        lines.push(String::new());
+        lines.push(format!("current mode: {}", mode.current_mode_id));
+    }
+    if let Some(model) = session.model_state.as_ref() {
+        lines.push(format!("current model: {}", model.current_model_id));
+    }
+
+    lines.join("\n")
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
 
 pub(crate) fn acp_file_mention_at_cursor(text: &str, cursor: usize) -> Option<FileMention> {
     let chars: Vec<char> = text.chars().collect();
@@ -350,6 +454,7 @@ pub(crate) struct AcpManager {
     pub(crate) pending_permissions: VecDeque<AcpPendingPermissionUi>,
     pub(crate) active_permission_request: Option<u64>,
     pub(crate) permission_queue_paused: bool,
+    pub(crate) cursor_asks: HashMap<u64, CursorAskProgress>,
 }
 
 impl AcpManager {
@@ -369,6 +474,7 @@ impl AcpManager {
             pending_permissions: VecDeque::new(),
             active_permission_request: None,
             permission_queue_paused: false,
+            cursor_asks: HashMap::new(),
         })
     }
 
@@ -476,7 +582,14 @@ impl AcpManager {
                 } if *action_buffer_id == buffer_id
             )
         });
-        if let Some(session_id) = self.buffers.remove(&buffer_id) {
+        let root_session_id = self.buffers.remove(&buffer_id);
+        let session_ids: Vec<_> = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.buffer_id == buffer_id)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in session_ids {
             if let Some(session) = self.sessions.remove(&session_id) {
                 self.clear_workspace_client_buffer(
                     session.workspace_id,
@@ -484,8 +597,98 @@ impl AcpManager {
                     buffer_id,
                 );
             }
+        }
+        if let Some(session_id) = root_session_id {
             self.disconnect(session_id);
         }
+    }
+
+    /// Cancel target for a buffer: current cancel-capable ACP Subagent, else root.
+    pub(crate) fn cancel_target_for_buffer(
+        &self,
+        buffer_id: BufferId,
+        current_subagent_id: Option<&str>,
+    ) -> Option<(
+        agent_client_protocol::SessionId,
+        agent_client_protocol::SessionId,
+    )> {
+        let connection_session_id = self.session_for_buffer(buffer_id)?;
+        if let Some(subagent_id) = current_subagent_id {
+            let child = self.sessions.iter().find_map(|(id, session)| {
+                if id.to_string() == subagent_id
+                    && session.buffer_id == buffer_id
+                    && session.parent_session_id.is_some()
+                    && session.cancel_capable
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            });
+            if let Some(target) = child {
+                return Some((connection_session_id, target));
+            }
+        }
+        Some((connection_session_id.clone(), connection_session_id))
+    }
+
+    pub(crate) fn capabilities_report_for_buffer(&self, buffer_id: BufferId) -> Option<String> {
+        let mapped_session_id = self.session_for_buffer(buffer_id)?;
+        let mut root_session_id = mapped_session_id.clone();
+        for _ in 0..32 {
+            let Some(session) = self.sessions.get(&root_session_id) else {
+                break;
+            };
+            match session.parent_session_id.clone() {
+                Some(parent)
+                    if parent != root_session_id && self.sessions.contains_key(&parent) =>
+                {
+                    root_session_id = parent;
+                }
+                _ => break,
+            }
+        }
+        let session = self
+            .sessions
+            .get(&root_session_id)
+            .or_else(|| self.sessions.get(&mapped_session_id))?;
+        let mut subagents: Vec<(String, String, bool)> = self
+            .sessions
+            .iter()
+            .filter_map(|(id, child)| {
+                if child.buffer_id == buffer_id && child.parent_session_id.is_some() {
+                    let title = child.title.clone().unwrap_or_else(|| id.to_string());
+                    Some((id.to_string(), title, child.cancel_capable))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        subagents.sort_by(|left, right| left.0.cmp(&right.0));
+        Some(format_acp_capabilities_report(session, &subagents))
+    }
+
+    pub(crate) fn cancel(
+        &mut self,
+        connection_session_id: agent_client_protocol::SessionId,
+        target_session_id: agent_client_protocol::SessionId,
+    ) -> Result<(), String> {
+        self.runtime.send(AcpCommand::Cancel {
+            connection_session_id,
+            target_session_id,
+        })
+    }
+
+    fn buffer_route_for_session(
+        &self,
+        session_id: &agent_client_protocol::SessionId,
+    ) -> Option<(BufferId, Option<String>)> {
+        let session = self.sessions.get(session_id)?;
+        let child_id = session
+            .parent_session_id
+            .as_ref()
+            .map(|_| session_id.to_string());
+        Some((session.buffer_id, child_id))
     }
 
     pub(crate) fn rebind_session_id(
@@ -651,6 +854,119 @@ impl AcpManager {
         });
     }
 
+    pub(crate) fn resolve_cursor(&mut self, request_id: u64, outcome: serde_json::Value) {
+        self.cursor_asks.remove(&request_id);
+        let _ = self.runtime.send(AcpCommand::ResolveCursor {
+            request_id,
+            outcome,
+        });
+    }
+
+    pub(crate) fn answer_cursor_question(
+        &mut self,
+        runtime: &mut EditorRuntime,
+        request_id: u64,
+        question_id: String,
+        option_id: String,
+    ) -> Result<(), String> {
+        let next = {
+            let Some(progress) = self.cursor_asks.get_mut(&request_id) else {
+                return Ok(());
+            };
+            progress.answers.push((question_id, option_id));
+            progress.index = progress.index.saturating_add(1);
+            if progress.index >= progress.questions.len() {
+                None
+            } else {
+                let title = progress.title.clone();
+                let question = progress.questions[progress.index].clone();
+                Some((title, question))
+            }
+        };
+        if let Some((title, question)) = next {
+            open_cursor_question_picker(runtime, request_id, title.as_deref(), &question)?;
+            return Ok(());
+        }
+        let answers = self
+            .cursor_asks
+            .remove(&request_id)
+            .map(|progress| progress.answers)
+            .unwrap_or_default();
+        self.resolve_cursor(request_id, answered_outcome(&answers));
+        Ok(())
+    }
+
+    fn apply_cursor_task(
+        &mut self,
+        runtime: &mut EditorRuntime,
+        session_id: agent_client_protocol::SessionId,
+        task: CursorTaskNotice,
+    ) -> Result<(), String> {
+        let Some(parent) = self.sessions.get(&session_id).cloned() else {
+            return Ok(());
+        };
+        let region_id = cursor_task_region_id(&task);
+        let child_session_id = agent_client_protocol::SessionId::new(region_id.clone());
+        let running = task.duration_ms.is_none();
+        let work_state = if running {
+            AcpSubagentWorkState::Running
+        } else {
+            AcpSubagentWorkState::Idle
+        };
+        if let Some(existing) = self.sessions.get_mut(&child_session_id) {
+            existing.title = Some(task.description.clone());
+            existing.description = Some(task.subagent_type.clone());
+            existing.parent_session_id = Some(session_id.clone());
+            existing.buffer_id = parent.buffer_id;
+        } else {
+            self.sessions.insert(
+                child_session_id,
+                AcpSessionInfo {
+                    client_id: parent.client_id.clone(),
+                    buffer_id: parent.buffer_id,
+                    workspace_id: parent.workspace_id,
+                    workspace_name: parent.workspace_name.clone(),
+                    title: Some(task.description.clone()),
+                    description: Some(task.subagent_type.clone()),
+                    parent_session_id: Some(session_id),
+                    cancel_capable: false,
+                    available_commands: Vec::new(),
+                    mode_state: None,
+                    model_state: None,
+                    config_options: Vec::new(),
+                    mode_config_id: None,
+                    model_config_id: None,
+                    protocol_version: None,
+                    agent_info: None,
+                    agent_capabilities: None,
+                    auth_methods: Vec::new(),
+                },
+            );
+        }
+        let prompt = task.prompt.clone();
+        let follow = {
+            let Ok(buffer) = shell_buffer_mut(runtime, parent.buffer_id) else {
+                return Ok(());
+            };
+            let mut follow = buffer.acp_upsert_subagent(
+                region_id.clone(),
+                Some(task.description),
+                Some(task.subagent_type),
+                Some(AcpSubagentWorkState::Running),
+                Some(false),
+            );
+            if !prompt.is_empty() {
+                follow = buffer.acp_push_system_message_to(Some(&region_id), prompt);
+            }
+            if !running {
+                follow = buffer.acp_upsert_subagent(region_id, None, None, Some(work_state), None);
+            }
+            follow
+        };
+        refresh_acp_output_markdown(runtime, parent.buffer_id, follow)?;
+        Ok(())
+    }
+
     pub(crate) fn queue_permission_request(&mut self, request: AcpPendingPermissionUi) {
         self.pending_permissions.push_back(request);
     }
@@ -809,6 +1125,10 @@ impl AcpManager {
                 session_id,
                 modes,
                 models,
+                protocol_version,
+                agent_info,
+                agent_capabilities,
+                auth_methods,
             } => {
                 let Some(pending) = self.pending_clients.remove(&buffer_id) else {
                     self.disconnect(session_id);
@@ -826,12 +1146,19 @@ impl AcpManager {
                             .load_session
                             .as_ref()
                             .and_then(|load| load.title.clone()),
+                        description: None,
+                        parent_session_id: None,
+                        cancel_capable: true,
                         available_commands: Vec::new(),
                         mode_state: modes,
                         model_state: models,
                         config_options: Vec::new(),
                         mode_config_id: None,
                         model_config_id: None,
+                        protocol_version: Some(protocol_version),
+                        agent_info,
+                        agent_capabilities: Some(agent_capabilities),
+                        auth_methods,
                     },
                 );
 
@@ -929,16 +1256,12 @@ impl AcpManager {
                 refresh_acp_output_markdown(runtime, buffer_id, follow)?;
             }
             AcpEvent::SessionUserPrompt { session_id, prompt } => {
-                if let Some(buffer_id) = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| session.buffer_id)
-                {
+                if let Some((buffer_id, child_id)) = self.buffer_route_for_session(&session_id) {
                     let follow = {
                         let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
                             return Ok(());
                         };
-                        buffer.acp_push_user_prompt(prompt)
+                        buffer.acp_push_user_prompt_to(child_id.as_deref(), prompt)
                     };
                     refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
@@ -947,59 +1270,144 @@ impl AcpManager {
                 session_id,
                 content,
             } => {
-                if let Some(buffer_id) = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| session.buffer_id)
-                {
+                if let Some((buffer_id, child_id)) = self.buffer_route_for_session(&session_id) {
                     let follow = {
                         let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
                             return Ok(());
                         };
-                        buffer.acp_append_agent_chunk(content)
+                        buffer.acp_append_agent_chunk_to(child_id.as_deref(), content)
                     };
                     refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
             }
             AcpEvent::SessionPlan { session_id, plan } => {
-                if let Some(buffer_id) = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| session.buffer_id)
-                    && let Ok(buffer) = shell_buffer_mut(runtime, buffer_id)
-                {
-                    buffer.acp_set_plan(plan);
+                if let Some((buffer_id, child_id)) = self.buffer_route_for_session(&session_id) {
+                    let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                        return Ok(());
+                    };
+                    if let Some(child_id) = child_id.as_deref() {
+                        let follow = buffer.acp_set_subagent_plan(child_id, plan);
+                        refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+                    } else {
+                        buffer.acp_set_plan(plan);
+                    }
                 }
             }
             AcpEvent::SessionToolCall {
                 session_id,
                 tool_call,
             } => {
-                if let Some(buffer_id) = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| session.buffer_id)
-                {
+                if let Some((buffer_id, child_id)) = self.buffer_route_for_session(&session_id) {
                     let follow = {
                         let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
                             return Ok(());
                         };
-                        buffer.acp_upsert_tool_call(tool_call)
+                        buffer.acp_upsert_tool_call_to(child_id.as_deref(), tool_call)
                     };
                     refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
             }
             AcpEvent::SessionToolCallUpdate { session_id, update } => {
-                if let Some(buffer_id) = self
-                    .sessions
-                    .get(&session_id)
-                    .map(|session| session.buffer_id)
-                {
+                if let Some((buffer_id, child_id)) = self.buffer_route_for_session(&session_id) {
                     let follow = {
                         let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
                             return Ok(());
                         };
-                        buffer.acp_update_tool_call(update)
+                        buffer.acp_update_tool_call_to(child_id.as_deref(), update)
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+                }
+            }
+            AcpEvent::SubagentUpdate {
+                parent_session_id,
+                update,
+            } => {
+                let Some(parent) = self.sessions.get(&parent_session_id).cloned() else {
+                    return Ok(());
+                };
+                let child_session_id = update.session_id.clone();
+                let cancel_capable = update
+                    .capabilities
+                    .as_ref()
+                    .map(|capabilities| capabilities.cancel_supported());
+                let work_state = update
+                    .state
+                    .as_ref()
+                    .map(acp_subagent_work_state_from_update);
+                if let Some(existing) = self.sessions.get_mut(&child_session_id) {
+                    if let Some(title) = update.title.clone() {
+                        existing.title = Some(title);
+                    }
+                    if let Some(description) = update.description.clone() {
+                        existing.description = Some(description);
+                    }
+                    if let Some(cancel_capable) = cancel_capable {
+                        existing.cancel_capable = cancel_capable;
+                    }
+                    existing.parent_session_id = Some(parent_session_id.clone());
+                    existing.buffer_id = parent.buffer_id;
+                } else {
+                    self.sessions.insert(
+                        child_session_id.clone(),
+                        AcpSessionInfo {
+                            client_id: parent.client_id.clone(),
+                            buffer_id: parent.buffer_id,
+                            workspace_id: parent.workspace_id,
+                            workspace_name: parent.workspace_name.clone(),
+                            title: update.title.clone(),
+                            description: update.description.clone(),
+                            parent_session_id: Some(parent_session_id),
+                            cancel_capable: cancel_capable.unwrap_or(false),
+                            available_commands: Vec::new(),
+                            mode_state: None,
+                            model_state: None,
+                            config_options: Vec::new(),
+                            mode_config_id: None,
+                            model_config_id: None,
+                            protocol_version: None,
+                            agent_info: None,
+                            agent_capabilities: None,
+                            auth_methods: Vec::new(),
+                        },
+                    );
+                }
+                let follow = {
+                    let Ok(buffer) = shell_buffer_mut(runtime, parent.buffer_id) else {
+                        return Ok(());
+                    };
+                    buffer.acp_upsert_subagent(
+                        child_session_id.to_string(),
+                        update.title,
+                        update.description,
+                        work_state,
+                        cancel_capable,
+                    )
+                };
+                refresh_acp_output_markdown(runtime, parent.buffer_id, follow)?;
+            }
+            AcpEvent::SessionMessage {
+                session_id,
+                message,
+            } => {
+                if let Some((buffer_id, child_id)) = self.buffer_route_for_session(&session_id) {
+                    let line = format_acp_session_message(&message);
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_push_system_message_to(child_id.as_deref(), line)
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+                }
+            }
+            AcpEvent::SessionMessageChunk { session_id, chunk } => {
+                if let Some((buffer_id, child_id)) = self.buffer_route_for_session(&session_id) {
+                    let line = format_acp_session_message_chunk(&chunk);
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_push_system_message_to(child_id.as_deref(), line)
                     };
                     refresh_acp_output_markdown(runtime, buffer_id, follow)?;
                 }
@@ -1040,17 +1448,24 @@ impl AcpManager {
                 };
                 let buffer_id = session.buffer_id;
                 let workspace_name = session.workspace_name.clone();
-                let follow = {
-                    let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
-                        return Ok(());
-                    };
-                    buffer.acp_update_tool_call(tool_call.clone())
-                };
-                refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+                let subagent_title = session
+                    .parent_session_id
+                    .as_ref()
+                    .and_then(|_| session.title.clone());
+                let child_id = session
+                    .parent_session_id
+                    .as_ref()
+                    .map(|_| session_id.to_string());
+                if let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) {
+                    let follow =
+                        buffer.acp_update_tool_call_to(child_id.as_deref(), tool_call.clone());
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+                }
                 let request = AcpPendingPermissionUi {
                     request_id,
                     session_id: session_id.clone(),
                     workspace_name,
+                    subagent_title,
                     tool_call,
                     options,
                 };
@@ -1422,31 +1837,128 @@ impl AcpManager {
                     );
                 }
             }
+            AcpEvent::CursorAsk {
+                request_id,
+                session_id,
+                title,
+                questions,
+            } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                {
+                    focus_acp_buffer(runtime, buffer_id)?;
+                }
+                self.cursor_asks.insert(
+                    request_id,
+                    CursorAskProgress {
+                        title: title.clone(),
+                        questions: questions.clone(),
+                        index: 0,
+                        answers: Vec::new(),
+                    },
+                );
+                if let Some(question) = questions.first() {
+                    open_cursor_question_picker(runtime, request_id, title.as_deref(), question)?;
+                }
+            }
+            AcpEvent::CursorPlan {
+                request_id,
+                session_id,
+                name,
+                overview,
+                plan,
+                todos,
+            } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                {
+                    let entries = cursor_plan_entries(&todos);
+                    let message = cursor_plan_message(name.as_deref(), overview.as_deref(), &plan);
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_apply_plan_entries(entries, false);
+                        buffer.acp_push_system_message(message)
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+                }
+                open_cursor_plan_picker(runtime, request_id, name.as_deref())?;
+            }
+            AcpEvent::CursorTodos {
+                session_id,
+                todos,
+                merge,
+            } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                {
+                    let entries = cursor_plan_entries(&todos);
+                    let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                        return Ok(());
+                    };
+                    buffer.acp_apply_plan_entries(entries, merge);
+                }
+            }
+            AcpEvent::CursorTask { session_id, task } => {
+                self.apply_cursor_task(runtime, session_id, task)?;
+            }
+            AcpEvent::CursorImage { session_id, notice } => {
+                if let Some(buffer_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.buffer_id)
+                {
+                    let follow = {
+                        let Ok(buffer) = shell_buffer_mut(runtime, buffer_id) else {
+                            return Ok(());
+                        };
+                        buffer.acp_push_system_message(cursor_image_message(&notice))
+                    };
+                    refresh_acp_output_markdown(runtime, buffer_id, follow)?;
+                }
+            }
             AcpEvent::Disconnected {
                 session_id,
                 message,
             } => {
-                if let Some(session) = self.sessions.remove(&session_id) {
-                    let removed_requests = self.remove_permission_requests_for_session(&session_id);
-                    let removed_request_ids = removed_requests
+                if let Some(session) = self.sessions.get(&session_id).cloned() {
+                    let buffer_id = session.buffer_id;
+                    let workspace_name = session.workspace_name.clone();
+                    let client_id = session.client_id.clone();
+                    let workspace_id = session.workspace_id;
+                    let related: Vec<_> = self
+                        .sessions
                         .iter()
-                        .map(|request| request.request_id)
-                        .collect::<Vec<_>>();
-                    self.buffers.remove(&session.buffer_id);
-                    self.clear_workspace_client_buffer(
-                        session.workspace_id,
-                        &session.client_id,
-                        session.buffer_id,
-                    );
-                    self.pending_slash.remove(&session.buffer_id);
-                    update_acp_input_hint(runtime, session.buffer_id, None, None, &[]);
+                        .filter(|(_, entry)| entry.buffer_id == buffer_id)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    let mut removed_request_ids = Vec::new();
+                    for related_id in related {
+                        removed_request_ids.extend(
+                            self.remove_permission_requests_for_session(&related_id)
+                                .into_iter()
+                                .map(|request| request.request_id),
+                        );
+                        self.sessions.remove(&related_id);
+                    }
+                    self.buffers.remove(&buffer_id);
+                    self.clear_workspace_client_buffer(workspace_id, &client_id, buffer_id);
+                    self.pending_slash.remove(&buffer_id);
+                    update_acp_input_hint(runtime, buffer_id, None, None, &[]);
                     self.dismiss_permission_picker_for_requests(runtime, &removed_request_ids)?;
                     for request_id in removed_request_ids {
                         apply_acp_notification(
                             runtime,
                             format!("acp.permission.{request_id}"),
                             NotificationSeverity::Info,
-                            format!("{} ACP session disconnected", session.workspace_name),
+                            format!("{workspace_name} ACP session disconnected"),
                             vec![message.clone()],
                             false,
                             None,
@@ -1456,7 +1968,7 @@ impl AcpManager {
                         runtime,
                         format!("acp.disconnect.{session_id}"),
                         NotificationSeverity::Info,
-                        format!("{} ACP session disconnected", session.workspace_name),
+                        format!("{workspace_name} ACP session disconnected"),
                         vec![message],
                         false,
                         None,
@@ -1465,5 +1977,69 @@ impl AcpManager {
             }
         }
         Ok(())
+    }
+}
+
+fn acp_subagent_work_state_from_update(state: &SubagentStateUpdate) -> AcpSubagentWorkState {
+    match state {
+        SubagentStateUpdate::Running {} => AcpSubagentWorkState::Running,
+        SubagentStateUpdate::Idle { .. } => AcpSubagentWorkState::Idle,
+        SubagentStateUpdate::RequiresAction {} => AcpSubagentWorkState::RequiresAction,
+        SubagentStateUpdate::Unknown {} => AcpSubagentWorkState::Unknown,
+        _ => AcpSubagentWorkState::Unknown,
+    }
+}
+
+fn format_acp_session_message(message: &SessionMessage) -> String {
+    let from = message
+        .sender_session_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let to = message
+        .recipient_session_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let body = message
+        .content
+        .as_ref()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    if body.is_empty() {
+        format!("From {from} to {to}")
+    } else {
+        format!("From {from} to {to}: {body}")
+    }
+}
+
+fn format_acp_session_message_chunk(chunk: &SessionMessageChunk) -> String {
+    let from = chunk
+        .sender_session_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let to = chunk
+        .recipient_session_id
+        .as_ref()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "?".to_owned());
+    let body = match &chunk.content {
+        ContentBlock::Text(text) => text.text.clone(),
+        _ => String::new(),
+    };
+    if body.is_empty() {
+        format!("From {from} to {to}")
+    } else {
+        format!("From {from} to {to}: {body}")
     }
 }

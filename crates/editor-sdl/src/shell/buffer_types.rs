@@ -127,12 +127,35 @@ struct AcpBufferState {
     plan_entries: Vec<PlanEntry>,
     output_items: Vec<AcpOutputItem>,
     tool_item_indices: BTreeMap<String, usize>,
+    subagents: BTreeMap<String, AcpSubagentState>,
+    subagent_order: Vec<String>,
+    current_subagent_id: Option<String>,
     plan_pane: AcpPaneState,
     output_pane: AcpPaneState,
     input: InputField,
     footer_pane: PluginTextPaneState,
     pasted_images: Vec<AcpPastedImage>,
     next_image_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcpSubagentWorkState {
+    Running,
+    RequiresAction,
+    Idle,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+struct AcpSubagentState {
+    title: Option<String>,
+    description: Option<String>,
+    collapsed: bool,
+    work_state: AcpSubagentWorkState,
+    cancel_capable: bool,
+    output_items: Vec<AcpOutputItem>,
+    plan_entries: Vec<PlanEntry>,
+    tool_item_indices: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +181,9 @@ enum AcpOutputItem {
     AgentBlocks(Vec<ContentBlock>),
     ToolCall(Box<ToolCall>),
     SystemMessage(String),
+    SubagentAnchor {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -430,6 +456,32 @@ impl Default for AcpPaneState {
     }
 }
 
+impl AcpSubagentWorkState {
+    fn default_collapsed(self) -> bool {
+        matches!(self, Self::Idle)
+    }
+}
+
+impl AcpSubagentState {
+    fn new(
+        title: Option<String>,
+        description: Option<String>,
+        work_state: AcpSubagentWorkState,
+        cancel_capable: bool,
+    ) -> Self {
+        Self {
+            title,
+            description,
+            collapsed: work_state.default_collapsed(),
+            work_state,
+            cancel_capable,
+            output_items: Vec::new(),
+            plan_entries: Vec::new(),
+            tool_item_indices: BTreeMap::new(),
+        }
+    }
+}
+
 impl AcpBufferState {
     fn new(client_label: String, client_logo: Option<String>) -> Self {
         let _ = client_label;
@@ -442,6 +494,9 @@ impl AcpBufferState {
             plan_entries: Vec::new(),
             output_items: Vec::new(),
             tool_item_indices: BTreeMap::new(),
+            subagents: BTreeMap::new(),
+            subagent_order: Vec::new(),
+            current_subagent_id: None,
             plan_pane: AcpPaneState::default(),
             output_pane: AcpPaneState::default(),
             input,
@@ -452,6 +507,126 @@ impl AcpBufferState {
             pasted_images: Vec::new(),
             next_image_id: 1,
         }
+    }
+
+    fn upsert_subagent(
+        &mut self,
+        session_id: String,
+        title: Option<String>,
+        description: Option<String>,
+        work_state: Option<AcpSubagentWorkState>,
+        cancel_capable: Option<bool>,
+    ) {
+        if let Some(existing) = self.subagents.get_mut(&session_id) {
+            if let Some(title) = title {
+                existing.title = Some(title);
+            }
+            if let Some(description) = description {
+                existing.description = Some(description);
+            }
+            if let Some(work_state) = work_state {
+                existing.work_state = work_state;
+                existing.collapsed = work_state.default_collapsed();
+            }
+            if let Some(cancel_capable) = cancel_capable {
+                existing.cancel_capable = cancel_capable;
+            }
+            return;
+        }
+        let work_state = work_state.unwrap_or(AcpSubagentWorkState::Unknown);
+        let cancel_capable = cancel_capable.unwrap_or(false);
+        self.subagents.insert(
+            session_id.clone(),
+            AcpSubagentState::new(title, description, work_state, cancel_capable),
+        );
+        self.subagent_order.push(session_id.clone());
+        self.output_items
+            .push(AcpOutputItem::SubagentAnchor { session_id });
+    }
+
+    fn subagent_mut(&mut self, session_id: &str) -> Option<&mut AcpSubagentState> {
+        self.subagents.get_mut(session_id)
+    }
+
+    fn select_next_subagent(&mut self) -> bool {
+        if self.subagent_order.is_empty() {
+            return false;
+        }
+        let next = match self.current_subagent_id.as_deref() {
+            Some(current) => self
+                .subagent_order
+                .iter()
+                .position(|id| id == current)
+                .map(|index| (index + 1) % self.subagent_order.len())
+                .unwrap_or(0),
+            None => 0,
+        };
+        self.current_subagent_id = self.subagent_order.get(next).cloned();
+        true
+    }
+
+    fn select_previous_subagent(&mut self) -> bool {
+        if self.subagent_order.is_empty() {
+            return false;
+        }
+        let previous = match self.current_subagent_id.as_deref() {
+            Some(current) => self
+                .subagent_order
+                .iter()
+                .position(|id| id == current)
+                .map(|index| {
+                    if index == 0 {
+                        self.subagent_order.len() - 1
+                    } else {
+                        index - 1
+                    }
+                })
+                .unwrap_or(0),
+            None => self.subagent_order.len() - 1,
+        };
+        self.current_subagent_id = self.subagent_order.get(previous).cloned();
+        true
+    }
+
+    fn toggle_current_subagent_fold(&mut self) -> bool {
+        let Some(current) = self.current_subagent_id.clone() else {
+            return false;
+        };
+        let Some(subagent) = self.subagents.get_mut(&current) else {
+            return false;
+        };
+        subagent.collapsed = !subagent.collapsed;
+        true
+    }
+
+    fn cancel_target_session_id(&self) -> Option<(String, bool)> {
+        if let Some(current) = self.current_subagent_id.as_deref()
+            && let Some(subagent) = self.subagents.get(current)
+            && subagent.cancel_capable
+        {
+            return Some((current.to_owned(), true));
+        }
+        None
+    }
+
+    fn current_subagent_title(&self) -> Option<&str> {
+        let current = self.current_subagent_id.as_deref()?;
+        self.subagents
+            .get(current)
+            .and_then(|subagent| subagent.title.as_deref())
+            .or(Some(current))
+    }
+
+    fn running_subagent_count(&self) -> usize {
+        self.subagents
+            .values()
+            .filter(|subagent| {
+                matches!(
+                    subagent.work_state,
+                    AcpSubagentWorkState::Running | AcpSubagentWorkState::RequiresAction
+                )
+            })
+            .count()
     }
 }
 

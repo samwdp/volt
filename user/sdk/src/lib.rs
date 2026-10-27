@@ -601,6 +601,10 @@ pub struct StatuslineContext<'a> {
     pub lsp_server: Option<&'a str>,
     pub lsp_diagnostics: Option<LspDiagnosticsInfo>,
     pub acp_connected: bool,
+    /// Title of the sticky current ACP Subagent when an ACP buffer is focused.
+    pub current_subagent_title: Option<&'a str>,
+    /// Count of ACP Subagents in Running/RequiresAction on the focused ACP buffer.
+    pub running_subagent_count: usize,
     pub git_branch: Option<&'a str>,
     pub git_added: usize,
     pub git_removed: usize,
