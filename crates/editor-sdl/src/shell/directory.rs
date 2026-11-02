@@ -867,6 +867,7 @@ pub(super) fn apply_directory_edit_queue(
     if let Some(path) = pending_workspace_create_dir(runtime, &root, &actions)? {
         shell_ui_mut(runtime)?.pending_workspace_create = false;
         apply_directory_edit_actions(&actions)?;
+        notify_lsp_of_directory_edit_actions(runtime, &actions);
         if apply_directory_listing_patch(runtime, buffer_id, &actions).is_err() {
             refresh_directory_buffer(runtime, buffer_id)?;
         }
@@ -884,10 +885,42 @@ pub(super) fn apply_directory_edit_queue(
         }
     }
     apply_directory_edit_actions(&actions)?;
+    notify_lsp_of_directory_edit_actions(runtime, &actions);
     if apply_directory_listing_patch(runtime, buffer_id, &actions).is_err() {
         refresh_directory_buffer(runtime, buffer_id)?;
     }
     Ok(())
+}
+
+fn notify_lsp_of_directory_edit_actions(runtime: &EditorRuntime, actions: &[DirectoryEditAction]) {
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
+        return;
+    };
+    let mut changes = Vec::new();
+    for action in actions {
+        match action {
+            DirectoryEditAction::CreateFile(path) => {
+                changes.push((path.clone(), LspWatchedFileChange::Created));
+            }
+            DirectoryEditAction::Delete {
+                path,
+                is_dir: false,
+            } => {
+                changes.push((path.clone(), LspWatchedFileChange::Deleted));
+            }
+            DirectoryEditAction::Rename { from, to } => {
+                changes.push((from.clone(), LspWatchedFileChange::Deleted));
+                changes.push((to.clone(), LspWatchedFileChange::Created));
+            }
+            DirectoryEditAction::CreateDir(_)
+            | DirectoryEditAction::CreateGitWorktree { .. }
+            | DirectoryEditAction::Delete { is_dir: true, .. } => {}
+        }
+    }
+    if changes.is_empty() {
+        return;
+    }
+    let _ = lsp_client.notify_watched_file_changes(&changes);
 }
 
 fn apply_directory_listing_patch(

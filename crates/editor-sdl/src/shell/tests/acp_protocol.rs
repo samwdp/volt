@@ -1582,6 +1582,7 @@ fn render_shell_state_keeps_pane_fills_out_of_acp_dock() -> Result<(), String> {
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &*shell_user_library(&state.runtime),

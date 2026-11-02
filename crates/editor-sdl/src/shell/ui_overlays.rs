@@ -74,6 +74,7 @@ pub(super) struct AutocompleteEntry {
     pub(super) detail: Option<String>,
     pub(super) kind_label: Option<String>,
     pub(super) documentation: Option<String>,
+    pub(super) additional_text_edits: Vec<LspTextEdit>,
     pub(super) resolve: Option<LspCompletionResolvePayload>,
 }
 

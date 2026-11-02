@@ -609,6 +609,7 @@ fn render_shell_state_draws_fps_overlay_when_enabled() -> Result<(), String> {
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -758,6 +759,7 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -863,6 +865,7 @@ fn render_autocomplete_overlay_uses_opaque_overlay_chrome() -> Result<(), String
             detail: Some("detail".to_owned()),
             kind_label: None,
             documentation: Some("documentation".to_owned()),
+            additional_text_edits: Vec::new(),
             resolve: None,
         }],
         selected_index: 0,
@@ -1086,6 +1089,7 @@ fn autocomplete_docs_panel_width_tracks_content_and_clamps_to_pane() {
         detail: Some("fn foo()".to_owned()),
         kind_label: None,
         documentation: Some("short".to_owned()),
+        additional_text_edits: Vec::new(),
         resolve: None,
     };
     let short_width =
@@ -1122,6 +1126,7 @@ fn autocomplete_list_row_shows_type_and_kind() {
         detail: Some("(&self) -> usize  alloc::vec::Vec".to_owned()),
         kind_label: Some("Method".to_owned()),
         documentation: None,
+        additional_text_edits: Vec::new(),
         resolve: None,
     };
     let row = autocomplete_list_row(&entry);
@@ -1206,6 +1211,7 @@ fn autocomplete_docs_wrap_caps_huge_lsp_documentation() {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
+        additional_text_edits: Vec::new(),
         resolve: None,
     };
     let lines = autocomplete_docs_lines(Some(&entry), "fo", 40, "T");
@@ -1245,6 +1251,7 @@ fn autocomplete_docs_focus_and_scroll_update_overlay_state() -> Result<(), Strin
                     .collect::<Vec<_>>()
                     .join("\n"),
             ),
+            additional_text_edits: Vec::new(),
             resolve: None,
         }],
         selected_index: 0,
@@ -1296,6 +1303,7 @@ fn autocomplete_docs_stay_hidden_until_tab_focus() -> Result<(), String> {
         detail: Some("detail".to_owned()),
         kind_label: None,
         documentation: Some("x".repeat(80)),
+        additional_text_edits: Vec::new(),
         resolve: None,
     };
     let overlay = |docs_focused: bool| AutocompleteOverlay {
@@ -1404,6 +1412,7 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -1742,6 +1751,7 @@ fn render_shell_state_draws_input_prompt_overlay_text() -> Result<(), String> {
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,

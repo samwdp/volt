@@ -134,6 +134,7 @@ impl MarkdownPrettyPlanCache {
                 plan: Arc::new(MarkdownPrettyPlan {
                     lines: BTreeMap::new(),
                     skipped_by_kill_switch: true,
+                    enabled: false,
                 }),
                 source: None,
             }

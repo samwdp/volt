@@ -4,7 +4,10 @@ use crate::{Diagnostic, DiagnosticSeverity, LanguageServerRegistry};
 use editor_buffer::{TextPoint, TextRange};
 use lsp_types::{
     NumberOrString, TextDocumentSyncKind, WorkDoneProgressParams,
-    request::{CodeActionRequest, HoverRequest, Initialize, Request, SignatureHelpRequest},
+    request::{
+        CodeActionRequest, DocumentDiagnosticRequest, GotoImplementation, HoverRequest, Initialize,
+        References, Request, SignatureHelpRequest,
+    },
 };
 use serde_json::{Value, json};
 use std::{
@@ -13,7 +16,7 @@ use std::{
     process::{Child, ChildStdin},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -176,6 +179,37 @@ fn completion_parser_reads_insert_replace_edit_replace_range() {
     assert_eq!(
         items[0].edit_range(),
         Some(TextRange::new(TextPoint::new(0, 3), TextPoint::new(0, 4)))
+    );
+}
+
+#[test]
+fn completion_parser_reads_additional_text_edits() {
+    let response = json!([
+        {
+            "label": "AstraCommands",
+            "kind": 7,
+            "insertText": "AstraCommands",
+            "additionalTextEdits": [
+                {
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 0 }
+                    },
+                    "newText": "using AssetFusion.Shared.Core.Services.DeviceCommands.Encoding;\n"
+                }
+            ]
+        }
+    ]);
+    let items = parse_completion_response("roslyn", &response);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].additional_text_edits().len(), 1);
+    assert_eq!(
+        items[0].additional_text_edits()[0].range(),
+        TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 0))
+    );
+    assert_eq!(
+        items[0].additional_text_edits()[0].new_text(),
+        "using AssetFusion.Shared.Core.Services.DeviceCommands.Encoding;\n"
     );
 }
 
@@ -579,11 +613,7 @@ fn csharp_and_copilot_servers_receive_initialization_options() {
     assert_eq!(
         initialization_options_for_server(ROSLYN_LANGUAGE_SERVER_ID, None),
         Some(json!({
-            "experimental": {
-                "csharp": {
-                    "metadataUris": true,
-                }
-            }
+            "autoLoadProjects": 500,
         }))
     );
     assert_eq!(
@@ -800,6 +830,8 @@ fn code_action_parser_collects_active_file_edits() {
     assert_eq!(actions[0].title(), "Fix unused import");
     assert_eq!(actions[0].kind(), Some("quickfix"));
     assert!(actions[0].is_preferred());
+    assert!(!actions[0].needs_resolve());
+    assert!(actions[0].raw_item().is_object());
     assert_eq!(actions[0].document_edits().len(), 1);
     assert!(
         actions[0].document_edits()[0]
@@ -810,6 +842,75 @@ fn code_action_parser_collects_active_file_edits() {
     assert_eq!(
         actions[0].document_edits()[0].edits()[0].range().start(),
         TextPoint::new(3, 0)
+    );
+}
+
+#[test]
+fn deferred_roslyn_code_action_keeps_resolve_payload() {
+    let response = json!([
+        {
+            "title": "using System;",
+            "kind": "quickfix",
+            "isPreferred": true,
+            "data": {
+                "CustomTags": ["CodeActionId=0"],
+                "TextDocument": {
+                    "uri": "file:///P:/proj/Program.cs"
+                }
+            }
+        }
+    ]);
+
+    let actions =
+        parse_code_action_response("roslyn-language-server", &response).expect("code actions");
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].document_edits().is_empty());
+    assert!(actions[0].needs_resolve());
+    assert_eq!(
+        actions[0].raw_item().get("data").and_then(|data| data.get("CustomTags")),
+        Some(&json!(["CodeActionId=0"]))
+    );
+
+    let resolved = parse_code_action_item(
+        "roslyn-language-server",
+        &json!({
+            "title": "using System;",
+            "kind": "quickfix",
+            "isPreferred": true,
+            "data": {
+                "CustomTags": ["CodeActionId=0"],
+                "TextDocument": {
+                    "uri": "file:///P:/proj/Program.cs"
+                }
+            },
+            "edit": {
+                "documentChanges": [
+                    {
+                        "textDocument": {
+                            "uri": "file:///P:/proj/Program.cs",
+                            "version": 1
+                        },
+                        "edits": [
+                            {
+                                "range": {
+                                    "start": { "line": 0, "character": 0 },
+                                    "end": { "line": 0, "character": 0 }
+                                },
+                                "newText": "using System;\n"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }),
+    )
+    .expect("resolved code action");
+    assert!(!resolved.needs_resolve());
+    assert_eq!(resolved.document_edits().len(), 1);
+    assert_eq!(resolved.document_edits()[0].edits().len(), 1);
+    assert_eq!(
+        resolved.document_edits()[0].edits()[0].new_text(),
+        "using System;\n"
     );
 }
 
@@ -1361,8 +1462,211 @@ fn initialize_request_timeout_is_extended() {
         REQUEST_TIMEOUT
     );
     assert_eq!(
+        request_timeout_for_method(References::METHOD),
+        REFERENCES_REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        request_timeout_for_method(GotoImplementation::METHOD),
+        IMPLEMENTATION_REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        request_timeout_for_method(DocumentDiagnosticRequest::METHOD),
+        DOCUMENT_DIAGNOSTIC_REQUEST_TIMEOUT
+    );
+    assert_eq!(
         request_timeout_for_method("completionItem/resolve"),
         COMPLETION_RESOLVE_REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        request_timeout_for_method("codeAction/resolve"),
+        CODE_ACTION_RESOLVE_REQUEST_TIMEOUT
+    );
+}
+
+#[test]
+fn client_capabilities_advertise_pull_diagnostics() {
+    let capabilities = client_capabilities().expect("capabilities");
+    let diagnostic = capabilities
+        .text_document
+        .as_ref()
+        .and_then(|text| text.diagnostic.as_ref())
+        .expect("textDocument.diagnostic");
+    assert_eq!(diagnostic.dynamic_registration, Some(true));
+}
+
+#[test]
+fn client_capabilities_advertise_code_action_resolve() {
+    let capabilities = client_capabilities().expect("capabilities");
+    let code_action = capabilities
+        .text_document
+        .as_ref()
+        .and_then(|text| text.code_action.as_ref())
+        .expect("textDocument.codeAction");
+    assert_eq!(code_action.data_support, Some(true));
+    assert_eq!(
+        code_action
+            .resolve_support
+            .as_ref()
+            .map(|support| support.properties.clone()),
+        Some(vec!["edit".to_owned()])
+    );
+}
+
+#[test]
+fn client_capabilities_disable_watched_files_dynamic_registration() {
+    let capabilities = client_capabilities().expect("capabilities");
+    let watched = capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+        .expect("workspace.didChangeWatchedFiles");
+    // Must stay false until Volt implements registerCapability watchers; otherwise
+    // Roslyn skips its own watcher and misses files created after session start.
+    assert_eq!(watched.dynamic_registration, Some(false));
+    assert_eq!(watched.relative_pattern_support, Some(true));
+}
+
+#[test]
+fn workspace_folders_response_returns_session_root() {
+    let root = PathBuf::from("P:\\projects\\demo");
+    let response = workspace_folders_response(Some(root.as_path()));
+    let folders = response.as_array().expect("folders array");
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].get("name").and_then(Value::as_str), Some("demo"));
+    assert!(
+        folders[0]
+            .get("uri")
+            .and_then(Value::as_str)
+            .is_some_and(|uri| uri.contains("demo"))
+    );
+    assert!(workspace_folders_response(None).is_null());
+}
+
+#[test]
+fn did_open_emits_watched_files_created_before_did_open() {
+    let path = PathBuf::from("src").join("new_type.rs");
+    let (manager, session) = manager_with_incremental_session(&path);
+    manager
+        .sync_buffer(&path, "struct NewType;", 1, None)
+        .expect("sync");
+
+    let log = session.transport_log.lock().expect("transport log");
+    let outgoing = log
+        .snapshot()
+        .entries()
+        .iter()
+        .filter(|entry| entry.direction() == LspLogDirection::Outgoing)
+        .filter_map(|entry| serde_json::from_str::<Value>(entry.body()).ok())
+        .filter_map(|message| {
+            let method = message.get("method").and_then(Value::as_str)?.to_owned();
+            Some((method, message))
+        })
+        .collect::<Vec<_>>();
+    let watched_idx = outgoing
+        .iter()
+        .position(|(method, _)| method == "workspace/didChangeWatchedFiles")
+        .expect("watched files notification");
+    let open_idx = outgoing
+        .iter()
+        .position(|(method, _)| method == "textDocument/didOpen")
+        .expect("didOpen notification");
+    assert!(
+        watched_idx < open_idx,
+        "Created must precede didOpen so Roslyn can add the file to the project"
+    );
+    let changes = outgoing[watched_idx]
+        .1
+        .get("params")
+        .and_then(|params| params.get("changes"))
+        .and_then(Value::as_array)
+        .expect("changes");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].get("type").and_then(Value::as_i64), Some(1));
+}
+
+#[test]
+fn save_buffer_emits_watched_files_changed() {
+    let path = PathBuf::from("src").join("main.rs");
+    let (manager, session) = manager_with_incremental_session(&path);
+    manager
+        .sync_buffer(&path, "fn main() {}", 1, None)
+        .expect("sync");
+    manager.save_buffer(&path).expect("save");
+
+    let params = last_notification_params(&session, "workspace/didChangeWatchedFiles")
+        .expect("watched files after save");
+    let changes = params
+        .get("changes")
+        .and_then(Value::as_array)
+        .expect("changes");
+    assert_eq!(
+        changes
+            .last()
+            .and_then(|change| change.get("type"))
+            .and_then(Value::as_i64),
+        Some(2)
+    );
+}
+
+#[test]
+fn diagnostic_capability_registration_stores_identifiers() {
+    let registrations = Arc::new(Mutex::new(BTreeMap::new()));
+    let refresh = Arc::new(AtomicBool::new(false));
+    let params = json!({
+        "registrations": [
+            {
+                "id": "syntax",
+                "method": "textDocument/diagnostic",
+                "registerOptions": { "identifier": "syntax" }
+            },
+            {
+                "id": "semantic",
+                "method": "textDocument/diagnostic",
+                "registerOptions": { "identifier": "DocumentCompilerSemantic" }
+            },
+            {
+                "id": "watch",
+                "method": "workspace/didChangeWatchedFiles",
+                "registerOptions": {}
+            }
+        ]
+    });
+    apply_diagnostic_capability_registration(
+        Some("client/registerCapability"),
+        Some(&params),
+        &registrations,
+        &refresh,
+    );
+    let stored = registrations.lock().expect("lock");
+    assert_eq!(stored.len(), 2);
+    assert_eq!(
+        stored.get("semantic").and_then(|value| value.as_deref()),
+        Some("DocumentCompilerSemantic")
+    );
+    assert!(refresh.load(Ordering::Acquire));
+}
+
+#[test]
+fn document_diagnostic_parser_reads_full_items_and_skips_unchanged() {
+    let full = json!({
+        "kind": "full",
+        "items": [
+            {
+                "range": {
+                    "start": { "line": 14, "character": 26 },
+                    "end": { "line": 14, "character": 38 }
+                },
+                "severity": 2,
+                "source": "roslyn",
+                "message": "Non-nullable property 'LocationInfo' must contain a non-null value when exiting constructor."
+            }
+        ]
+    });
+    let items = parse_document_diagnostic_items(&full).expect("full report");
+    assert_eq!(items.len(), 1);
+    assert!(items[0].message().contains("LocationInfo"));
+    assert!(
+        parse_document_diagnostic_items(&json!({ "kind": "unchanged", "resultId": "1" })).is_none()
     );
 }
 
@@ -1493,7 +1797,9 @@ fn test_session_handle_in_workspace(
         writer: Arc::new(Mutex::new(writer)),
         pending: Arc::new(Mutex::new(BTreeMap::new())),
         diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),
-        open_documents: Mutex::new(BTreeMap::new()),
+        open_documents: Arc::new(Mutex::new(BTreeMap::new())),
+        diagnostic_registrations: Arc::new(Mutex::new(BTreeMap::new())),
+        diagnostic_refresh_requested: Arc::new(AtomicBool::new(false)),
         text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
         workspace_configuration,
         initialization_options: None,

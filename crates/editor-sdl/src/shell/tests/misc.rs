@@ -363,6 +363,7 @@ fn render_primary_text_surface_preserves_straight_alpha_edge_colors() -> Result<
             font_size: 24,
             emoji_font_size: 24,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -2619,6 +2620,7 @@ fn render_shell_state_uses_theme_background_for_active_pane() -> Result<(), Stri
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -2692,6 +2694,7 @@ fn render_shell_state_applies_window_opacity_only_to_backgrounds() -> Result<(),
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -3134,6 +3137,7 @@ fn compose_emoji_surface_rasterizes_simple_emoji() -> Result<(), String> {
             font_size: 18,
             emoji_font_size: 18,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -3522,6 +3526,7 @@ fn accept_autocomplete_avoids_double_dot_when_lsp_insert_includes_trigger() -> R
             detail: None,
             kind_label: None,
             documentation: None,
+            additional_text_edits: Vec::new(),
             resolve: None,
         }],
         selected_index: 0,
@@ -3567,6 +3572,7 @@ fn accept_autocomplete_uses_lsp_text_edit_range_covering_trigger() -> Result<(),
             detail: None,
             kind_label: None,
             documentation: None,
+            additional_text_edits: Vec::new(),
             resolve: None,
         }],
         selected_index: 0,
@@ -3580,6 +3586,57 @@ fn accept_autocomplete_uses_lsp_text_edit_range_covering_trigger() -> Result<(),
         active_shell_buffer_mut(&mut state.runtime)?.text.text(),
         "foo.bar()"
     );
+    Ok(())
+}
+
+#[test]
+fn accept_autocomplete_applies_additional_text_edits_and_keeps_cursor() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+        buffer.text = TextBuffer::from_text("namespace Demo;\n\nclass C {\n    AstraC\n}\n");
+        buffer.set_cursor(TextPoint::new(3, 10));
+    }
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+
+    let overlay = AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: "AstraC".to_owned(),
+            token: "AstraC".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(3, 4), TextPoint::new(3, 10)),
+        },
+        entries: vec![AutocompleteEntry {
+            provider_id: "lsp".to_owned(),
+            provider_label: "LSP".to_owned(),
+            provider_icon: "L".to_owned(),
+            item_icon: "C".to_owned(),
+            label: "AstraCommands".to_owned(),
+            replacement: "AstraCommands".to_owned(),
+            replace_range: Some(TextRange::new(TextPoint::new(3, 4), TextPoint::new(3, 10))),
+            detail: Some("AssetFusion.Shared.Core.Services.DeviceCommands.Encoding".to_owned()),
+            kind_label: Some("Class".to_owned()),
+            documentation: None,
+            additional_text_edits: vec![LspTextEdit::new(
+                TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 0)),
+                "using AssetFusion.Shared.Core.Services.DeviceCommands.Encoding;\n",
+            )],
+            resolve: None,
+        }],
+        selected_index: 0,
+        loading: false,
+        docs_focused: false,
+        docs_scroll_offset: 0,
+    };
+    shell_ui_mut(&mut state.runtime)?.set_autocomplete(overlay);
+    accept_autocomplete(&mut state.runtime)?;
+    let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+    assert_eq!(
+        buffer.text.text(),
+        "using AssetFusion.Shared.Core.Services.DeviceCommands.Encoding;\nnamespace Demo;\n\nclass C {\n    AstraCommands\n}\n"
+    );
+    assert_eq!(buffer.cursor_point(), TextPoint::new(4, 17));
     Ok(())
 }
 
@@ -3608,6 +3665,7 @@ fn apply_resolved_documentation_keeps_only_selected_docs() -> Result<(), String>
             detail: None,
             kind_label: None,
             documentation: Some("stale docs".to_owned()),
+            additional_text_edits: Vec::new(),
             resolve: None,
         },
         AutocompleteEntry {
@@ -3621,6 +3679,7 @@ fn apply_resolved_documentation_keeps_only_selected_docs() -> Result<(), String>
             detail: None,
             kind_label: None,
             documentation: Some("other stale docs".to_owned()),
+            additional_text_edits: Vec::new(),
             resolve: None,
         },
     ]);
@@ -3662,6 +3721,7 @@ fn set_entries_keeps_docs_focus_only_for_same_selected_item() -> Result<(), Stri
         detail: None,
         kind_label: None,
         documentation: None,
+        additional_text_edits: Vec::new(),
         resolve: None,
     };
     overlay.set_entries(vec![use_state.clone()]);
@@ -4854,6 +4914,7 @@ fn workspace_dock_render_marks_active_row() -> Result<(), String> {
             font_size: 16,
             emoji_font_size: 16,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &*shell_user_library(&state.runtime),

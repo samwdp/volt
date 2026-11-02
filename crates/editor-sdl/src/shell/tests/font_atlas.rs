@@ -267,6 +267,16 @@ fn scaled_font_size_uses_window_display_scale() {
 }
 
 #[test]
+fn effective_line_height_applies_theme_multiplier() {
+    assert_eq!(effective_line_height(30, 1.0), 30);
+    assert_eq!(effective_line_height(30, 0.85), 26);
+    assert_eq!(effective_line_height(24, 1.25), 30);
+    assert_eq!(effective_line_height(30, 0.0), 30);
+    assert_eq!(effective_line_height(30, 4.0), 30);
+    assert_eq!(effective_line_height(0, 1.0), 1);
+}
+
+#[test]
 fn load_font_set_normalizes_icon_raster_sizes_to_primary_line_height() -> Result<(), String> {
     let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
     let _video = sdl_context.video().map_err(|error| error.to_string())?;
@@ -279,6 +289,7 @@ fn load_font_set_normalizes_icon_raster_sizes_to_primary_line_height() -> Result
             font_size: 18,
             emoji_font_size: 18,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,
@@ -337,6 +348,7 @@ fn emoji_raster_font_rasterizes_simple_emoji() -> Result<(), String> {
             font_size: 18,
             emoji_font_size: 18,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,

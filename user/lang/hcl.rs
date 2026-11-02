@@ -3,7 +3,7 @@ use editor_plugin_api::PluginPackage;
 
 use super::common;
 
-const EXTENSIONS: &[&str] = &["hcl", "tf", "nomad"];
+const EXTENSIONS: &[&str] = &["hcl", "nomad"];
 
 pub fn package() -> PluginPackage {
     common::package("hcl", "HCL", EXTENSIONS, &[])

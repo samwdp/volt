@@ -111,6 +111,7 @@ fn comment_style_for_language_path(
                 "elixir",
                 "graphql",
                 "hcl",
+                "terraform",
             ],
         )
     }) || extension.as_deref().is_some_and(|ext| {
@@ -138,6 +139,8 @@ fn comment_style_for_language_path(
                 | "graphqls"
                 | "hcl"
                 | "tf"
+                | "tfvars"
+                | "tofu"
                 | "nomad"
         )
     }) || file_name.as_deref().is_some_and(|name| {

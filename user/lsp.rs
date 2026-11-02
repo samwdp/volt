@@ -282,7 +282,7 @@ pub fn package() -> PluginPackage {
         ),
         hook_command(
             "lsp.start-terraform-ls",
-            "Starts terraform-ls for the active HCL or Terraform file.",
+            "Starts terraform-ls for the active Terraform file.",
             HOOK_LSP_START,
             Some(SERVER_TERRAFORM_LS),
         ),
@@ -747,21 +747,21 @@ pub fn package() -> PluginPackage {
         ),
         PluginHookBinding::new(
             "buffer.file-open",
-            "lsp.auto-start-hcl",
-            "lsp.start",
-            Some(".hcl"),
-        ),
-        PluginHookBinding::new(
-            "buffer.file-open",
             "lsp.auto-start-tf",
             "lsp.start",
             Some(".tf"),
         ),
         PluginHookBinding::new(
             "buffer.file-open",
-            "lsp.auto-start-nomad",
+            "lsp.auto-start-tfvars",
             "lsp.start",
-            Some(".nomad"),
+            Some(".tfvars"),
+        ),
+        PluginHookBinding::new(
+            "buffer.file-open",
+            "lsp.auto-start-tofu",
+            "lsp.start",
+            Some(".tofu"),
         ),
         PluginHookBinding::new(
             "buffer.file-open",
@@ -1155,6 +1155,16 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
             ["server"],
         ),
         LanguageServerSpec::new(
+            SERVER_ROSLYN_LANGUAGE_SERVER,
+            "csharp",
+            ["cs", "razor", "cshtml"],
+            SERVER_ROSLYN_LANGUAGE_SERVER,
+            ["--stdio", "--autoLoadProjects"],
+        )
+        .with_document_language_ids([("razor", "razor"), ("cshtml", "razor")])
+        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
+        .with_root_markers(["*.sln", "*.slnx", "*.csproj"]),
+        LanguageServerSpec::new(
             SERVER_CSHARP_LS,
             "csharp",
             ["cs", "razor", "cshtml"],
@@ -1164,6 +1174,7 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
         .with_document_language_ids([("razor", "razor"), ("cshtml", "razor")])
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
         .with_root_markers(["*.sln", "*.csproj"])
+        .with_enabled_by_default(false)
         .with_workspace_configuration(
             "csharp",
             LanguageServerSpec::workspace_settings_object([
@@ -1189,17 +1200,6 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
                 ),
             ]),
         ),
-        LanguageServerSpec::new(
-            SERVER_ROSLYN_LANGUAGE_SERVER,
-            "csharp",
-            ["cs", "razor", "cshtml"],
-            SERVER_ROSLYN_LANGUAGE_SERVER,
-            ["--stdio", "--autoLoadProjects"],
-        )
-        .with_document_language_ids([("razor", "razor"), ("cshtml", "razor")])
-        .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
-        .with_root_markers(["*.sln", "*.slnx", "*.csproj"])
-        .with_enabled_by_default(false),
         LanguageServerSpec::new(
             SERVER_TYPESCRIPT_LANGUAGE_SERVER,
             "typescript",
@@ -1408,13 +1408,14 @@ pub fn language_servers() -> Vec<LanguageServerSpec> {
         ]),
         LanguageServerSpec::new(
             SERVER_TERRAFORM_LS,
-            "hcl",
-            ["hcl", "tf", "nomad"],
+            "terraform",
+            ["tf", "tfvars", "tofu"],
             "terraform-ls",
             ["serve"],
         )
+        .with_document_language_ids([("tfvars", "terraform-vars")])
         .with_root_strategy(LanguageServerRootStrategy::MarkersOrWorkspace)
-        .with_root_markers(["*.tf", "terragrunt.hcl", ".terraform.lock.hcl"]),
+        .with_root_markers(["*.tf", "*.tfvars", ".terraform.lock.hcl"]),
         LanguageServerSpec::new(
             SERVER_JDTLS,
             "java",
@@ -1944,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    fn roslyn_language_server_is_manual_alternative_for_csharp_and_razor() {
+    fn roslyn_language_server_is_default_csharp_server() {
         let server = language_servers()
             .into_iter()
             .find(|server| server.id() == SERVER_ROSLYN_LANGUAGE_SERVER)
@@ -1967,8 +1968,18 @@ mod tests {
                 .any(|marker| marker == "*.slnx"),
             "roslyn-language-server should recognize solution filters"
         );
-        assert!(!server.enabled_by_default());
+        assert!(server.enabled_by_default());
         assert!(has_command(&package(), "lsp.start-roslyn-language-server"));
+    }
+
+    #[test]
+    fn csharp_ls_is_manual_alternative_for_csharp_and_razor() {
+        let server = language_servers()
+            .into_iter()
+            .find(|server| server.id() == SERVER_CSHARP_LS)
+            .expect("csharp-ls should be registered");
+        assert!(!server.enabled_by_default());
+        assert!(has_command(&package(), "lsp.start-csharp-ls"));
     }
 
     #[test]

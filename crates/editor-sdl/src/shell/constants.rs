@@ -347,6 +347,7 @@ const HOOK_INPUT_CLEAR: &str = input_hooks::CLEAR;
 const OPTION_LINE_NUMBER_RELATIVE: &str = "ui.line-number.relative";
 const OPTION_FONT: &str = "font";
 const OPTION_FONT_SIZE: &str = "font_size";
+const OPTION_LINE_HEIGHT: &str = "line_height";
 const OPTION_CURSOR_ROUNDNESS: &str = "cursor_roundness";
 const OPTION_CORNER_RADIUS: &str = "corner_radius";
 const OPTION_SCROLL_OFF: &str = "scrolloff";

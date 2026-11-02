@@ -5,6 +5,8 @@ struct ThemeRuntimeSettings {
     font_size: u32,
     emoji_font_size: u32,
     display_scale: f32,
+    /// Multiplier applied to the primary font's native line height for layout.
+    line_height_multiplier: f32,
     window_effects: WindowEffects,
 }
 
@@ -93,6 +95,28 @@ fn normalize_display_scale(display_scale: f32) -> f32 {
 /// window display scale so text stays physically readable on HiDPI displays.
 fn scaled_font_size(font_size: u32, display_scale: f32) -> f32 {
     font_size.max(1) as f32 * normalize_display_scale(display_scale)
+}
+
+/// Clamps and rounds a theme `line_height` multiplier for stable comparisons.
+///
+/// Values outside `0.5..=3.0`, non-finite input, and non-positive input fall
+/// back to `1.0` (native font line height).
+fn normalize_line_height_multiplier(multiplier: f32) -> f32 {
+    if multiplier.is_finite() && (0.5..=3.0).contains(&multiplier) {
+        (multiplier * 1000.0).round() / 1000.0
+    } else {
+        1.0
+    }
+}
+
+/// Scales the font's native line height by the theme multiplier for layout.
+///
+/// Glyph raster size stays unchanged; only row pitch / chrome height change.
+fn effective_line_height(native_line_height: i32, multiplier: f32) -> i32 {
+    let native_line_height = native_line_height.max(1) as f32;
+    (native_line_height * normalize_line_height_multiplier(multiplier))
+        .round()
+        .max(1.0) as i32
 }
 
 fn normalized_raster_pixel_size(

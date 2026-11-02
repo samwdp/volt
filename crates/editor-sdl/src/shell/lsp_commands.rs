@@ -618,6 +618,12 @@ fn navigate_to_lsp_locations(
             buffer.set_lsp_enabled(true);
         }
     }
+    let picker = lsp_code_actions_status_picker_overlay(
+        &format!("Loading {title}"),
+        "Waiting for language server response.",
+        Some(context.path.display().to_string()),
+    );
+    shell_ui_mut(runtime)?.set_picker(picker);
     let ui = shell_ui_mut(runtime)?;
     ui.lsp_ui_worker.schedule(LspUiWorkerRequest {
         buffer_id: context.buffer_id,
@@ -642,9 +648,16 @@ fn open_lsp_locations(
     locations: Vec<LspLocation>,
 ) -> Result<(), String> {
     let Some(location) = locations.first() else {
-        return Err(format!("no {} found at cursor", title.to_ascii_lowercase()));
+        let picker = lsp_diagnostics_status_picker_overlay(
+            &format!("No {title}"),
+            &format!("No {} found at cursor.", title.to_ascii_lowercase()),
+            None,
+        );
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
     };
     if locations.len() == 1 {
+        shell_ui_mut(runtime)?.close_picker();
         open_lsp_location(runtime, location)?;
         sync_active_buffer(runtime)?;
         return Ok(());

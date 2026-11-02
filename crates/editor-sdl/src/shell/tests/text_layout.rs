@@ -183,6 +183,7 @@ fn compose_ligature_surface_uses_grayscale_glyph_coverage() -> Result<(), String
             font_size: 18,
             emoji_font_size: 18,
             display_scale: 1.0,
+            line_height_multiplier: 1.0,
             window_effects: crate::window_effects::WindowEffects::default(),
         },
         &NullUserLibrary,

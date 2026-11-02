@@ -141,7 +141,7 @@ use editor_lsp::{
     LanguageServerRegistry, LspClientManager, LspCodeAction, LspCompletionResolvePayload,
     LspFormattingOptions, LspInlineCompletionItem, LspLiveSession, LspLocation, LspLogEntry,
     LspLogSnapshot, LspNotificationAction, LspNotificationLevel, LspNotificationSnapshot,
-    LspTextEdit, LspWorkspaceDiagnostic,
+    LspTextEdit, LspWatchedFileChange, LspWorkspaceDiagnostic,
 };
 use editor_picker::{
     PickerExportableRow, PickerExtraDispatch, PickerExtraKeybind, PickerItem, PickerOneShotContext,

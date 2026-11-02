@@ -203,7 +203,16 @@ fn apply_lsp_ui_worker_results(runtime: &mut EditorRuntime) -> Result<bool, Stri
     let mut changed = false;
     for result in results {
         if let Some(error) = result.error {
-            record_runtime_error(runtime, "lsp.ui-worker", error);
+            record_runtime_error(runtime, "lsp.ui-worker", error.clone());
+            if result.locations.is_none() {
+                let picker = lsp_diagnostics_status_picker_overlay(
+                    "LSP request failed",
+                    &error,
+                    None,
+                );
+                shell_ui_mut(runtime)?.set_picker(picker);
+                changed = true;
+            }
         }
         if let Some((payload, focused)) = result.hover {
             changed |= apply_lsp_ui_hover_result(runtime, result.buffer_id, result.cursor, payload, focused)?;
@@ -361,14 +370,33 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
                     (
                         entry.replacement.clone(),
                         entry.replace_range,
+                        entry.additional_text_edits.clone(),
+                        entry.resolve.clone(),
                         autocomplete.query.clone(),
                     )
                 })
             })
     };
-    let Some((replacement, selected_range, query)) = selected else {
+    let Some((mut replacement, mut selected_range, mut additional_text_edits, resolve, query)) =
+        selected
+    else {
         return Ok(());
     };
+
+    if let Some(payload) = resolve.as_ref()
+        && let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned()
+        && let Ok(resolved) = lsp_client.resolve_completion_for_accept(payload)
+    {
+        if !resolved.insert_text().is_empty() {
+            replacement = resolved.insert_text().to_owned();
+        }
+        if let Some(range) = resolved.edit_range() {
+            selected_range = Some(range);
+        }
+        if !resolved.additional_text_edits().is_empty() {
+            additional_text_edits = resolved.additional_text_edits().to_vec();
+        }
+    }
 
     let buffer_id = active_shell_buffer_id(runtime)?;
     let ui = shell_ui_mut(runtime)?;
@@ -386,7 +414,44 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
             .unwrap_or(query.replace_range)
     });
     let replacement = normalize_completion_replacement(&snapshot, replace_range, &replacement);
-    buffer.replace_range(replace_range, &replacement);
-    buffer.mark_syntax_dirty();
+    apply_completion_edits(buffer, replace_range, &replacement, &additional_text_edits);
     Ok(())
+}
+
+fn apply_completion_edits(
+    buffer: &mut ShellBuffer,
+    replace_range: TextRange,
+    replacement: &str,
+    additional_text_edits: &[LspTextEdit],
+) {
+    buffer.replace_range(replace_range, replacement);
+    if additional_text_edits.is_empty() {
+        buffer.mark_syntax_dirty();
+        return;
+    }
+
+    // Keep the caret at the end of the primary insert while imports/usings
+    // (usually earlier in the file) are applied afterward.
+    let mut cursor_char = buffer.text.point_to_char_index(buffer.text.cursor());
+    let mut ordered = additional_text_edits.to_vec();
+    ordered.sort_by(|left, right| {
+        right
+            .range()
+            .start()
+            .cmp(&left.range().start())
+            .then_with(|| right.range().end().cmp(&left.range().end()))
+    });
+    for edit in ordered {
+        let start_char = buffer.text.point_to_char_index(edit.range().start());
+        let end_char = buffer.text.point_to_char_index(edit.range().end());
+        let new_len = edit.new_text().chars().count();
+        buffer.replace_range(edit.range(), edit.new_text());
+        if end_char <= cursor_char {
+            cursor_char = cursor_char - (end_char - start_char) + new_len;
+        } else if start_char < cursor_char {
+            cursor_char = start_char + new_len;
+        }
+    }
+    buffer.set_cursor(buffer.text.point_from_char_index(cursor_char));
+    buffer.mark_syntax_dirty();
 }

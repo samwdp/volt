@@ -152,6 +152,9 @@ pub struct PrettyLinePlan {
 pub struct MarkdownPrettyPlan {
     pub lines: BTreeMap<usize, PrettyLinePlan>,
     pub skipped_by_kill_switch: bool,
+    /// True when Pretty is active for this source (enable on, kill-switch not tripped).
+    /// Display may still decode entities/escapes on undecorated lines.
+    pub enabled: bool,
 }
 
 /// Context for resolving relative image paths and anti-conceal.
@@ -227,6 +230,7 @@ pub fn plan_markdown_pretty(
         return MarkdownPrettyPlan {
             lines: BTreeMap::new(),
             skipped_by_kill_switch: true,
+            enabled: false,
         };
     }
     let line_count = stats.line_count;
@@ -239,11 +243,16 @@ pub fn plan_markdown_pretty(
     if let Some(registry) = registry {
         let buffer = TextBuffer::from_text(request.text);
         if let Ok(nodes) = registry.structure_nodes_for_language("markdown", &buffer) {
-            return plan_from_structure_nodes(request, &nodes, window);
+            return with_pretty_enabled(plan_from_structure_nodes(request, &nodes, window));
         }
     }
 
-    plan_from_line_scanner(request, window)
+    with_pretty_enabled(plan_from_line_scanner(request, window))
+}
+
+fn with_pretty_enabled(mut plan: MarkdownPrettyPlan) -> MarkdownPrettyPlan {
+    plan.enabled = true;
+    plan
 }
 
 fn ephemeral_pretty_plan_cache() -> &'static Mutex<MarkdownPrettyPlanCache> {
@@ -835,6 +844,156 @@ pub fn conceal_line_text(line: &str, conceal: &[ConcealRange]) -> String {
     out
 }
 
+/// Decode HTML entities and CommonMark backslash escapes for Pretty display.
+///
+/// Source text stays canonical; only the painted string is rewritten so LSP
+/// hover / ACP markdown (e.g. `&nbsp;`, `\<T\>`) read as intended prose.
+pub fn decode_markdown_display_text(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 1 < chars.len() && is_markdown_escapable(chars[i + 1]) {
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if chars[i] == '&'
+            && let Some((replacement, consumed)) = decode_html_entity(&chars[i..])
+        {
+            out.push_str(&replacement);
+            i += consumed;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn is_markdown_escapable(ch: char) -> bool {
+    matches!(
+        ch,
+        '!' | '"'
+            | '#'
+            | '$'
+            | '%'
+            | '&'
+            | '\''
+            | '('
+            | ')'
+            | '*'
+            | '+'
+            | ','
+            | '-'
+            | '.'
+            | '/'
+            | ':'
+            | ';'
+            | '<'
+            | '='
+            | '>'
+            | '?'
+            | '@'
+            | '['
+            | '\\'
+            | ']'
+            | '^'
+            | '_'
+            | '`'
+            | '{'
+            | '|'
+            | '}'
+            | '~'
+    )
+}
+
+fn decode_html_entity(chars: &[char]) -> Option<(String, usize)> {
+    if chars.first() != Some(&'&') || chars.len() < 3 {
+        return None;
+    }
+    if chars.get(1) == Some(&'#') {
+        return decode_numeric_entity(chars);
+    }
+    let mut end = None;
+    for (offset, ch) in chars.iter().enumerate().skip(1) {
+        if *ch == ';' {
+            end = Some(offset);
+            break;
+        }
+        if !ch.is_ascii_alphanumeric() {
+            return None;
+        }
+        // Named entities are short; bail on runaway `&...`.
+        if offset > 32 {
+            return None;
+        }
+    }
+    let end = end?;
+    let name: String = chars[1..end].iter().collect();
+    let replacement = named_html_entity(&name)?;
+    Some((replacement.to_owned(), end + 1))
+}
+
+fn decode_numeric_entity(chars: &[char]) -> Option<(String, usize)> {
+    let hex = chars.get(2) == Some(&'x') || chars.get(2) == Some(&'X');
+    let digits_start = if hex { 3 } else { 2 };
+    if digits_start >= chars.len() {
+        return None;
+    }
+    let mut end = None;
+    for (offset, ch) in chars.iter().enumerate().skip(digits_start) {
+        if *ch == ';' {
+            end = Some(offset);
+            break;
+        }
+        let ok = if hex {
+            ch.is_ascii_hexdigit()
+        } else {
+            ch.is_ascii_digit()
+        };
+        if !ok || offset > digits_start + 8 {
+            return None;
+        }
+    }
+    let end = end?;
+    if end == digits_start {
+        return None;
+    }
+    let digits: String = chars[digits_start..end].iter().collect();
+    let code = if hex {
+        u32::from_str_radix(&digits, 16).ok()?
+    } else {
+        digits.parse::<u32>().ok()?
+    };
+    let ch = char::from_u32(code)?;
+    Some((ch.to_string(), end + 1))
+}
+
+fn named_html_entity(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "nbsp" => "\u{00A0}",
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        "ndash" => "\u{2013}",
+        "mdash" => "\u{2014}",
+        "hellip" => "\u{2026}",
+        "bull" => "\u{2022}",
+        "middot" => "\u{00B7}",
+        "copy" => "\u{00A9}",
+        "reg" => "\u{00AE}",
+        "trade" => "\u{2122}",
+        "times" => "\u{00D7}",
+        "divide" => "\u{00F7}",
+        "plusmn" => "\u{00B1}",
+        "deg" => "\u{00B0}",
+        _ => return None,
+    })
+}
+
 /// Display text for a Pretty line. Anti-conceal is a paint-time overlay: skip conceal/icons.
 pub fn pretty_display_line(
     plan: &MarkdownPrettyPlan,
@@ -842,11 +1001,11 @@ pub fn pretty_display_line(
     line_index: usize,
     source_line: &str,
 ) -> String {
-    if anti_conceal {
+    if anti_conceal || !plan.enabled {
         return source_line.to_owned();
     }
     let Some(line_plan) = plan.line(line_index) else {
-        return source_line.to_owned();
+        return decode_markdown_display_text(source_line);
     };
     if line_plan.horizontal_rule {
         let glyph = line_plan
@@ -857,11 +1016,12 @@ pub fn pretty_display_line(
         return glyph.repeat(24);
     }
     let concealed = conceal_line_text(source_line, &line_plan.conceal);
+    let decoded = decode_markdown_display_text(&concealed);
     let prefix = line_icon_prefix(line_plan);
     if prefix.is_empty() {
-        concealed
+        decoded
     } else {
-        format!("{prefix}{concealed}")
+        format!("{prefix}{decoded}")
     }
 }
 

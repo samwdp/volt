@@ -152,6 +152,17 @@ fn refresh_pending_file_reloads(
     let changed_paths = shell_ui(runtime)?.file_reload_worker.take_changed_paths();
     if !changed_paths.is_empty() {
         let changed_paths = changed_paths.into_iter().collect::<HashSet<_>>();
+        if let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() {
+            let lsp_changes = changed_paths
+                .iter()
+                .map(|path| (path.clone(), LspWatchedFileChange::Changed))
+                .collect::<Vec<_>>();
+            if let Err(error) = lsp_client.notify_watched_file_changes(&lsp_changes)
+                && first_error.is_none()
+            {
+                first_error = Some(error.to_string());
+            }
+        }
         let ui = shell_ui_mut(runtime)?;
         for buffer in &mut ui.buffers {
             let Some(path) = shell_buffer_watch_path(buffer) else {
@@ -252,6 +263,9 @@ fn refresh_pending_lsp(runtime: &mut EditorRuntime, typing_active: bool) -> Resu
                 ),
             );
         }
+    }
+    if let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned() {
+        lsp_client.refresh_pull_diagnostics_if_needed();
     }
     apply_pending_lsp_state(runtime)
 }

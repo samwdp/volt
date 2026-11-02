@@ -296,7 +296,7 @@ fn render_markdown_ephemeral_content(
         buffer_enabled,
         registry.as_deref_mut(),
     );
-    if !plan.skipped_by_kill_switch {
+    if plan.enabled {
         for (line_index, line) in rendered.lines.iter_mut().enumerate() {
             *line = markdown_pretty::pretty_display_line(&plan, false, line_index, line);
         }

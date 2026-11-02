@@ -14,21 +14,21 @@ use std::{
 use editor_buffer::{TextPoint, TextRange};
 use editor_jobs::{OwnedProcessId, ProcessRegistry, WorkspaceId};
 use lsp_types::{
-    ClientInfo, CompletionParams, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
-    DocumentRangeFormattingParams, GotoDefinitionParams, HoverParams, InitializeParams,
-    InitializeResult, InitializedParams, PartialResultParams, ReferenceContext, ReferenceParams,
-    SignatureHelpParams, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentSyncKind, TraceValue, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams,
-    WorkspaceFolder,
+    ClientInfo, CompletionParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentDiagnosticParams, DocumentFormattingParams, DocumentRangeFormattingParams, FileEvent,
+    GotoDefinitionParams, HoverParams, InitializeParams, InitializeResult, InitializedParams,
+    PartialResultParams, ReferenceContext, ReferenceParams, SignatureHelpParams,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, TextDocumentSyncKind,
+    TraceValue, Uri, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceFolder,
     notification::{
-        DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
-        Exit, Initialized, Notification,
+        DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
+        DidSaveTextDocument, Exit, Initialized, Notification,
     },
     request::{
-        CodeActionRequest, Completion, Formatting, GotoDefinition, GotoImplementation,
-        HoverRequest, Initialize, RangeFormatting, References, Request, Shutdown,
-        SignatureHelpRequest,
+        CodeActionRequest, Completion, DocumentDiagnosticRequest, Formatting, GotoDefinition,
+        GotoImplementation, HoverRequest, Initialize, RangeFormatting, References, Request,
+        Shutdown, SignatureHelpRequest,
     },
 };
 use serde::Serialize;
@@ -48,7 +48,9 @@ pub(crate) struct LspSessionHandle {
     pub(crate) writer: Arc<Mutex<ChildStdin>>,
     pub(crate) pending: PendingResponseMap,
     pub(crate) diagnostics: DiagnosticsByPath,
-    pub(crate) open_documents: Mutex<BTreeMap<PathBuf, String>>,
+    pub(crate) open_documents: Arc<Mutex<BTreeMap<PathBuf, String>>>,
+    pub(crate) diagnostic_registrations: Arc<Mutex<BTreeMap<String, Option<String>>>>,
+    pub(crate) diagnostic_refresh_requested: Arc<AtomicBool>,
     pub(crate) text_document_sync_kind: Mutex<TextDocumentSyncKind>,
     pub(crate) workspace_configuration: Arc<Mutex<SessionWorkspaceConfiguration>>,
     pub(crate) initialization_options: Option<Value>,
@@ -152,6 +154,9 @@ impl LspSessionHandle {
             initialization_options_override.as_ref(),
         );
         let disconnected = Arc::new(AtomicBool::new(false));
+        let open_documents = Arc::new(Mutex::new(BTreeMap::new()));
+        let diagnostic_registrations = Arc::new(Mutex::new(BTreeMap::new()));
+        let diagnostic_refresh_requested = Arc::new(AtomicBool::new(false));
         let handle = Arc::new(Self {
             key,
             session,
@@ -161,7 +166,9 @@ impl LspSessionHandle {
             writer: Arc::clone(&writer),
             pending: Arc::clone(&pending),
             diagnostics: Arc::clone(&diagnostics),
-            open_documents: Mutex::new(BTreeMap::new()),
+            open_documents: Arc::clone(&open_documents),
+            diagnostic_registrations: Arc::clone(&diagnostic_registrations),
+            diagnostic_refresh_requested: Arc::clone(&diagnostic_refresh_requested),
             text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
             workspace_configuration: Arc::clone(&workspace_configuration),
             initialization_options,
@@ -203,6 +210,8 @@ impl LspSessionHandle {
                 writer,
                 pending,
                 diagnostics,
+                diagnostic_registrations,
+                diagnostic_refresh_requested,
                 workspace_configuration,
                 disconnected,
                 transport_log,
@@ -396,6 +405,10 @@ impl LspSessionHandle {
         version: i32,
         text: String,
     ) -> Result<(), LspClientError> {
+        // Roslyn (and similar project-system servers) only add new files when they
+        // see a watched-files Created event. Send it before didOpen so the file is
+        // not stuck in the miscellaneous-files project until an LSP restart.
+        self.did_change_watched_files(&[(path, LspWatchedFileChange::Created)])?;
         self.notify_typed::<DidOpenTextDocument>(DidOpenTextDocumentParams {
             text_document: TextDocumentItem::new(
                 path_to_uri(path)?,
@@ -472,7 +485,25 @@ impl LspSessionHandle {
         self.notify_typed::<DidSaveTextDocument>(DidSaveTextDocumentParams {
             text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
             text: None,
-        })
+        })?;
+        self.did_change_watched_files(&[(path, LspWatchedFileChange::Changed)])
+    }
+
+    pub(crate) fn did_change_watched_files(
+        &self,
+        changes: &[(&Path, LspWatchedFileChange)],
+    ) -> Result<(), LspClientError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut events = Vec::with_capacity(changes.len());
+        for (path, change) in changes {
+            events.push(FileEvent {
+                uri: path_to_uri(path)?,
+                typ: (*change).into(),
+            });
+        }
+        self.notify_typed::<DidChangeWatchedFiles>(DidChangeWatchedFilesParams { changes: events })
     }
 
     pub(crate) fn did_close(&self, path: &Path) -> Result<(), LspClientError> {
@@ -592,7 +623,10 @@ impl LspSessionHandle {
         &self,
         item: LspCompletionItem,
     ) -> Result<LspCompletionItem, LspClientError> {
-        if item.has_documentation || !self.completion_resolve_supported.load(Ordering::Acquire) {
+        // Always resolve when supported: servers often defer `additionalTextEdits`
+        // (imports/usings) and docs to `completionItem/resolve`, even when the
+        // incomplete list already included a documentation field.
+        if !self.completion_resolve_supported.load(Ordering::Acquire) {
             return Ok(item);
         }
         if !item.raw_item.is_object() {
@@ -705,7 +739,7 @@ impl LspSessionHandle {
     }
 
     pub(crate) fn csharp_metadata(&self, uri: &str) -> Result<Option<Value>, LspClientError> {
-        if !is_csharp_server(self.server_id()) || !is_csharp_metadata_uri(uri) {
+        if self.server_id() != CSHARP_SERVER_ID || !is_csharp_metadata_uri(uri) {
             return Ok(None);
         }
         let response = self.request(
@@ -738,10 +772,57 @@ impl LspSessionHandle {
             work_done_progress_params: self.work_done_progress_params(References::METHOD),
             partial_result_params: PartialResultParams::default(),
             context: ReferenceContext {
-                include_declaration: false,
+                include_declaration: true,
             },
         })?;
         parse_reference_response(self.server_id(), &response)
+    }
+
+    pub(crate) fn diagnostic_identifiers(&self) -> Vec<Option<String>> {
+        self.diagnostic_registrations
+            .lock()
+            .map(|registrations| registrations.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn take_diagnostic_refresh_requested(&self) -> bool {
+        self.diagnostic_refresh_requested
+            .swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn open_document_paths(&self) -> Vec<PathBuf> {
+        self.open_documents
+            .lock()
+            .map(|documents| documents.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn pull_document_diagnostics(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Vec<Diagnostic>>, LspClientError> {
+        let identifiers = self.diagnostic_identifiers();
+        if identifiers.is_empty() {
+            return Ok(None);
+        }
+        let mut merged = Vec::new();
+        let mut saw_full = false;
+        for identifier in identifiers {
+            let response =
+                self.request_typed::<DocumentDiagnosticRequest>(DocumentDiagnosticParams {
+                    text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+                    identifier,
+                    previous_result_id: None,
+                    work_done_progress_params: self
+                        .work_done_progress_params(DocumentDiagnosticRequest::METHOD),
+                    partial_result_params: PartialResultParams::default(),
+                })?;
+            if let Some(items) = parse_document_diagnostic_items(&response) {
+                saw_full = true;
+                merged.extend(items);
+            }
+        }
+        Ok(saw_full.then_some(merged))
     }
 
     pub(crate) fn implementations(
@@ -778,7 +859,44 @@ impl LspSessionHandle {
             Err(error) if unsupported_lsp_request(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error),
         };
-        parse_code_action_response(self.server_id(), &response)
+        Ok(parse_code_action_response(self.server_id(), &response)?
+            .into_iter()
+            .map(|action| action.with_root(self.key.root.clone()))
+            .collect())
+    }
+
+    pub(crate) fn resolve_code_action(
+        &self,
+        action: LspCodeAction,
+    ) -> Result<LspCodeAction, LspClientError> {
+        if !action.needs_resolve() {
+            return Ok(action);
+        }
+        if !action.raw_item.is_object() {
+            return Ok(action);
+        }
+        let response = match self.request_with_timeout(
+            "codeAction/resolve",
+            action.raw_item.clone(),
+            CODE_ACTION_RESOLVE_REQUEST_TIMEOUT,
+        ) {
+            Ok(response) => response,
+            Err(error) if unsupported_lsp_request(&error) => return Ok(action),
+            Err(error) => return Err(error),
+        };
+        let Value::Object(mut resolved) = response else {
+            return Ok(action);
+        };
+        if let Value::Object(initial) = action.raw_item.clone() {
+            for (key, value) in initial {
+                resolved.entry(key).or_insert(value);
+            }
+        }
+        Ok(
+            parse_code_action_item(self.server_id(), &Value::Object(resolved))
+                .map(|resolved| resolved.with_root(action.root.clone()))
+                .unwrap_or(action),
+        )
     }
 
     pub(crate) fn formatting(

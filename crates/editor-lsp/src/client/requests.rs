@@ -17,6 +17,31 @@ use crate::{Diagnostic, LspWorkspaceDiagnostic};
 use super::session::*;
 use super::types::*;
 
+fn extend_from_live_sessions<T>(
+    sessions: &[Arc<LspSessionHandle>],
+    mut request: impl FnMut(&LspSessionHandle) -> Result<Vec<T>, LspClientError>,
+) -> Result<Vec<T>, LspClientError> {
+    let mut results = Vec::new();
+    let mut last_error = None;
+    let mut any_ok = false;
+    for session in sessions {
+        if is_copilot_server(session.server_id()) {
+            continue;
+        }
+        match request(session) {
+            Ok(items) => {
+                any_ok = true;
+                results.extend(items);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match last_error {
+        Some(error) if !any_ok => Err(error),
+        _ => Ok(results),
+    }
+}
+
 impl LspClientManager {
     pub(crate) fn session_shared_state(&self) -> LspSessionSharedState {
         LspSessionSharedState {
@@ -53,7 +78,9 @@ impl LspClientManager {
             writer: Arc::new(Mutex::new(writer)),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             diagnostics: Arc::new(Mutex::new(BTreeMap::new())),
-            open_documents: Mutex::new(BTreeMap::new()),
+            open_documents: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostic_registrations: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostic_refresh_requested: Arc::new(AtomicBool::new(false)),
             text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
             workspace_configuration,
             initialization_options: None,
@@ -423,6 +450,38 @@ impl LspClientManager {
         Ok(())
     }
 
+    /// Forwards disk create/change/delete events to every live Language Server Session.
+    ///
+    /// Roslyn uses these to keep the project system current when new files appear.
+    pub fn notify_watched_file_changes(
+        &self,
+        changes: &[(PathBuf, LspWatchedFileChange)],
+    ) -> Result<(), LspClientError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let sessions = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?
+            .sessions
+            .values()
+            .filter(|session| !session.is_disconnected())
+            .cloned()
+            .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let refs = changes
+            .iter()
+            .map(|(path, change)| (path.as_path(), *change))
+            .collect::<Vec<_>>();
+        for session in sessions {
+            session.did_change_watched_files(&refs)?;
+        }
+        Ok(())
+    }
+
     pub fn close_buffer(&self, path: &Path) -> Result<(), LspClientError> {
         let sessions = {
             let mut state = self
@@ -714,7 +773,9 @@ impl LspClientManager {
             writer: Arc::new(Mutex::new(writer)),
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             diagnostics: Arc::new(Mutex::new(diagnostics_by_path)),
-            open_documents: Mutex::new(BTreeMap::new()),
+            open_documents: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostic_registrations: Arc::new(Mutex::new(BTreeMap::new())),
+            diagnostic_refresh_requested: Arc::new(AtomicBool::new(false)),
             text_document_sync_kind: Mutex::new(TextDocumentSyncKind::FULL),
             workspace_configuration,
             initialization_options: None,
@@ -769,16 +830,12 @@ impl LspClientManager {
         position: TextPoint,
     ) -> Result<Vec<LspHoverContents>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
-        let mut results = Vec::new();
-        for session in sessions {
-            if is_copilot_server(session.server_id()) {
-                continue;
-            }
-            if let Some(hover) = session.hover(path, position)? {
-                results.push(hover);
-            }
-        }
-        Ok(results)
+        extend_from_live_sessions(&sessions, |session| {
+            Ok(session
+                .hover(path, position)?
+                .into_iter()
+                .collect::<Vec<_>>())
+        })
     }
 
     pub fn signature_help(
@@ -787,16 +844,12 @@ impl LspClientManager {
         position: TextPoint,
     ) -> Result<Vec<LspSignatureHelpContents>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
-        let mut results = Vec::new();
-        for session in sessions {
-            if is_copilot_server(session.server_id()) {
-                continue;
-            }
-            if let Some(signature_help) = session.signature_help(path, position)? {
-                results.push(signature_help);
-            }
-        }
-        Ok(results)
+        extend_from_live_sessions(&sessions, |session| {
+            Ok(session
+                .signature_help(path, position)?
+                .into_iter()
+                .collect::<Vec<_>>())
+        })
     }
 
     pub fn completions(
@@ -805,14 +858,7 @@ impl LspClientManager {
         position: TextPoint,
     ) -> Result<Vec<LspCompletionItem>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
-        let mut items = Vec::new();
-        for session in sessions {
-            if is_copilot_server(session.server_id()) {
-                continue;
-            }
-            items.extend(session.completions(path, position)?);
-        }
-        Ok(items)
+        extend_from_live_sessions(&sessions, |session| session.completions(path, position))
     }
 
     pub fn resolve_completion_item(
@@ -826,17 +872,25 @@ impl LspClientManager {
         session.resolve_completion_item(item.clone())
     }
 
+    /// Resolve a completion item before accept so `additionalTextEdits` land.
+    pub fn resolve_completion_for_accept(
+        &self,
+        payload: &LspCompletionResolvePayload,
+    ) -> Result<LspCompletionItem, LspClientError> {
+        let item =
+            LspCompletionItem::new(payload.server_id.clone(), None, "", "", None, None, None)
+                .with_raw_item(payload.raw_item.clone(), false)
+                .with_root(payload.root.clone());
+        self.resolve_completion_item(&item)
+    }
+
     /// Resolve documentation for a selected completion item without failing the list.
     pub fn resolve_completion_documentation(
         &self,
         payload: &LspCompletionResolvePayload,
     ) -> Result<Option<String>, LspClientError> {
-        let item =
-            LspCompletionItem::new(payload.server_id.clone(), None, "", "", None, None, None)
-                .with_raw_item(payload.raw_item.clone(), false)
-                .with_root(payload.root.clone());
         Ok(self
-            .resolve_completion_item(&item)?
+            .resolve_completion_for_accept(payload)?
             .documentation()
             .map(str::to_owned))
     }
@@ -891,13 +945,8 @@ impl LspClientManager {
         position: TextPoint,
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
-        let mut locations = Vec::new();
-        for session in sessions {
-            if is_copilot_server(session.server_id()) {
-                continue;
-            }
-            locations.extend(session.definitions(path, position)?);
-        }
+        let mut locations =
+            extend_from_live_sessions(&sessions, |session| session.definitions(path, position))?;
         sort_locations(&mut locations);
         Ok(locations)
     }
@@ -908,13 +957,8 @@ impl LspClientManager {
         position: TextPoint,
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
-        let mut locations = Vec::new();
-        for session in sessions {
-            if is_copilot_server(session.server_id()) {
-                continue;
-            }
-            locations.extend(session.references(path, position)?);
-        }
+        let mut locations =
+            extend_from_live_sessions(&sessions, |session| session.references(path, position))?;
         sort_locations(&mut locations);
         Ok(locations)
     }
@@ -925,13 +969,9 @@ impl LspClientManager {
         position: TextPoint,
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let sessions = self.tracked_sessions_for_path(path)?;
-        let mut locations = Vec::new();
-        for session in sessions {
-            if is_copilot_server(session.server_id()) {
-                continue;
-            }
-            locations.extend(session.implementations(path, position)?);
-        }
+        let mut locations = extend_from_live_sessions(&sessions, |session| {
+            session.implementations(path, position)
+        })?;
         sort_locations(&mut locations);
         Ok(locations)
     }
@@ -958,6 +998,17 @@ impl LspClientManager {
                 .then_with(|| left.kind.cmp(&right.kind))
         });
         Ok(actions)
+    }
+
+    /// Resolve deferred code-action edits (`codeAction/resolve`) before apply.
+    pub fn resolve_code_action(
+        &self,
+        action: &LspCodeAction,
+    ) -> Result<LspCodeAction, LspClientError> {
+        let Some(session) = self.live_session_for_server(action.server_id(), action.root())? else {
+            return Ok(action.clone());
+        };
+        session.resolve_code_action(action.clone())
     }
 
     pub fn formatting(

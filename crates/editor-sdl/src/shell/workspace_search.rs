@@ -758,6 +758,8 @@ pub(super) fn lsp_code_action_picker_entry(
         } else {
             "edit"
         }
+    } else if code_action.needs_resolve() {
+        "edit"
     } else {
         "unsupported"
     };
@@ -805,6 +807,9 @@ pub(super) fn lsp_code_action_picker_preview(code_action: &LspCodeAction) -> Opt
                 "Apply {edit_count} text edit{edit_suffix} across {file_count} file{file_suffix}.{command_suffix}"
             ))
         }
+        Err(_) if code_action.needs_resolve() => Some(
+            "Resolve deferred edits from the language server, then apply them.".to_owned(),
+        ),
         Err(message) => Some(message),
     }
 }
@@ -819,6 +824,11 @@ pub(super) fn lsp_code_action_supported_edits(
         return Err("Unsupported: resource operations are not supported yet.".to_owned());
     }
     if code_action.document_edits().is_empty() {
+        if code_action.needs_resolve() {
+            return Err(
+                "Unsupported: deferred code action still needs `codeAction/resolve`.".to_owned(),
+            );
+        }
         if let Some(command_name) = code_action.command_name() {
             return Err(format!(
                 "Unsupported: command-only code action `{command_name}` is not supported yet."
@@ -836,7 +846,8 @@ pub(super) fn apply_lsp_code_action(
     path: &Path,
     code_action: &LspCodeAction,
 ) -> Result<(), String> {
-    let document_edits = lsp_code_action_supported_edits(code_action)?;
+    let code_action = resolve_lsp_code_action_if_needed(runtime, code_action)?;
+    let document_edits = lsp_code_action_supported_edits(&code_action)?;
     let original_cursor = shell_buffer(runtime, buffer_id)?.cursor_point();
     for document_edit in document_edits {
         apply_lsp_document_edit(
@@ -856,6 +867,24 @@ pub(super) fn apply_lsp_code_action(
     shell_ui_mut(runtime)?.focus_buffer(buffer_id);
     sync_active_buffer(runtime)?;
     Ok(())
+}
+
+fn resolve_lsp_code_action_if_needed(
+    runtime: &EditorRuntime,
+    code_action: &LspCodeAction,
+) -> Result<LspCodeAction, String> {
+    if !code_action.needs_resolve() {
+        return Ok(code_action.clone());
+    }
+    let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>() else {
+        return Err(
+            "Unsupported: deferred code action needs a running language server to resolve."
+                .to_owned(),
+        );
+    };
+    lsp_client
+        .resolve_code_action(code_action)
+        .map_err(|error| error.to_string())
 }
 
 fn apply_lsp_document_edit(

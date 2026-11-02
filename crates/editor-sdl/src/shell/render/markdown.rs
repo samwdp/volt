@@ -58,7 +58,7 @@ pub(super) fn markdown_pretty_paint_plan(
     let config = markdown_pretty::user_library_pretty_config(user_library);
     let enabled = buffer.markdown_pretty_enabled().unwrap_or(config.enabled);
     let plan = markdown_pretty::cached_plan_for_buffer(buffer, &config, enabled, None);
-    if !enabled || plan.skipped_by_kill_switch || plan.lines.is_empty() {
+    if !enabled || !plan.enabled || plan.skipped_by_kill_switch {
         return paint;
     }
     let cursor_line = buffer.cursor_row();

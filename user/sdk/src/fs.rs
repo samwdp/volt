@@ -343,7 +343,20 @@ fn project_repository_details(path: &Path, name: &str, kind: ProjectKind) -> (St
 fn resolve_worktree_repository_root(path: &Path) -> io::Result<Option<PathBuf>> {
     let gitdir = worktree_gitdir(path)?;
     let common_dir = worktree_common_dir(&gitdir)?;
-    Ok(common_dir.parent().map(Path::to_path_buf))
+    Ok(Some(repository_root_from_git_common_dir(common_dir)))
+}
+
+/// Maps a worktree `commondir` path to the owning repository root.
+///
+/// Non-bare repos store common metadata under `<repo>/.git`, so the repository
+/// root is the parent. Bare repos use the bare directory itself as common dir.
+fn repository_root_from_git_common_dir(common_dir: PathBuf) -> PathBuf {
+    common_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| *name == ".git")
+        .and_then(|_| common_dir.parent().map(Path::to_path_buf))
+        .unwrap_or(common_dir)
 }
 
 fn worktree_gitdir(path: &Path) -> io::Result<PathBuf> {

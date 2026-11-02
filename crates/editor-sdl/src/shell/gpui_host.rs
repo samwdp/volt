@@ -227,18 +227,21 @@ impl GpuiSession {
                 Ok((fonts, font_path)) => {
                     self.fonts = fonts;
                     self.font_path = font_path;
-                    self.remember_font_metrics();
                     self.fonts_dirty = true;
                 }
                 Err(error) => self.state.record_shell_error("shell.update-theme", error),
             }
         }
         self.theme_settings = updated;
+        self.remember_font_metrics();
         fonts_changed
     }
 
     fn remember_font_metrics(&mut self) {
-        self.line_height = self.fonts.primary().height().max(1);
+        self.line_height = effective_line_height(
+            self.fonts.primary().height(),
+            self.theme_settings.line_height_multiplier,
+        );
         self.ascent = self.fonts.primary().ascent();
         self.cell_width = self.fonts.cell_width();
         self.font_pixel_size = self.fonts.primary_pixel_size;

@@ -21,12 +21,15 @@ pub use editor_plugin_api::LspCompletionKind;
 use lsp_types::{
     ClientCapabilities, CodeActionContext, CodeActionParams, CodeActionTriggerKind,
     Diagnostic as LspDiagnostic, DiagnosticSeverity as LspDiagnosticSeverity, Documentation,
-    FormattingOptions, GotoDefinitionResponse, HoverContents, Location, LocationLink, MarkedString,
-    MarkupKind, NumberOrString, ParameterLabel, PartialResultParams, Position, Range,
-    SignatureHelp, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    FileChangeType, FormattingOptions, GotoDefinitionResponse, HoverContents, Location,
+    LocationLink, MarkedString, MarkupKind, NumberOrString, ParameterLabel, PartialResultParams,
+    Position, Range, SignatureHelp, TextDocumentContentChangeEvent, TextDocumentIdentifier,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Uri,
     WorkDoneProgressParams,
-    request::{CodeActionRequest, Initialize, Request},
+    request::{
+        CodeActionRequest, DocumentDiagnosticRequest, GotoImplementation, Initialize, References,
+        Request,
+    },
 };
 use serde_json::{Value, json};
 
@@ -41,6 +44,16 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
 pub(crate) const INITIALIZE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) const CODE_ACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Find-all-references walks the solution graph; 400ms default is too short for Roslyn/C#.
+pub(crate) const REFERENCES_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Roslyn often fills `edit` only on `codeAction/resolve`.
+pub(crate) const CODE_ACTION_RESOLVE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) const IMPLEMENTATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub(crate) const DOCUMENT_DIAGNOSTIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) const INLINE_COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_millis(1200);
 
@@ -98,6 +111,8 @@ pub struct LspCompletionItem {
     pub(crate) documentation: Option<String>,
     /// True when the completion response included a real `documentation` field.
     pub(crate) has_documentation: bool,
+    /// Extra edits from `additionalTextEdits` (imports/usings).
+    pub(crate) additional_text_edits: Vec<LspTextEdit>,
     /// Raw CompletionItem JSON for `completionItem/resolve`.
     pub(crate) raw_item: Value,
 }
@@ -163,6 +178,7 @@ impl LspCompletionItem {
             label_description: None,
             documentation,
             has_documentation: false,
+            additional_text_edits: Vec::new(),
             raw_item: Value::Null,
         }
     }
@@ -170,6 +186,11 @@ impl LspCompletionItem {
     pub(crate) fn with_raw_item(mut self, raw_item: Value, has_documentation: bool) -> Self {
         self.raw_item = raw_item;
         self.has_documentation = has_documentation;
+        self
+    }
+
+    pub(crate) fn with_additional_text_edits(mut self, edits: Vec<LspTextEdit>) -> Self {
+        self.additional_text_edits = edits;
         self
     }
 
@@ -210,6 +231,10 @@ impl LspCompletionItem {
 
     pub const fn edit_range(&self) -> Option<TextRange> {
         self.edit_range
+    }
+
+    pub fn additional_text_edits(&self) -> &[LspTextEdit] {
+        &self.additional_text_edits
     }
 
     pub fn detail(&self) -> Option<&str> {
@@ -455,7 +480,7 @@ pub struct LspTextEdit {
 }
 
 impl LspTextEdit {
-    pub(crate) fn new(range: TextRange, new_text: impl Into<String>) -> Self {
+    pub fn new(range: TextRange, new_text: impl Into<String>) -> Self {
         Self {
             range,
             new_text: new_text.into(),
@@ -494,6 +519,7 @@ impl LspDocumentTextEdits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LspCodeAction {
     pub(crate) server_id: String,
+    pub(crate) root: Option<PathBuf>,
     pub(crate) title: String,
     pub(crate) kind: Option<String>,
     pub(crate) disabled_reason: Option<String>,
@@ -501,11 +527,22 @@ pub struct LspCodeAction {
     pub(crate) document_edits: Vec<LspDocumentTextEdits>,
     pub(crate) command_name: Option<String>,
     pub(crate) has_resource_operations: bool,
+    /// Raw CodeAction JSON for `codeAction/resolve` (Roslyn defers edits here).
+    pub(crate) raw_item: Value,
 }
 
 impl LspCodeAction {
     pub fn server_id(&self) -> &str {
         &self.server_id
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    pub(crate) fn with_root(mut self, root: Option<PathBuf>) -> Self {
+        self.root = root;
+        self
     }
 
     pub fn title(&self) -> &str {
@@ -534,6 +571,18 @@ impl LspCodeAction {
 
     pub const fn has_resource_operations(&self) -> bool {
         self.has_resource_operations
+    }
+
+    pub fn raw_item(&self) -> &Value {
+        &self.raw_item
+    }
+
+    /// True when the server deferred edits to `codeAction/resolve` via `data`.
+    pub fn needs_resolve(&self) -> bool {
+        self.document_edits.is_empty()
+            && self.disabled_reason.is_none()
+            && self.raw_item.get("data").is_some()
+            && self.raw_item.is_object()
     }
 }
 
@@ -925,6 +974,24 @@ pub enum LspClientError {
     Disconnected(String),
 }
 
+/// Disk / project-system file change for `workspace/didChangeWatchedFiles`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspWatchedFileChange {
+    Created,
+    Changed,
+    Deleted,
+}
+
+impl From<LspWatchedFileChange> for FileChangeType {
+    fn from(change: LspWatchedFileChange) -> Self {
+        match change {
+            LspWatchedFileChange::Created => FileChangeType::CREATED,
+            LspWatchedFileChange::Changed => FileChangeType::CHANGED,
+            LspWatchedFileChange::Deleted => FileChangeType::DELETED,
+        }
+    }
+}
+
 /// Identity of one live Language Server Session (server id + root).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LspLiveSession {
@@ -1206,6 +1273,8 @@ pub(crate) struct LspReaderSession {
     pub(crate) writer: Arc<Mutex<ChildStdin>>,
     pub(crate) pending: PendingResponseMap,
     pub(crate) diagnostics: DiagnosticsByPath,
+    pub(crate) diagnostic_registrations: Arc<Mutex<BTreeMap<String, Option<String>>>>,
+    pub(crate) diagnostic_refresh_requested: Arc<AtomicBool>,
     pub(crate) workspace_configuration: Arc<Mutex<SessionWorkspaceConfiguration>>,
     pub(crate) disconnected: Arc<AtomicBool>,
     pub(crate) transport_log: TransportLog,
@@ -1223,6 +1292,8 @@ pub(crate) fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: L
             writer,
             pending,
             diagnostics,
+            diagnostic_registrations,
+            diagnostic_refresh_requested,
             workspace_configuration,
             disconnected,
             transport_log,
@@ -1267,6 +1338,21 @@ pub(crate) fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: L
                     .lock()
                     .ok()
                     .map(|workspace_configuration| workspace_configuration.clone());
+                let method = object.get("method").and_then(Value::as_str);
+                if matches!(
+                    method,
+                    Some("client/registerCapability") | Some("client/unregisterCapability")
+                ) {
+                    apply_diagnostic_capability_registration(
+                        method,
+                        object.get("params"),
+                        &diagnostic_registrations,
+                        &diagnostic_refresh_requested,
+                    );
+                }
+                if method == Some("workspace/diagnostic/refresh") {
+                    diagnostic_refresh_requested.store(true, Ordering::Release);
+                }
                 let handling = server_request_response(
                     &server_id,
                     root.as_deref(),
@@ -1322,6 +1408,10 @@ pub(crate) fn spawn_reader_thread(stdout: impl Read + Send + 'static, session: L
                         path,
                         parsed,
                     );
+                    continue;
+                }
+                if method == "workspace/projectInitializationComplete" {
+                    diagnostic_refresh_requested.store(true, Ordering::Release);
                     continue;
                 }
                 if method == "$/progress"
@@ -2003,7 +2093,15 @@ pub(crate) fn client_capabilities() -> Result<ClientCapabilities, LspClientError
                 "documentChanges": true
             },
             "configuration": true,
-            "workspaceFolders": true
+            "workspaceFolders": true,
+            // false: Roslyn only uses its in-process watcher when the client does
+            // not claim dynamic registration. Volt ACKs registerCapability but does
+            // not install those watchers, so true left new .cs files invisible until
+            // restart (false diagnostics while `dotnet build` succeeds).
+            "didChangeWatchedFiles": {
+                "dynamicRegistration": false,
+                "relativePatternSupport": true
+            }
         },
         "window": {
             "workDoneProgress": true,
@@ -2040,6 +2138,10 @@ pub(crate) fn client_capabilities() -> Result<ClientCapabilities, LspClientError
                 "dynamicRegistration": false,
                 "isPreferredSupport": true,
                 "disabledSupport": true,
+                "dataSupport": true,
+                "resolveSupport": {
+                    "properties": ["edit"]
+                },
                 "codeActionLiteralSupport": {
                     "codeActionKind": {
                         "valueSet": [
@@ -2063,6 +2165,10 @@ pub(crate) fn client_capabilities() -> Result<ClientCapabilities, LspClientError
             },
             "publishDiagnostics": {
                 "relatedInformation": false
+            },
+            "diagnostic": {
+                "dynamicRegistration": true,
+                "relatedDocumentSupport": false
             },
             "synchronization": {
                 "didSave": true
@@ -2089,10 +2195,18 @@ pub(crate) fn request_timeout_for_method(method: &str) -> Duration {
         INITIALIZE_REQUEST_TIMEOUT
     } else if method == CodeActionRequest::METHOD {
         CODE_ACTION_REQUEST_TIMEOUT
+    } else if method == References::METHOD {
+        REFERENCES_REQUEST_TIMEOUT
+    } else if method == GotoImplementation::METHOD {
+        IMPLEMENTATION_REQUEST_TIMEOUT
+    } else if method == DocumentDiagnosticRequest::METHOD {
+        DOCUMENT_DIAGNOSTIC_REQUEST_TIMEOUT
     } else if method == INLINE_COMPLETION_METHOD {
         INLINE_COMPLETION_REQUEST_TIMEOUT
     } else if method == "completionItem/resolve" {
         COMPLETION_RESOLVE_REQUEST_TIMEOUT
+    } else if method == "codeAction/resolve" {
+        CODE_ACTION_RESOLVE_REQUEST_TIMEOUT
     } else {
         REQUEST_TIMEOUT
     }
@@ -2106,7 +2220,7 @@ pub(crate) fn workspace_configuration_section_for_session(
     session: &LanguageServerSession,
 ) -> Option<&str> {
     normalize_configuration_section(session.workspace_configuration_section())
-        .or_else(|| is_csharp_server(session.server_id()).then_some(CSHARP_WORKSPACE_SECTION))
+        .or_else(|| (session.server_id() == CSHARP_SERVER_ID).then_some(CSHARP_WORKSPACE_SECTION))
 }
 
 pub(crate) fn normalized_workspace_configuration_settings(
@@ -2384,10 +2498,6 @@ pub(crate) fn is_copilot_server(server_id: &str) -> bool {
     server_id == COPILOT_SERVER_ID
 }
 
-pub(crate) fn is_csharp_server(server_id: &str) -> bool {
-    matches!(server_id, CSHARP_SERVER_ID | ROSLYN_LANGUAGE_SERVER_ID)
-}
-
 pub(crate) fn is_csharp_metadata_uri(uri: &str) -> bool {
     uri.starts_with("csharp:/")
 }
@@ -2407,13 +2517,18 @@ pub(crate) fn initialization_options_for_server(
                 "version": env!("CARGO_PKG_VERSION"),
             }
         }))
-    } else if is_csharp_server(server_id) {
+    } else if server_id == CSHARP_SERVER_ID {
         Some(json!({
             "experimental": {
                 "csharp": {
                     "metadataUris": true,
                 }
             }
+        }))
+    } else if server_id == ROSLYN_LANGUAGE_SERVER_ID {
+        // Reinforces `--autoLoadProjects` for clients that only send init options.
+        Some(json!({
+            "autoLoadProjects": 500,
         }))
     } else {
         None
@@ -2758,7 +2873,7 @@ pub(crate) fn server_request_response(
         Some("workspace/configuration") => workspace_configuration
             .map(|workspace_configuration| workspace_configuration.response_for_request(params))
             .unwrap_or_else(|| workspace_configuration_null_response(params)),
-        Some("workspace/workspaceFolders") => Value::Array(Vec::new()),
+        Some("workspace/workspaceFolders") => workspace_folders_response(root),
         Some("window/showMessageRequest") => params
             .and_then(|params| params.get("actions"))
             .and_then(Value::as_array)
@@ -2785,6 +2900,20 @@ pub(crate) fn server_request_response(
         result,
         notification,
     }
+}
+
+pub(crate) fn workspace_folders_response(root: Option<&Path>) -> Value {
+    let Some(root) = root else {
+        return Value::Null;
+    };
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("workspace");
+    json!([{
+        "uri": path_to_file_uri(root),
+        "name": name,
+    }])
 }
 
 pub(crate) fn show_document_notification(
@@ -2835,6 +2964,115 @@ pub(crate) fn parse_publish_diagnostics(params: &Value) -> Option<(PathBuf, Vec<
         })
         .unwrap_or_default();
     Some((path, diagnostics))
+}
+
+pub(crate) fn apply_diagnostic_capability_registration(
+    method: Option<&str>,
+    params: Option<&Value>,
+    diagnostic_registrations: &Arc<Mutex<BTreeMap<String, Option<String>>>>,
+    diagnostic_refresh_requested: &AtomicBool,
+) {
+    let Some(params) = params else {
+        return;
+    };
+    match method {
+        Some("client/registerCapability") => {
+            let Some(registrations) = params.get("registrations").and_then(Value::as_array) else {
+                return;
+            };
+            let mut changed = false;
+            if let Ok(mut stored) = diagnostic_registrations.lock() {
+                for registration in registrations {
+                    let Some(reg_method) = registration.get("method").and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    if reg_method != DocumentDiagnosticRequest::METHOD {
+                        continue;
+                    }
+                    let Some(id) = registration.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let identifier = registration
+                        .get("registerOptions")
+                        .and_then(|options| options.get("identifier"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    stored.insert(id.to_owned(), identifier);
+                    changed = true;
+                }
+            }
+            if changed {
+                diagnostic_refresh_requested.store(true, Ordering::Release);
+            }
+        }
+        Some("client/unregisterCapability") => {
+            let Some(unregistrations) = params.get("unregisterations").and_then(Value::as_array)
+            else {
+                // Spec spelling is "unregisterations"; tolerate "unregistrations".
+                let Some(unregistrations) = params.get("unregistrations").and_then(Value::as_array)
+                else {
+                    return;
+                };
+                remove_diagnostic_registrations(
+                    unregistrations,
+                    diagnostic_registrations,
+                    diagnostic_refresh_requested,
+                );
+                return;
+            };
+            remove_diagnostic_registrations(
+                unregistrations,
+                diagnostic_registrations,
+                diagnostic_refresh_requested,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn remove_diagnostic_registrations(
+    unregistrations: &[Value],
+    diagnostic_registrations: &Arc<Mutex<BTreeMap<String, Option<String>>>>,
+    diagnostic_refresh_requested: &AtomicBool,
+) {
+    let mut changed = false;
+    if let Ok(mut stored) = diagnostic_registrations.lock() {
+        for entry in unregistrations {
+            let Some(id) = entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if stored.remove(id).is_some() {
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        diagnostic_refresh_requested.store(true, Ordering::Release);
+    }
+}
+
+pub(crate) fn parse_document_diagnostic_items(value: &Value) -> Option<Vec<Diagnostic>> {
+    if value.is_null() {
+        return Some(Vec::new());
+    }
+    match value.get("kind").and_then(Value::as_str) {
+        Some("unchanged") => None,
+        Some("full") | None => {
+            let items = value
+                .get("items")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(parse_diagnostic)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Some(items)
+        }
+        _ => Some(Vec::new()),
+    }
 }
 
 pub(crate) fn parse_diagnostic(value: &Value) -> Option<Diagnostic> {
@@ -2993,6 +3231,7 @@ pub(crate) fn parse_code_action_item(server_id: &str, value: &Value) -> Option<L
     let command_name = parse_code_action_command_name(value);
     Some(LspCodeAction {
         server_id: server_id.to_owned(),
+        root: None,
         title: title.to_owned(),
         kind,
         disabled_reason,
@@ -3000,6 +3239,7 @@ pub(crate) fn parse_code_action_item(server_id: &str, value: &Value) -> Option<L
         document_edits,
         command_name,
         has_resource_operations,
+        raw_item: value.clone(),
     })
 }
 
@@ -3557,6 +3797,10 @@ pub(crate) fn parse_completion_item(server_id: &str, value: &Value) -> Option<Ls
     // Prefer real documentation when present; otherwise reuse detail so the
     // autocomplete docs panel still has something useful to show until resolve.
     let documentation = resolved_documentation.or_else(|| detail.clone());
+    let additional_text_edits = value
+        .get("additionalTextEdits")
+        .map(parse_inline_text_edits)
+        .unwrap_or_default();
     Some(
         LspCompletionItem::new(
             server_id,
@@ -3568,6 +3812,7 @@ pub(crate) fn parse_completion_item(server_id: &str, value: &Value) -> Option<Ls
             documentation,
         )
         .with_label_details(label_detail, label_description)
+        .with_additional_text_edits(additional_text_edits)
         .with_raw_item(
             completion_item_value_without_documentation(value),
             has_documentation,

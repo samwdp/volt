@@ -78,6 +78,8 @@ pub mod solidity;
 pub mod sql;
 /// Swift language support and theme mappings.
 pub mod swift;
+/// Terraform language support and theme mappings.
+pub mod terraform;
 /// TOML language support and theme mappings.
 pub mod toml;
 /// TypeScript language support and theme mappings.
@@ -132,6 +134,7 @@ pub fn packages() -> Vec<editor_plugin_api::PluginPackage> {
         solidity::package(),
         sql::package(),
         swift::package(),
+        terraform::package(),
         toml::package(),
         typescript::package(),
         vim::package(),
@@ -184,6 +187,7 @@ pub fn syntax_languages() -> Vec<LanguageConfiguration> {
         solidity::syntax_language(),
         sql::syntax_language(),
         swift::syntax_language(),
+        terraform::syntax_language(),
         toml::syntax_language(),
         typescript::syntax_language(),
         typescript::tsx_syntax_language(),

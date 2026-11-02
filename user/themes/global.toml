@@ -3,6 +3,8 @@
 scrolloff = 5
 font = "Liga Berkeley Mono"
 font_size = 20
+# Multiplier on the font's native line height (1.0 = native). Try ~0.85 with tall fonts like Space Mono.
+line_height = 1.0
 emoji_font = "Segoe UI Emoji"
 emoji_font_size = 18
 cursor_roundness = 3
@@ -167,6 +169,11 @@ format_on_save = false
 use_tabs = false
 
 [langs.hcl]
+indent = 2
+format_on_save = false
+use_tabs = false
+
+[langs.terraform]
 indent = 2
 format_on_save = false
 use_tabs = false

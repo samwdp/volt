@@ -580,6 +580,7 @@ fn buffer_autocomplete_entries(
                     detail: None,
                     kind_label: None,
                     documentation: None,
+                    additional_text_edits: Vec::new(),
                     resolve: None,
                 },
                 score,
@@ -677,6 +678,7 @@ fn lsp_autocomplete_entries(
                     // belong on the selected row after resolve, not on every item
                     // copied onto the UI thread (accept/drop hitch).
                     documentation: None,
+                    additional_text_edits: item.additional_text_edits().to_vec(),
                     resolve: item.list_resolve_payload(),
                 },
                 autocomplete_score(&candidate, 2, query) + 40,
@@ -721,6 +723,7 @@ fn manual_autocomplete_entries(
                     detail: item.detail.clone(),
                     kind_label: None,
                     documentation: item.documentation.clone(),
+                    additional_text_edits: Vec::new(),
                     resolve: None,
                 },
                 autocomplete_score(&item.replacement, 1, query) + 80,
@@ -765,6 +768,7 @@ fn db_autocomplete_entries(
                     detail: candidate.detail.clone(),
                     kind_label: None,
                     documentation: candidate.documentation.clone(),
+                    additional_text_edits: Vec::new(),
                     resolve: None,
                 },
                 autocomplete_score(&candidate.replacement, 1, query) + 100,

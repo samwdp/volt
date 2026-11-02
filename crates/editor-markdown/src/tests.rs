@@ -76,6 +76,7 @@ fn kill_switch_skips_when_enabled() {
     };
     let plan = plan_markdown_pretty(&request, None);
     assert!(plan.skipped_by_kill_switch);
+    assert!(!plan.enabled);
     assert!(plan.lines.is_empty());
 }
 
@@ -96,6 +97,45 @@ fn anti_conceal_detects_cursor_and_visual() {
     assert!(plan.line_is_anti_concealed(&request, 1));
     assert!(plan.line_is_anti_concealed(&request, 2));
     assert!(!plan.line_is_anti_concealed(&request, 0));
+}
+
+#[test]
+fn pretty_display_decodes_html_entities_and_escapes() {
+    let config = cfg();
+    let text = "Creates an array from a&nbsp;IEnumerable\\<out&nbsp;T\\>\\.\n";
+    let plan = plan_markdown_pretty_ephemeral(text, &config, Some(true), None);
+    assert!(plan.enabled);
+    let display = pretty_display_line(
+        &plan,
+        false,
+        0,
+        "Creates an array from a&nbsp;IEnumerable\\<out&nbsp;T\\>\\.",
+    );
+    assert_eq!(
+        display,
+        "Creates an array from a\u{00A0}IEnumerable<out\u{00A0}T>."
+    );
+}
+
+#[test]
+fn pretty_display_keeps_entities_when_disabled() {
+    let config = cfg();
+    let text = "a&nbsp;b\\<T\\>\n";
+    let plan = plan_markdown_pretty_ephemeral(text, &config, Some(false), None);
+    assert!(!plan.enabled);
+    let source = "a&nbsp;b\\<T\\>";
+    let display = pretty_display_line(&plan, false, 0, source);
+    assert_eq!(display, source);
+}
+
+#[test]
+fn decode_markdown_display_text_handles_numeric_and_named() {
+    assert_eq!(
+        decode_markdown_display_text("A&#160;B&#xA0;C&lt;D&gt;"),
+        "A\u{00A0}B\u{00A0}C<D>"
+    );
+    assert_eq!(decode_markdown_display_text(r"sequence\."), "sequence.");
+    assert_eq!(decode_markdown_display_text(r"\&nbsp;"), "&nbsp;");
 }
 
 #[test]

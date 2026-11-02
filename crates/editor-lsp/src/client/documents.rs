@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, atomic::AtomicU64},
+};
 
 use editor_jobs::WorkspaceId;
 
@@ -151,8 +155,77 @@ impl LspClientManager {
 
         for session in &sessions {
             session.sync_text_document(path, version, &text, incremental_changes.as_deref())?;
+            self.schedule_pulled_diagnostics(Arc::clone(session), path.to_path_buf());
         }
 
         Ok(labels)
+    }
+
+    /// Drains project-init / capability-registration refresh flags and pulls diagnostics.
+    ///
+    /// Safe to call from the shell refresh loop: work runs on a background thread.
+    pub fn refresh_pull_diagnostics_if_needed(&self) {
+        let sessions = self
+            .state
+            .lock()
+            .map(|state| state.sessions.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut work = Vec::new();
+        for session in sessions {
+            if session.is_disconnected() || !session.take_diagnostic_refresh_requested() {
+                continue;
+            }
+            for path in session.open_document_paths() {
+                work.push((Arc::clone(&session), path));
+            }
+        }
+        if work.is_empty() {
+            return;
+        }
+        let dirty_diagnostic_paths = Arc::clone(&self.dirty_diagnostic_paths);
+        let diagnostics_generation = Arc::clone(&self.diagnostics_generation);
+        std::thread::spawn(move || {
+            for (session, path) in work {
+                record_session_pulled_diagnostics(
+                    &session,
+                    &path,
+                    &dirty_diagnostic_paths,
+                    &diagnostics_generation,
+                );
+            }
+        });
+    }
+
+    fn schedule_pulled_diagnostics(&self, session: Arc<LspSessionHandle>, path: PathBuf) {
+        if session.diagnostic_identifiers().is_empty() {
+            return;
+        }
+        let dirty_diagnostic_paths = Arc::clone(&self.dirty_diagnostic_paths);
+        let diagnostics_generation = Arc::clone(&self.diagnostics_generation);
+        std::thread::spawn(move || {
+            record_session_pulled_diagnostics(
+                &session,
+                &path,
+                &dirty_diagnostic_paths,
+                &diagnostics_generation,
+            );
+        });
+    }
+}
+
+fn record_session_pulled_diagnostics(
+    session: &LspSessionHandle,
+    path: &Path,
+    dirty_diagnostic_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
+    diagnostics_generation: &AtomicU64,
+) {
+    if let Ok(Some(diagnostics)) = session.pull_document_diagnostics(path) {
+        record_published_diagnostics(
+            &session.diagnostics,
+            dirty_diagnostic_paths,
+            diagnostics_generation,
+            path.to_path_buf(),
+            diagnostics,
+        );
     }
 }

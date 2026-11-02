@@ -146,7 +146,10 @@ pub fn run_demo_shell(config: ShellConfig) -> Result<ShellSummary, ShellError> {
         trace.mark("shell.window-icon");
     }
     video.text_input().start(&window);
-    let mut line_height = fonts.primary().height().max(1) as usize;
+    let mut line_height = effective_line_height(
+        fonts.primary().height(),
+        theme_settings.line_height_multiplier,
+    ) as usize;
     let mut ascent = fonts.primary().ascent();
     let mut cell_width = fonts.cell_width();
 

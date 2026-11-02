@@ -239,11 +239,11 @@ A Volt-owned copy of a Language Server, used when that program is not already on
 _Avoid_: global npm package (as the product concept), mason install (as the spoken product term)
 
 **Solution**:
-A `.sln` file that groups one or more C# projects. When a Solution is available, csharp-ls uses one Language Server Session for that Solution — not one Session per `.csproj`.
+A `.sln` file that groups one or more C# projects. When a Solution is available, roslyn-language-server (default C# Language Server) auto-loads that Solution into one Language Server Session — not one Session per `.csproj`. csharp-ls remains a manual alternative with the same Solution-root behavior.
 _Avoid_: project (when meaning the `.sln`), workspace (when meaning the `.sln`)
 
 **Language Server Session**:
-One planned or live language-server process for a given server and root. For csharp-ls, the root is the Solution’s directory when a Solution applies; otherwise the nearest `.csproj` directory or the Project Workspace root.
+One planned or live language-server process for a given server and root. For C# Language Servers, the root is the Solution’s directory when a Solution applies; otherwise the nearest `.csproj` directory or the Project Workspace root.
 _Avoid_: LSP instance (as the spoken product term), server process (when meaning the Session identity)
 
 **Language Server Session Stop**:

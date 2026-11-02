@@ -197,6 +197,39 @@ fn linked_worktree_display_name_uses_each_repository_parent() {
     );
 }
 
+#[test]
+fn discover_projects_resolves_bare_worktree_repository_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = temp_dir("discover-bare-worktree-repo");
+    let bare = root.join("af-platform-shared");
+    let gitdir = bare.join("worktrees").join("roadspeed");
+    let worktree = bare.join("roadspeed");
+    fs::create_dir_all(&gitdir)?;
+    fs::create_dir_all(&worktree)?;
+    fs::write(bare.join("HEAD"), "ref: refs/heads/master\n")?;
+    fs::write(worktree.join(".git"), "gitdir: ../worktrees/roadspeed\n")?;
+    fs::write(gitdir.join("commondir"), "../..\n")?;
+
+    let projects = discover_projects(&[ProjectSearchRoot::new(&root, 3)])?;
+    let worktree_project = projects
+        .iter()
+        .find(|project| project.root() == worktree)
+        .expect("bare worktree should be discovered");
+    assert_eq!(worktree_project.repository_name(), "af-platform-shared");
+    assert_eq!(worktree_project.repository_root(), bare);
+    assert_eq!(
+        worktree_project.worktree_parent_name().as_deref(),
+        Some("af-platform-shared")
+    );
+    assert_eq!(
+        worktree_project.display_name(),
+        "af-platform-shared [roadspeed]"
+    );
+
+    fs::remove_dir_all(root)?;
+    Ok(())
+}
+
 #[cfg(windows)]
 #[test]
 fn discover_projects_resolves_git_for_windows_worktree_metadata()

@@ -94,12 +94,15 @@ fn update_theme_runtime<'ttf, 'texture>(
         *font_path = next_font_path;
         *fonts = next_fonts;
         text_texture_cache.clear();
-        *line_height = fonts.primary().height().max(1) as usize;
         *ascent = fonts.primary().ascent();
         *cell_width = fonts.cell_width();
         fonts_changed = true;
     }
 
+    *line_height = effective_line_height(
+        fonts.primary().height(),
+        updated.line_height_multiplier,
+    ) as usize;
     *theme_settings = updated;
     Ok(fonts_changed)
 }
@@ -331,12 +334,16 @@ fn theme_runtime_settings(
         .and_then(|registry| registry.resolve_number(OPTION_EMOJI_FONT_SIZE))
         .map(|value| value.max(1.0).round() as u32)
         .unwrap_or(font_size);
+    let line_height_multiplier = theme_registry
+        .and_then(|registry| registry.resolve_number(OPTION_LINE_HEIGHT))
+        .map_or(1.0, |value| normalize_line_height_multiplier(value as f32));
     ThemeRuntimeSettings {
         font_request,
         emoji_font_request,
         font_size,
         emoji_font_size,
         display_scale: normalize_display_scale(display_scale),
+        line_height_multiplier,
         window_effects: current_window_effect_settings(theme_registry),
     }
 }
