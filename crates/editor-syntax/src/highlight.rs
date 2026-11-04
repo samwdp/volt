@@ -638,12 +638,17 @@ pub(crate) fn markdown_inline_line_indices(tree: &Tree) -> Vec<usize> {
 }
 
 pub(crate) fn collect_structure_nodes(root: tree_sitter::Node<'_>) -> Vec<SyntaxStructureNode> {
-    pub(crate) fn walk(node: tree_sitter::Node<'_>, out: &mut Vec<SyntaxStructureNode>) {
+    pub(crate) fn walk(
+        node: tree_sitter::Node<'_>,
+        field_name: Option<String>,
+        out: &mut Vec<SyntaxStructureNode>,
+    ) {
         if node.is_named() {
             let start = node.start_position();
             let end = node.end_position();
             out.push(SyntaxStructureNode {
                 kind: node.kind().to_owned(),
+                field_name,
                 start_byte: node.start_byte(),
                 end_byte: node.end_byte(),
                 start_position: SyntaxPoint::new(start.row, start.column),
@@ -651,13 +656,14 @@ pub(crate) fn collect_structure_nodes(root: tree_sitter::Node<'_>) -> Vec<Syntax
             });
         }
         let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, out);
+        for (index, child) in node.children(&mut cursor).enumerate() {
+            let child_field = node.field_name_for_child(index as u32).map(str::to_owned);
+            walk(child, child_field, out);
         }
     }
 
     let mut out = Vec::new();
-    walk(root, &mut out);
+    walk(root, None, &mut out);
     out
 }
 

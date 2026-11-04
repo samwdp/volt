@@ -17,7 +17,7 @@ fn trigger_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
         .cloned()
         .ok_or_else(|| "autocomplete registry service missing".to_owned())?;
     let lsp_client = runtime.services().get::<Arc<LspClientManager>>().cloned();
-    let request = {
+    let (root, token_map_key) = {
         let ui = shell_ui(runtime)?;
         let Some(buffer) = ui.buffer(buffer_id) else {
             return Ok(());
@@ -38,15 +38,17 @@ fn trigger_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
         {
             return Err(error);
         }
-        let token_map_key = ui.autocomplete_worker.token_map_key();
-        autocomplete_request_for_buffer(
-            runtime, buffer_id, buffer, root, &registry, lsp_client, true,
-        )
-        .map(|mut request| {
-            attach_token_count_edits(&mut request, &buffer.text, token_map_key);
-            request
-        })
+        (root, ui.autocomplete_worker.token_map_key())
     };
+    let request = autocomplete_request_for_buffer(
+        runtime, buffer_id, root, &registry, lsp_client, true,
+    )
+    .map(|mut request| {
+        if let Ok(buffer) = shell_buffer(runtime, buffer_id) {
+            attach_token_count_edits(&mut request, &buffer.text, token_map_key);
+        }
+        request
+    });
     let Some(request) = request else {
         shell_ui_mut(runtime)?.close_autocomplete();
         return Ok(());
@@ -368,6 +370,7 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
             .and_then(|autocomplete| {
                 autocomplete.selected().map(|entry| {
                     (
+                        entry.provider_id.clone(),
                         entry.replacement.clone(),
                         entry.replace_range,
                         entry.additional_text_edits.clone(),
@@ -377,11 +380,26 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
                 })
             })
     };
-    let Some((mut replacement, mut selected_range, mut additional_text_edits, resolve, query)) =
-        selected
+    let Some((
+        provider_id,
+        mut replacement,
+        mut selected_range,
+        mut additional_text_edits,
+        resolve,
+        query,
+    )) = selected
     else {
         return Ok(());
     };
+
+    if provider_id == AUTOCOMPLETE_SNIPPETS_PROVIDER {
+        return accept_snippet_autocomplete(
+            runtime,
+            replacement,
+            selected_range,
+            query,
+        );
+    }
 
     if let Some(payload) = resolve.as_ref()
         && let Some(lsp_client) = runtime.services().get::<Arc<LspClientManager>>().cloned()
@@ -415,6 +433,51 @@ fn accept_autocomplete(runtime: &mut EditorRuntime) -> Result<(), String> {
     });
     let replacement = normalize_completion_replacement(&snapshot, replace_range, &replacement);
     apply_completion_edits(buffer, replace_range, &replacement, &additional_text_edits);
+    Ok(())
+}
+
+fn accept_snippet_autocomplete(
+    runtime: &mut EditorRuntime,
+    replacement: String,
+    selected_range: Option<TextRange>,
+    query: AutocompleteQuery,
+) -> Result<(), String> {
+    if shell_ui(runtime)?.vim().multicursor.is_some() {
+        shell_ui_mut(runtime)?.close_autocomplete();
+        return Ok(());
+    }
+
+    let buffer_id = active_shell_buffer_id(runtime)?;
+    let stops = {
+        let ui = shell_ui_mut(runtime)?;
+        ui.close_autocomplete();
+        let Some(buffer) = ui.buffer_mut(buffer_id) else {
+            return Ok(());
+        };
+        if buffer.is_read_only() || buffer.has_input_field() {
+            return Ok(());
+        }
+        let snapshot = buffer.text.snapshot();
+        let replace_range = selected_range.unwrap_or_else(|| {
+            autocomplete_query(&snapshot, true)
+                .map(|live| live.replace_range)
+                .unwrap_or(query.replace_range)
+        });
+        let indent_prefix = line_prefix_before_point(&snapshot, replace_range.start());
+        let indented = indent_snippet_body(&replacement, &indent_prefix);
+        let (clean_text, stop_markers) = expand_snippet_template(&indented);
+        let base_byte = point_to_byte_offset(&buffer.text, replace_range.start());
+        apply_completion_edits(buffer, replace_range, &clean_text, &[]);
+        absolute_ranges_from_snippet_stops(&buffer.text, base_byte, &stop_markers)
+    };
+    if stops.is_empty() {
+        return Ok(());
+    }
+    shell_ui_mut(runtime)?.set_snippet(SnippetModeState {
+        buffer_id,
+        stops,
+        index: 0,
+    });
     Ok(())
 }
 

@@ -1816,6 +1816,7 @@ pub(super) fn buffer_autocomplete_request(
             items: Vec::new(),
             kind: AutocompleteProviderKind::Buffer,
         }],
+        snippet_items: Vec::new(),
         lsp_client: None,
         edits: None,
         token_edits_from,

@@ -286,6 +286,21 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
     )?;
     register_hook(
         runtime,
+        HOOK_SNIPPET_NEXT,
+        "Moves to the next Snippet Insert Point.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_SNIPPET_PREVIOUS,
+        "Moves to the previous Snippet Insert Point.",
+    )?;
+    register_hook(
+        runtime,
+        HOOK_SNIPPET_CANCEL,
+        "Leaves Snippet Mode and stays in Insert.",
+    )?;
+    register_hook(
+        runtime,
         HOOK_HOVER_TOGGLE,
         "Shows or closes the hover overlay at the cursor without focusing it.",
     )?;
@@ -2008,6 +2023,31 @@ fn register_shell_hooks(runtime: &mut EditorRuntime) -> Result<(), String> {
                 Ok(())
             },
         )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_SNIPPET_NEXT, "shell.snippet-next", |_, runtime| {
+            shell_ui_mut(runtime)?.snippet_next();
+            Ok(())
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(
+            HOOK_SNIPPET_PREVIOUS,
+            "shell.snippet-previous",
+            |_, runtime| {
+                shell_ui_mut(runtime)?.snippet_previous();
+                Ok(())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    runtime
+        .subscribe_hook(HOOK_SNIPPET_CANCEL, "shell.snippet-cancel", |_, runtime| {
+            let ui = shell_ui_mut(runtime)?;
+            ui.clear_snippet();
+            ui.vim_mut().visual_anchor = None;
+            ui.vim_mut().visual_anchor_char_offset = None;
+            Ok(())
+        })
         .map_err(|error| error.to_string())?;
     runtime
         .subscribe_hook(HOOK_HOVER_TOGGLE, "shell.hover-toggle", |_, runtime| {

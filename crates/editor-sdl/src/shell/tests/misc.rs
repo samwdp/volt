@@ -3232,6 +3232,7 @@ fn autocomplete_or_group_uses_first_provider_with_results() -> Result<(), String
                 kind: AutocompleteProviderKind::Buffer,
             },
         ],
+        snippet_items: Vec::new(),
         lsp_client: None,
         edits: None,
         token_edits_from: None,
@@ -3296,6 +3297,7 @@ fn autocomplete_entries_are_not_limited_by_visible_result_limit() -> Result<(), 
             items: Vec::new(),
             kind: AutocompleteProviderKind::Buffer,
         }],
+        snippet_items: Vec::new(),
         lsp_client: None,
         edits: None,
         token_edits_from: None,
@@ -3470,6 +3472,29 @@ fn autocomplete_query_allows_empty_member_access_after_dot_and_arrow() {
 }
 
 #[test]
+fn autocomplete_query_captures_triple_slash_snippet_trigger() {
+    let mut buffer = TextBuffer::from_text("    ///");
+    buffer.set_cursor(TextPoint::new(0, 7));
+    let query = autocomplete_query(&buffer.snapshot(), true)
+        .expect("triple-slash trigger should produce an autocomplete query");
+    assert_eq!(query.prefix, "///");
+    assert_eq!(query.token, "///");
+    assert_eq!(query.replace_range.start(), TextPoint::new(0, 4));
+    assert_eq!(query.replace_range.end(), TextPoint::new(0, 7));
+}
+
+#[test]
+fn autocomplete_query_opens_on_single_slash_while_typing() {
+    let mut buffer = TextBuffer::from_text("    /");
+    buffer.set_cursor(TextPoint::new(0, 5));
+    let query = autocomplete_query(&buffer.snapshot(), false)
+        .expect("typing `/` must produce a query so autocomplete opens without Ctrl+Space");
+    assert_eq!(query.prefix, "/");
+    assert_eq!(query.replace_range.start(), TextPoint::new(0, 4));
+    assert_eq!(query.replace_range.end(), TextPoint::new(0, 5));
+}
+
+#[test]
 fn normalize_completion_replacement_strips_duplicate_member_access_trigger() {
     let mut buffer = TextBuffer::from_text("foo.");
     buffer.set_cursor(TextPoint::new(0, 4));
@@ -3637,6 +3662,76 @@ fn accept_autocomplete_applies_additional_text_edits_and_keeps_cursor() -> Resul
         "using AssetFusion.Shared.Core.Services.DeviceCommands.Encoding;\nnamespace Demo;\n\nclass C {\n    AstraCommands\n}\n"
     );
     assert_eq!(buffer.cursor_point(), TextPoint::new(4, 17));
+    Ok(())
+}
+
+#[test]
+fn accept_snippets_provider_enters_snippet_mode_and_tab_advances() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    {
+        let buffer = active_shell_buffer_mut(&mut state.runtime)?;
+        buffer.text = TextBuffer::from_text("    snip");
+        buffer.set_cursor(TextPoint::new(0, 8));
+    }
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    shell_ui_mut(&mut state.runtime)?.enter_insert_mode();
+
+    let overlay = AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: "snip".to_owned(),
+            token: "snip".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(0, 4), TextPoint::new(0, 8)),
+        },
+        entries: vec![AutocompleteEntry {
+            provider_id: AUTOCOMPLETE_SNIPPETS_PROVIDER.to_owned(),
+            provider_label: "Snippets".to_owned(),
+            provider_icon: "S".to_owned(),
+            item_icon: "S".to_owned(),
+            label: "snip".to_owned(),
+            replacement: "hello $1 world $0".to_owned(),
+            replace_range: None,
+            detail: None,
+            kind_label: Some("Snippet".to_owned()),
+            documentation: None,
+            additional_text_edits: Vec::new(),
+            resolve: None,
+        }],
+        selected_index: 0,
+        loading: false,
+        docs_focused: false,
+        docs_scroll_offset: 0,
+    };
+    shell_ui_mut(&mut state.runtime)?.set_autocomplete(overlay);
+    accept_autocomplete(&mut state.runtime)?;
+
+    {
+        let ui = shell_ui(&state.runtime)?;
+        let snippet = ui
+            .snippet()
+            .ok_or_else(|| "snippet mode missing after accept".to_owned())?;
+        assert_eq!(snippet.stops.len(), 2);
+        assert_eq!(snippet.index, 0);
+    }
+    assert_eq!(
+        shell_buffer(&state.runtime, buffer_id)?.text.text(),
+        "    hello  world "
+    );
+
+    // Stops sorted by index: `$0` then `$1`. Accept lands on `$0`; Tab advances to `$1`.
+    assert!(shell_ui_mut(&mut state.runtime)?.snippet_next());
+    {
+        let ui = shell_ui(&state.runtime)?;
+        let snippet = ui
+            .snippet()
+            .ok_or_else(|| "snippet mode cleared early".to_owned())?;
+        assert_eq!(snippet.index, 1);
+    }
+    let modes = state
+        .overlay_minor_modes()
+        .map_err(|error| error.to_string())?;
+    assert!(modes.contains(&KeymapScope::Snippet));
     Ok(())
 }
 

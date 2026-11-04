@@ -422,6 +422,8 @@ pub struct SyntaxSnapshot {
 pub struct SyntaxStructureNode {
     /// Tree-sitter node kind.
     pub kind: String,
+    /// Field name on the parent, when this node is a named field child.
+    pub field_name: Option<String>,
     /// Start byte offset.
     pub start_byte: usize,
     /// End byte offset.

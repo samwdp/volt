@@ -350,6 +350,12 @@ impl ShellState {
         } else if ui.hover().is_some() {
             modes.push(KeymapScope::Hover);
         }
+        if let Some(snippet) = ui.snippet()
+            && matches!(ui.input_mode(), InputMode::Insert)
+            && ui.focused_buffer_id() == Some(snippet.buffer_id)
+        {
+            modes.push(KeymapScope::Snippet);
+        }
         if !modes.iter().any(|mode| {
             matches!(
                 mode,

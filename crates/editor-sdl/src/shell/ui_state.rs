@@ -448,6 +448,7 @@ enum AutocompleteProviderKind {
     Database,
     Lsp,
     Manual,
+    Snippets,
 }
 
 #[derive(Debug, Clone)]
@@ -960,6 +961,7 @@ pub(crate) struct ShellUiState {
     command_line: Option<CommandLineOverlay>,
     input_prompt: Option<InputPromptOverlay>,
     autocomplete: Option<AutocompleteOverlay>,
+    snippet: Option<SnippetModeState>,
     hover: Option<HoverOverlay>,
     notifications: NotificationCenter,
     workspace_unread: BTreeMap<WorkspaceId, u32>,
@@ -1051,6 +1053,7 @@ impl ShellUiState {
             command_line: None,
             input_prompt: None,
             autocomplete: None,
+            snippet: None,
             hover: None,
             notifications: NotificationCenter::default(),
             workspace_unread: BTreeMap::new(),
@@ -1448,6 +1451,7 @@ impl ShellUiState {
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.multicursor = None;
         self.vim.clear_transient();
+        self.clear_snippet();
         self.persist_active_buffer_vim_state();
         self.close_command_line();
         self.close_autocomplete();
@@ -1460,6 +1464,7 @@ impl ShellUiState {
         self.vim.visual_anchor_char_offset = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.clear_snippet();
         self.persist_active_buffer_vim_state();
         self.close_command_line();
         self.close_autocomplete();
@@ -1472,6 +1477,7 @@ impl ShellUiState {
         self.vim.visual_anchor_char_offset = None;
         self.vim.visual_kind = VisualSelectionKind::Character;
         self.vim.clear_transient();
+        self.clear_snippet();
         self.persist_active_buffer_vim_state();
         self.close_command_line();
         self.close_autocomplete();
@@ -1487,6 +1493,7 @@ impl ShellUiState {
             .and_then(|buffer| buffer.char_offset_for_point(anchor));
         self.vim.visual_kind = kind;
         self.vim.clear_transient();
+        self.clear_snippet();
         self.persist_active_buffer_vim_state();
         self.close_command_line();
         self.close_autocomplete();
@@ -2026,6 +2033,92 @@ impl ShellUiState {
 
     fn autocomplete_mut(&mut self) -> Option<&mut AutocompleteOverlay> {
         self.autocomplete.as_mut()
+    }
+
+    fn snippet(&self) -> Option<&SnippetModeState> {
+        self.snippet.as_ref()
+    }
+
+    fn clear_snippet(&mut self) {
+        self.snippet = None;
+    }
+
+    fn set_snippet(&mut self, state: SnippetModeState) {
+        self.snippet = Some(state);
+        self.apply_snippet_stop_cursor();
+    }
+
+    fn snippet_next(&mut self) -> bool {
+        self.clear_snippet_if_buffer_mismatch();
+        let Some(state) = self.snippet.as_mut() else {
+            return false;
+        };
+        if state.index.saturating_add(1) >= state.stops.len() {
+            self.clear_snippet();
+            self.vim.visual_anchor = None;
+            self.vim.visual_anchor_char_offset = None;
+            return true;
+        }
+        state.index = state.index.saturating_add(1);
+        self.apply_snippet_stop_cursor();
+        true
+    }
+
+    fn snippet_previous(&mut self) -> bool {
+        self.clear_snippet_if_buffer_mismatch();
+        let Some(state) = self.snippet.as_mut() else {
+            return false;
+        };
+        if state.index == 0 {
+            self.apply_snippet_stop_cursor();
+            return true;
+        }
+        state.index = state.index.saturating_sub(1);
+        self.apply_snippet_stop_cursor();
+        true
+    }
+
+    fn clear_snippet_if_buffer_mismatch(&mut self) {
+        let Some(state) = self.snippet.as_ref() else {
+            return;
+        };
+        if self.focused_buffer_id() != Some(state.buffer_id) {
+            self.clear_snippet();
+        }
+    }
+
+    fn apply_snippet_stop_cursor(&mut self) {
+        let (buffer_id, range) = {
+            let Some(state) = self.snippet.as_ref() else {
+                return;
+            };
+            let Some(range) = state.stops.get(state.index).copied() else {
+                self.clear_snippet();
+                return;
+            };
+            (state.buffer_id, range)
+        };
+        let char_offset = self
+            .buffer(buffer_id)
+            .and_then(|buffer| buffer.char_offset_for_point(range.start()));
+        {
+            let Some(buffer) = self.buffer_mut(buffer_id) else {
+                self.clear_snippet();
+                return;
+            };
+            if range.start() != range.end() {
+                buffer.set_cursor(range.end());
+            } else {
+                buffer.set_cursor(range.start());
+            }
+        }
+        if range.start() != range.end() {
+            self.vim.visual_anchor = Some(range.start());
+            self.vim.visual_anchor_char_offset = char_offset;
+        } else {
+            self.vim.visual_anchor = None;
+            self.vim.visual_anchor_char_offset = None;
+        }
     }
 
     fn set_autocomplete(&mut self, autocomplete: AutocompleteOverlay) {

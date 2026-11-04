@@ -1,6 +1,7 @@
 use crate::{
     calculator, db,
     icon_font::symbols::{cod, md},
+    snippets,
 };
 use editor_plugin_api::{
     AutocompleteProviderItem, LspCompletionKind, PluginAction, PluginCommand, PluginKeyBinding,
@@ -82,6 +83,7 @@ pub fn backends() -> Vec<AutocompleteProviderConfig> {
             LSP_ITEM_ICON,
         )
         .with_or_group(PROVIDER_SOURCE_GROUP),
+        snippets::autocomplete_provider(),
         AutocompleteProviderConfig::new(PROVIDER_DB, "Database", "DB", "DB")
             .with_or_group(PROVIDER_SOURCE_GROUP)
             .with_buffer_kind(db::QUERY_KIND),
@@ -258,8 +260,27 @@ mod tests {
                 provider.id
             );
             assert!(!provider.label.is_empty());
-            assert_eq!(provider.or_group.as_deref(), Some(PROVIDER_SOURCE_GROUP));
+            if provider.id == snippets::PROVIDER_ID {
+                assert!(provider.or_group.is_none());
+            } else {
+                assert_eq!(provider.or_group.as_deref(), Some(PROVIDER_SOURCE_GROUP));
+            }
         }
+
+        let snippets_provider = providers
+            .iter()
+            .find(|provider| provider.id == snippets::PROVIDER_ID)
+            .expect("snippets autocomplete provider should be exported");
+        assert!(snippets_provider.items.is_empty());
+        let lsp_index = providers
+            .iter()
+            .position(|provider| provider.id == PROVIDER_LSP)
+            .expect("lsp provider");
+        let snippets_index = providers
+            .iter()
+            .position(|provider| provider.id == snippets::PROVIDER_ID)
+            .expect("snippets provider");
+        assert!(snippets_index > lsp_index);
 
         let calculator = providers
             .iter()

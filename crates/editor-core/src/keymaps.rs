@@ -182,6 +182,8 @@ pub enum KeymapScope {
     AcpDock,
     /// Browser Dock Minor Mode (browser buffer/tab list focus).
     BrowserDock,
+    /// Snippet Mode: Insert Points active after accepting a Snippet.
+    Snippet,
 }
 
 impl fmt::Display for KeymapScope {
@@ -197,6 +199,7 @@ impl fmt::Display for KeymapScope {
             Self::Multicursor => formatter.write_str("multicursor"),
             Self::AcpDock => formatter.write_str("acp-dock"),
             Self::BrowserDock => formatter.write_str("browser-dock"),
+            Self::Snippet => formatter.write_str("snippet"),
         }
     }
 }

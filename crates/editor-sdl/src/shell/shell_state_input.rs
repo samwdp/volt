@@ -548,7 +548,7 @@ impl ShellState {
             .services()
             .get::<Arc<LspClientManager>>()
             .cloned();
-        let request = {
+        let (buffer_id, root, token_map_key) = {
             let ui = self.ui()?;
             let Some(buffer_id) = ui.active_buffer_id() else {
                 return Ok(());
@@ -569,21 +569,22 @@ impl ShellState {
             {
                 return Err(ShellError::Runtime(error));
             }
-            let token_map_key = ui.autocomplete_worker.token_map_key();
-            autocomplete_request_for_buffer(
-                &self.runtime,
-                buffer_id,
-                buffer,
-                root,
-                &registry,
-                lsp_client.clone(),
-                false,
-            )
-            .map(|mut request| {
-                attach_token_count_edits(&mut request, &buffer.text, token_map_key);
-                request
-            })
+            (buffer_id, root, ui.autocomplete_worker.token_map_key())
         };
+        let request = autocomplete_request_for_buffer(
+            &mut self.runtime,
+            buffer_id,
+            root,
+            &registry,
+            lsp_client.clone(),
+            false,
+        )
+        .map(|mut request| {
+            if let Ok(buffer) = shell_buffer(&self.runtime, buffer_id) {
+                attach_token_count_edits(&mut request, &buffer.text, token_map_key);
+            }
+            request
+        });
         let ui = self.ui_mut()?;
         match request {
             Some(request) => {

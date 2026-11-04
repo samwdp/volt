@@ -218,7 +218,7 @@ pub(super) fn oil_directory_line_spans(
     spans
 }
 
-fn oil_entry_theme_token(path: &Path, is_directory: bool) -> &'static str {
+pub(super) fn oil_entry_theme_token(path: &Path, is_directory: bool) -> &'static str {
     if is_directory {
         return oil_directory_theme_token(path);
     }

@@ -881,11 +881,7 @@ pub(crate) fn render_picker_overlay(
                 content_left,
                 row_y,
                 fringe,
-                if selected {
-                    foreground
-                } else {
-                    list_foreground
-                },
+                picker_fringe_color(theme_registry, matched.item().id(), list_foreground),
             )?;
         }
         let label = truncate_picker_label(
@@ -1022,6 +1018,36 @@ fn picker_scroll_top(match_count: usize, selected_index: usize, visible_rows: us
     selected_index
         .saturating_sub(visible_rows.saturating_sub(1))
         .min(match_count - visible_rows)
+}
+
+fn picker_fringe_path_for_color(item_id: &str) -> Option<&Path> {
+    if item_id.is_empty() {
+        return None;
+    }
+    // Workspace Files / ACP rows use absolute or relative filesystem paths as ids.
+    // Skip command-like ids (`workspace.files`) that are not paths.
+    if !(Path::new(item_id).is_absolute()
+        || item_id.contains('/')
+        || item_id.contains('\\'))
+    {
+        return None;
+    }
+    Some(Path::new(item_id))
+}
+
+fn picker_fringe_color(
+    theme_registry: Option<&ThemeRegistry>,
+    item_id: &str,
+    fallback: Color,
+) -> Color {
+    let Some(path) = picker_fringe_path_for_color(item_id) else {
+        return fallback;
+    };
+    theme_color(
+        theme_registry,
+        oil_entry_theme_token(path, false),
+        fallback,
+    )
 }
 
 fn picker_fringe_width_chars(matches: &[editor_picker::PickerMatch]) -> usize {

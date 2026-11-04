@@ -6,6 +6,7 @@ mod language;
 mod query;
 mod rainbow_paren;
 mod registry;
+mod vsnip_highlight;
 
 pub use language::*;
 pub use query::*;
@@ -14,6 +15,7 @@ pub use rainbow_paren::{
     apply_rainbow_delimiter_spans_for_buffer, depth_theme_token,
 };
 pub use registry::*;
+pub use vsnip_highlight::{highlight_vsnip, path_is_vsnip};
 
 #[cfg(test)]
 mod tests;

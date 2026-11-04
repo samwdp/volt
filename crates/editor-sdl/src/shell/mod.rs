@@ -101,7 +101,9 @@ use crate::window_effects::{
     WindowEffects, apply_window_effects, configure_window_opacity_driver,
     current_window_effect_settings, update_window_effects, window_creation_flags,
 };
-use editor_buffer::{TextBuffer, TextEdit, TextPoint, TextRange, TextSnapshot, WordKind};
+use editor_buffer::{
+    HighlightDocument, TextBuffer, TextEdit, TextPoint, TextRange, TextSnapshot, WordKind,
+};
 use editor_core::{
     Buffer, BufferId, BufferKind, CommandSource, CycleDirection, EditorRuntime, HookEvent,
     KeySequenceOptions, KeySequencePush, KeySequenceTick, KeymapScope, KeymapVimMode, MarkList,
@@ -156,8 +158,9 @@ use editor_plugin_api::{
     PickerProjectContext, PickerProviderContext, PickerProviderSpec, PickerSource,
     PickerSyntaxLanguageContext, PickerThemeContext, PickerTruncateStrategy, PickerUndoTreeContext,
     PickerWorkspaceContext, PickerWorkspaceFileContext, PluginBufferLayout, PluginBufferLayoutAxis,
-    PluginBufferLayoutNode, PluginBufferSectionUpdate, PluginBufferSections, StatuslineSpan,
-    VimEditAction, WorkspaceDockSide,
+    PluginBufferLayoutNode, PluginBufferSectionUpdate, PluginBufferSections,
+    SnippetAutocompleteContext, SnippetStructureNode, StatuslineSpan, VimEditAction,
+    WorkspaceDockSide,
     abi::{
         AbiDirectoryEntry, AbiGhostTextContext, AbiGitStatusPrefix, AbiStatuslineContext,
         UserLibraryModuleRef,
@@ -165,7 +168,7 @@ use editor_plugin_api::{
     autocomplete_hooks, browser_hooks, buffer_kinds, dap_hooks, db_hooks, decode_modeline,
     flatten_modeline_text, flatten_modeline_to_spans, git_actions, git_hooks, git_sections,
     help_hooks, hover_hooks, image_hooks, input_hooks, lsp_hooks, oil_hooks, oil_protocol,
-    pdf_hooks, plugin_hooks, resolve_git_dirs, terminal_hooks,
+    pdf_hooks, plugin_hooks, resolve_git_dirs, snippet_hooks, terminal_hooks,
 };
 use editor_plugin_host::{
     NullUserLibrary, StatuslineContext as HostStatuslineContext, UserLibrary,
@@ -179,7 +182,8 @@ use editor_render::{
 };
 use editor_syntax::{
     HighlightWindow, LanguageConfiguration, SyntaxError, SyntaxParseSession, SyntaxRegistry,
-    SyntaxSnapshot, apply_rainbow_delimiter_spans_for_buffer,
+    SyntaxSnapshot, SyntaxStructureNode, apply_rainbow_delimiter_spans_for_buffer, highlight_vsnip,
+    path_is_vsnip,
 };
 use editor_terminal::{
     LiveTerminalConfig, LiveTerminalSession, TerminalKey, TerminalNormalMotion,
@@ -240,6 +244,7 @@ include!("hooks.rs");
 include!("dap_commands.rs");
 include!("lsp_commands.rs");
 include!("overlay_commands.rs");
+include!("snippet_mode.rs");
 include!("buffer_access.rs");
 include!("vim_search.rs");
 include!("workers_autocomplete.rs");

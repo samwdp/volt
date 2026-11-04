@@ -198,6 +198,12 @@ fn compute_buffer_syntax(
     syntax_window: Option<SyntaxLineWindow>,
     parse_session: &mut Option<SyntaxParseSession>,
 ) -> (Option<String>, Option<Result<SyntaxSnapshot, SyntaxError>>) {
+    // `.vsnip` uses rule-based highlighting (no tree-sitter grammar install).
+    if path.is_some_and(path_is_vsnip) || buffer_language_id == Some("vsnip") {
+        *parse_session = None;
+        return (Some("vsnip".to_owned()), Some(Ok(highlight_vsnip(text))));
+    }
+
     let highlight_window = syntax_window.map(SyntaxLineWindow::to_highlight_window);
     let language_id = path
         .and_then(|path| {

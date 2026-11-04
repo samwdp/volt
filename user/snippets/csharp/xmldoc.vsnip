@@ -1,0 +1,15 @@
+name: csharp-xmldoc
+trigger: ///
+target: next method_declaration
+each params:
+  path: parameter/name
+  line: /// <param name="${name}">$${i}</param>
+maybe returns:
+  path: returns
+  line: /// <returns>$${i}</returns>
+body:
+  /// <summary>
+  /// $0
+  /// </summary>
+  ${params}
+  ${returns}

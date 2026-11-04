@@ -27,12 +27,44 @@ A project root path recorded in the Mark List for quick jump. List order matters
 _Avoid_: favorite, bookmark, pin, starred workspace
 
 **Minor Mode**:
-A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, Workspace Dock, ACP Dock, autocomplete, hover, DAP Mode, and Multicursor Mode are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
+A keybinding layer that overrides Global bindings while it is active. Workspace editing, Popup, Workspace Dock, ACP Dock, autocomplete, hover, DAP Mode, Multicursor Mode, and Snippet Mode are Minor Modes. Global bindings are the fallback when no active Minor Mode claims the chord.
 _Avoid_: keymap scope (as the spoken product term), major mode (unless introduced later)
 
 **Multicursor Mode**:
 The Minor Mode active while linked multicursors exist on the focused buffer. While it is active, chords such as `n`/`p` add next/previous matches instead of search-repeat/paste. Started by `g n` / `g N`; cleared on Normal-mode exit.
 _Avoid_: multi-cursor minor mode (as the spoken product name)
+
+**Snippet Mode**:
+The Minor Mode entered from Insert when a Snippet is accepted. While it is active, chords such as Tab / Shift+Tab move among Insert Points. Tab past the last Insert Point leaves Snippet Mode and returns to Insert. Snippet Mode is only entered from Insert.
+_Avoid_: snippet session (as the spoken product term), placeholder mode
+
+**Insert Point**:
+A numbered stop inside an expanded Snippet (`$0`, `$1`, …) that Snippet Mode visits in numeric order. `$0` is the first landing after accept; Tab advances; Tab past the highest number leaves Snippet Mode.
+_Avoid_: tabstop (as the spoken product term), placeholder (when meaning these stops)
+
+**Autocomplete Provider**:
+A named completion source registered from the User Library (for example LSP, buffer, calculator, or Snippets). The shell merges provider items into the autocomplete overlay by list order and or-group rules: providers in the same or-group compete (first with results wins); a provider with no or-group always merges.
+_Avoid_: completion backend (as the spoken product term), LSP-only completion
+
+**Snippet**:
+A template that expands to buffer text plus Insert Points, optionally filled from tree-sitter captures on a target node. Offered through an Autocomplete Provider; accepting it inserts the expansion and enters Snippet Mode.
+_Avoid_: autocomplete item (when meaning the template itself), macro
+
+**Snippet Definition**:
+One Snippet authored in a Snippet File under `user/snippets/<language_id>/`. Static text, Insert Points, target/capture rules, and projection formats live here—not in host crates. One Snippet File holds one Snippet Definition.
+_Avoid_: snippet script, snippet config (as the spoken product term)
+
+**Snippet Target**:
+The syntax node chosen for a Snippet expansion from the cursor using a relation (`next` or `enclosing`) plus a node kind (for example `method_declaration`). When present, Snippet Projections fill from that node; when absent, the Snippet is still offered from a matching trigger with projection holes omitted.
+_Avoid_: match node (as the spoken product term), AST root
+
+**Snippet Projection**:
+A rule that turns captures under the Snippet Target into body lines: `each` repeats once per match; `maybe` emits zero or one time (for example omit `void` / missing returns).
+_Avoid_: formatter (as the spoken product term), macro expansion
+
+**Snippet File**:
+A `.vsnip` file under `user/snippets/<language_id>/` that holds Snippet Definitions. Bound to language id `vsnip`: rule-based highlighting (no tree-sitter grammar) and authoring Autocomplete Provider items for DSL fields.
+_Avoid_: snippet module (when meaning the on-disk file)
 
 **Popup**:
 The horizontal overlay that holds pickers, Command Stream, terminal, and similar buffers. Distinct from Workspace Dock.

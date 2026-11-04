@@ -116,6 +116,20 @@ pub mod hover_hooks {
     pub const PREVIOUS: &str = "ui.hover.previous";
 }
 
+/// Hook name constants for Snippet Mode.
+pub mod snippet_hooks {
+    pub const NEXT: &str = "ui.snippet.next";
+    pub const PREVIOUS: &str = "ui.snippet.previous";
+    pub const CANCEL: &str = "ui.snippet.cancel";
+}
+
+/// Evaluator handler id for Snippet autocomplete items (JSON in / JSON out).
+///
+/// `UserLibraryModule` is at the abi_stable prefix-field limit, so this crosses the
+/// host/user boundary via [`UserLibrary::run_plugin_buffer_evaluator`] (same pattern as
+/// section handlers).
+pub const SNIPPET_AUTOCOMPLETE_HANDLER: &str = "snippet:autocomplete_items";
+
 /// Hook name constants for picker UI.
 pub mod picker_hooks {
     pub const OPEN: &str = "ui.picker.open";
@@ -912,6 +926,40 @@ pub struct GhostTextContext<'a> {
     pub cursor_line: usize,
     /// Zero-based cursor column.
     pub cursor_column: usize,
+}
+
+/// Flat syntax node used for Snippet Target / path capture walks.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnippetStructureNode {
+    /// Tree-sitter node kind.
+    pub kind: String,
+    /// Field name on the parent, when this node is a named field child.
+    pub field_name: Option<String>,
+    /// Start byte offset in the buffer.
+    pub start_byte: usize,
+    /// End byte offset in the buffer.
+    pub end_byte: usize,
+}
+
+/// Context passed when the host asks the User Library for Snippet autocomplete items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnippetAutocompleteContext<'a> {
+    /// Active buffer language identifier.
+    pub language_id: &'a str,
+    /// Token / prefix before the cursor used for trigger matching.
+    pub prefix: &'a str,
+    /// Cursor byte offset in `buffer_text` (0 may mean “derive from line/column”).
+    pub cursor_byte: usize,
+    /// Zero-based cursor line.
+    pub cursor_line: usize,
+    /// Zero-based cursor column.
+    pub cursor_column: usize,
+    /// Complete buffer text.
+    pub buffer_text: &'a str,
+    /// Flat structure nodes for the buffer (host-provided).
+    pub nodes: &'a [SnippetStructureNode],
+    /// When true, Snippet items must not be offered (no Snippet Mode under Multicursor).
+    pub multicursor_active: bool,
 }
 
 /// One ghost-text annotation rendered on a specific buffer line.
@@ -2196,6 +2244,31 @@ pub trait UserLibrary: Send + Sync {
     fn ghost_text_lines(&self, _context: &GhostTextContext<'_>) -> Vec<GhostTextLine> {
         Vec::new()
     }
+    /// Returns Snippet Autocomplete Provider items for the current buffer context.
+    ///
+    /// Default path uses the evaluator JSON protocol (`SNIPPET_AUTOCOMPLETE_HANDLER`) because
+    /// `UserLibraryModule` cannot grow another ABI prefix field.
+    fn snippet_autocomplete_items(
+        &self,
+        context: &SnippetAutocompleteContext<'_>,
+    ) -> Vec<AutocompleteProviderItem> {
+        let Ok(payload) =
+            serde_json::to_string(&SnippetAutocompleteContextJson::from_context(context))
+        else {
+            return Vec::new();
+        };
+        let lines = self.run_plugin_buffer_evaluator(SNIPPET_AUTOCOMPLETE_HANDLER, &payload);
+        let joined = lines.join("\n");
+        let trimmed = joined.trim();
+        if trimmed.is_empty() || trimmed == "null" {
+            return Vec::new();
+        }
+        serde_json::from_str::<Vec<SnippetAutocompleteItemJson>>(trimmed)
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
         format!(
             " {} | {}:{} ",
@@ -3181,6 +3254,67 @@ pub struct AutocompleteProviderItem {
     pub documentation: Option<String>,
 }
 
+/// JSON mirror of [`SnippetAutocompleteContext`] for the evaluator protocol.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnippetAutocompleteContextJson {
+    pub language_id: String,
+    pub prefix: String,
+    pub cursor_byte: usize,
+    pub cursor_line: usize,
+    pub cursor_column: usize,
+    pub buffer_text: String,
+    pub nodes: Vec<SnippetStructureNode>,
+    pub multicursor_active: bool,
+}
+
+impl SnippetAutocompleteContextJson {
+    pub fn from_context(context: &SnippetAutocompleteContext<'_>) -> Self {
+        Self {
+            language_id: context.language_id.to_owned(),
+            prefix: context.prefix.to_owned(),
+            cursor_byte: context.cursor_byte,
+            cursor_line: context.cursor_line,
+            cursor_column: context.cursor_column,
+            buffer_text: context.buffer_text.to_owned(),
+            nodes: context.nodes.to_vec(),
+            multicursor_active: context.multicursor_active,
+        }
+    }
+}
+
+/// JSON mirror of [`AutocompleteProviderItem`] for Snippet autocomplete responses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SnippetAutocompleteItemJson {
+    pub label: String,
+    pub replacement: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub documentation: Option<String>,
+}
+
+impl From<AutocompleteProviderItem> for SnippetAutocompleteItemJson {
+    fn from(value: AutocompleteProviderItem) -> Self {
+        Self {
+            label: value.label,
+            replacement: value.replacement,
+            detail: value.detail,
+            documentation: value.documentation,
+        }
+    }
+}
+
+impl From<SnippetAutocompleteItemJson> for AutocompleteProviderItem {
+    fn from(value: SnippetAutocompleteItemJson) -> Self {
+        Self {
+            label: value.label,
+            replacement: value.replacement,
+            detail: value.detail,
+            documentation: value.documentation,
+        }
+    }
+}
+
 /// Hover provider configuration exported by the user library.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverProvider {
@@ -3363,6 +3497,8 @@ pub enum PluginKeymapScope {
     AcpDock,
     /// Browser Dock Minor Mode (browser buffer/tab list focus).
     BrowserDock,
+    /// Snippet Mode: Insert Points active after accepting a Snippet.
+    Snippet,
 }
 
 /// Modal Vim state that can activate a keybinding.

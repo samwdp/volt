@@ -81,6 +81,8 @@ pub mod picker;
 pub mod rainbow_parens;
 /// Emacs-style matching delimiter and HTML/XML tag highlighting.
 pub mod show_paren;
+/// Snippet Definitions (`.vsnip`) Builtin Plugin and Autocomplete Provider.
+pub mod snippets;
 /// Compatibility alias for [`modeline`].
 pub mod statusline;
 /// Builtin terminal package surface.
@@ -149,6 +151,7 @@ pub fn packages() -> Vec<PluginPackage> {
         picker::package(),
         rainbow_parens::package(),
         show_paren::package(),
+        snippets::package(),
         treesitter::package(),
         undotree::package(),
         workspace::package(),
@@ -209,14 +212,15 @@ pub fn themes() -> Vec<Theme> {
 pub struct UserLibraryImpl;
 
 use editor_plugin_api::{
-    AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, BrowserFeatureSpec,
-    ContextHelpSpec, DbBrowserContext, DbBrowserItemSpec, DbFeatureSpec, GhostTextContext,
-    GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, KeymapConfig, LigatureConfig,
-    MarkdownPrettyConfig, ModelineSegment, OilDefaults, OilFeatureSpec, OilKeyAction,
-    OilKeybindings, PaneConfig, PickerItemSpec, PickerProviderContext, PickerProviderSpec,
-    RainbowParensConfig, ShowParenConfig, StatuslineContext, StatuslineSpan, TerminalConfig,
-    TerminalFeatureSpec, UserLibrary, WorkspaceDockConfig, WorkspaceRoot,
-    flatten_modeline_to_spans,
+    AcpClient, AcpPickerContext, AcpPickerItemSpec, AutocompleteProvider, AutocompleteProviderItem,
+    BrowserFeatureSpec, ContextHelpSpec, DbBrowserContext, DbBrowserItemSpec, DbFeatureSpec,
+    GhostTextContext, GhostTextLine, GitFeatureSpec, GitStatusPrefix, HoverProvider, KeymapConfig,
+    LigatureConfig, MarkdownPrettyConfig, ModelineSegment, OilDefaults, OilFeatureSpec,
+    OilKeyAction, OilKeybindings, PaneConfig, PickerItemSpec, PickerProviderContext,
+    PickerProviderSpec, RainbowParensConfig, SNIPPET_AUTOCOMPLETE_HANDLER, ShowParenConfig,
+    SnippetAutocompleteContext, SnippetAutocompleteContextJson, SnippetAutocompleteItemJson,
+    StatuslineContext, StatuslineSpan, TerminalConfig, TerminalFeatureSpec, UserLibrary,
+    WorkspaceDockConfig, WorkspaceRoot, flatten_modeline_to_spans,
 };
 
 fn user_modeline_context<'a>(context: &StatuslineContext<'a>) -> modeline::ModelineContext<'a> {
@@ -536,6 +540,13 @@ impl UserLibrary for UserLibraryImpl {
         treesittercontext_headerline::headerline_lines(context)
     }
 
+    fn snippet_autocomplete_items(
+        &self,
+        context: &SnippetAutocompleteContext<'_>,
+    ) -> Vec<AutocompleteProviderItem> {
+        snippets::autocomplete_items(context)
+    }
+
     fn statusline_render(&self, context: &StatuslineContext<'_>) -> String {
         modeline::compose(&user_modeline_context(context))
     }
@@ -606,6 +617,26 @@ impl UserLibrary for UserLibraryImpl {
             return vec![
                 serde_json::to_string(&result.to_json()).unwrap_or_else(|_| "null".to_owned()),
             ];
+        }
+        if handler == SNIPPET_AUTOCOMPLETE_HANDLER {
+            let Ok(json) = serde_json::from_str::<SnippetAutocompleteContextJson>(input) else {
+                return vec!["[]".to_owned()];
+            };
+            let context = editor_plugin_api::SnippetAutocompleteContext {
+                language_id: json.language_id.as_str(),
+                prefix: json.prefix.as_str(),
+                cursor_byte: json.cursor_byte,
+                cursor_line: json.cursor_line,
+                cursor_column: json.cursor_column,
+                buffer_text: json.buffer_text.as_str(),
+                nodes: &json.nodes,
+                multicursor_active: json.multicursor_active,
+            };
+            let items = snippets::autocomplete_items(&context)
+                .into_iter()
+                .map(SnippetAutocompleteItemJson::from)
+                .collect::<Vec<_>>();
+            return vec![serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned())];
         }
         match handler {
             calculator::EVALUATE_HANDLER => calculator::evaluate(input),

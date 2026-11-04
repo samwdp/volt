@@ -221,6 +221,32 @@ fn picker_preview_layout_fills_available_height_with_file_lines() {
 }
 
 #[test]
+fn picker_fringe_path_for_color_accepts_filesystem_paths_only() {
+    assert!(picker_fringe_path_for_color(r"P:\volt\src\main.rs").is_some());
+    assert!(picker_fringe_path_for_color("src/main.rs").is_some());
+    assert!(picker_fringe_path_for_color(r"src\main.rs").is_some());
+    assert!(picker_fringe_path_for_color("workspace.files").is_none());
+    assert!(picker_fringe_path_for_color("").is_none());
+}
+
+#[test]
+fn picker_fringe_color_uses_oil_filetype_token() {
+    let rust = picker_fringe_color(None, r"P:\volt\src\main.rs", Color::RGB(1, 2, 3));
+    let lock = picker_fringe_color(None, r"P:\volt\Cargo.lock", Color::RGB(1, 2, 3));
+    // Without a theme registry both fall back, but path classification still runs.
+    assert_eq!(rust, Color::RGB(1, 2, 3));
+    assert_eq!(lock, Color::RGB(1, 2, 3));
+    assert_eq!(
+        oil_entry_theme_token(Path::new(r"P:\volt\src\main.rs"), false),
+        "oil.file.code"
+    );
+    assert_eq!(
+        oil_entry_theme_token(Path::new(r"P:\volt\Cargo.lock"), false),
+        "oil.file.lock"
+    );
+}
+
+#[test]
 fn picker_preview_layout_honors_split_fraction() {
     let middle =
         picker_preview_layout(Some("preview"), 0, 900, 0, 300, 20, 0.5).expect("middle split");

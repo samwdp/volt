@@ -867,7 +867,10 @@ fn deferred_roslyn_code_action_keeps_resolve_payload() {
     assert!(actions[0].document_edits().is_empty());
     assert!(actions[0].needs_resolve());
     assert_eq!(
-        actions[0].raw_item().get("data").and_then(|data| data.get("CustomTags")),
+        actions[0]
+            .raw_item()
+            .get("data")
+            .and_then(|data| data.get("CustomTags")),
         Some(&json!(["CodeActionId=0"]))
     );
 

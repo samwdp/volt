@@ -807,9 +807,9 @@ pub(super) fn lsp_code_action_picker_preview(code_action: &LspCodeAction) -> Opt
                 "Apply {edit_count} text edit{edit_suffix} across {file_count} file{file_suffix}.{command_suffix}"
             ))
         }
-        Err(_) if code_action.needs_resolve() => Some(
-            "Resolve deferred edits from the language server, then apply them.".to_owned(),
-        ),
+        Err(_) if code_action.needs_resolve() => {
+            Some("Resolve deferred edits from the language server, then apply them.".to_owned())
+        }
         Err(message) => Some(message),
     }
 }

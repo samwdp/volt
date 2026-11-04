@@ -18,6 +18,7 @@ struct AutocompleteBufferRequest {
     cursor: TextPoint,
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
+    snippet_items: Vec<editor_plugin_api::AutocompleteProviderItem>,
     lsp_client: Option<Arc<LspClientManager>>,
     edits: Option<Vec<TextEdit>>,
     token_edits_from: Option<u64>,
@@ -345,6 +346,7 @@ struct AutocompleteWorkerRequest {
     cursor: TextPoint,
     query: AutocompleteQuery,
     providers: Vec<AutocompleteProviderSpec>,
+    snippet_items: Vec<editor_plugin_api::AutocompleteProviderItem>,
     lsp_client: Option<Arc<LspClientManager>>,
     edits: Option<Vec<TextEdit>>,
     token_edits_from: Option<u64>,
@@ -441,6 +443,7 @@ impl AutocompleteWorkerState {
                 cursor: request.cursor,
                 query: request.query,
                 providers: request.providers,
+                snippet_items: request.snippet_items,
                 lsp_client: request.lsp_client,
                 edits: request.edits,
                 token_edits_from: request.token_edits_from,
@@ -516,6 +519,11 @@ fn autocomplete_entries(
             AutocompleteProviderKind::Manual => {
                 manual_autocomplete_entries(&request.plugin_kind, &request.query, provider)
             }
+            AutocompleteProviderKind::Snippets => snippet_autocomplete_entries(
+                &request.snippet_items,
+                &request.query,
+                provider,
+            ),
         };
         if !entries.is_empty()
             && let Some(group) = provider.or_group.as_ref()
@@ -732,6 +740,49 @@ fn manual_autocomplete_entries(
         .collect()
 }
 
+fn snippet_autocomplete_entries(
+    snippet_items: &[editor_plugin_api::AutocompleteProviderItem],
+    query: &AutocompleteQuery,
+    provider: &AutocompleteProviderSpec,
+) -> Vec<(AutocompleteEntry, i64)> {
+    let prefix_lower = query.prefix.to_ascii_lowercase();
+    snippet_items
+        .iter()
+        .filter_map(|item| {
+            // Code Snippets match on trigger (detail). `.vsnip` authoring items match on label.
+            let trigger_lower = item
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let label_lower = item.label.to_ascii_lowercase();
+            if !prefix_lower.is_empty()
+                && !trigger_lower.starts_with(&prefix_lower)
+                && !label_lower.starts_with(&prefix_lower)
+            {
+                return None;
+            }
+            Some((
+                AutocompleteEntry {
+                    provider_id: provider.id.clone(),
+                    provider_label: provider.label.clone(),
+                    provider_icon: provider.icon.clone(),
+                    item_icon: provider.item_icon.clone(),
+                    label: item.label.clone(),
+                    replacement: item.replacement.clone(),
+                    replace_range: None,
+                    detail: item.detail.clone(),
+                    kind_label: Some("Snippet".to_owned()),
+                    documentation: item.documentation.clone(),
+                    additional_text_edits: Vec::new(),
+                    resolve: None,
+                },
+                autocomplete_score(&item.label, 1, query) + 90,
+            ))
+        })
+        .collect()
+}
+
 fn db_autocomplete_entries(
     plugin_kind: &Option<String>,
     candidates: &[DbAutocompleteCandidate],
@@ -786,6 +837,10 @@ fn autocomplete_score(token: &str, frequency: usize, query: &AutocompleteQuery) 
         - token.chars().count() as i64
 }
 
+fn is_snippet_trigger_char(character: char) -> bool {
+    matches!(character, '/' | '#' | '!')
+}
+
 fn autocomplete_query(snapshot: &TextSnapshot, allow_empty: bool) -> Option<AutocompleteQuery> {
     let cursor = snapshot.cursor();
     let line = snapshot.line(cursor.line)?;
@@ -795,9 +850,21 @@ fn autocomplete_query(snapshot: &TextSnapshot, allow_empty: bool) -> Option<Auto
     while start > 0 && is_completion_word_char(characters[start - 1]) {
         start -= 1;
     }
+    // Snippet triggers like `///` are punctuation, not word chars. Without this walk,
+    // Ctrl+Space after `///` yields an empty prefix and Snippet items never match.
+    if start == cursor_col {
+        while start > 0 && is_snippet_trigger_char(characters[start - 1]) {
+            start -= 1;
+        }
+    }
     let mut end = cursor_col;
     while end < characters.len() && is_completion_word_char(characters[end]) {
         end += 1;
+    }
+    if end == cursor_col {
+        while end < characters.len() && is_snippet_trigger_char(characters[end]) {
+            end += 1;
+        }
     }
     let allow_empty = allow_empty || is_member_access_completion_point(&characters, cursor_col);
     if !allow_empty && start == cursor_col && end == cursor_col {
@@ -980,9 +1047,8 @@ fn hover_signature_skip_generic_arguments(
 }
 
 fn autocomplete_request_for_buffer(
-    runtime: &EditorRuntime,
+    runtime: &mut EditorRuntime,
     buffer_id: BufferId,
-    buffer: &ShellBuffer,
     root: Option<PathBuf>,
     registry: &AutocompleteRegistry,
     lsp_client: Option<Arc<LspClientManager>>,
@@ -991,29 +1057,138 @@ fn autocomplete_request_for_buffer(
     if registry.providers.is_empty() {
         return None;
     }
-    let db_candidates = runtime_db_candidates_for_buffer(runtime, buffer_id, buffer);
-    let text = buffer.text.snapshot();
-    let query = autocomplete_query(&text, allow_empty_query)?;
-    Some(AutocompleteBufferRequest {
-        buffer_id,
-        buffer_revision: buffer.text.revision(),
+    let needs_snippets = registry
+        .providers
+        .iter()
+        .any(|provider| provider.kind == AutocompleteProviderKind::Snippets);
+    let (
+        buffer_revision,
         text,
-        plugin_kind: match &buffer.kind {
-            BufferKind::Plugin(kind) => Some(kind.clone()),
-            _ => None,
-        },
+        plugin_kind,
         db_candidates,
-        path: buffer.lsp_path().map(Path::to_path_buf),
-        root,
-        cursor: buffer.cursor_point(),
+        path,
+        cursor,
         query,
-        providers: registry.providers.clone(),
-        lsp_client: lsp_client.clone(),
-        edits: lsp_client.as_ref().and_then(|client| {
+        edits,
+        language_id,
+        multicursor_active,
+        highlight_doc,
+        buffer_text,
+        cursor_byte,
+    ) = {
+        let ui = shell_ui(runtime).ok()?;
+        let buffer = ui.buffer(buffer_id)?;
+        let db_candidates = runtime_db_candidates_for_buffer(runtime, buffer_id, buffer);
+        let text = buffer.text.snapshot();
+        let query = autocomplete_query(&text, allow_empty_query)?;
+        let edits = lsp_client.as_ref().and_then(|client| {
             buffer
                 .lsp_path()
                 .and_then(|path| lsp_edits_since_last_sync(client, path, &buffer.text))
-        }),
+        });
+        let language_id = buffer.language_id().map(str::to_owned);
+        let path = buffer.lsp_path().map(Path::to_path_buf);
+        let multicursor_active = ui.vim().multicursor.is_some();
+        let cursor = buffer.cursor_point();
+        let cursor_byte = if needs_snippets {
+            point_to_byte_offset(&buffer.text, cursor)
+        } else {
+            0
+        };
+        let highlight_doc = needs_snippets
+            .then(|| HighlightDocument::from_buffer(&buffer.text, buffer.text.revision()));
+        let buffer_text = needs_snippets.then(|| text.text());
+        (
+            buffer.text.revision(),
+            text,
+            match &buffer.kind {
+                BufferKind::Plugin(kind) => Some(kind.clone()),
+                _ => None,
+            },
+            db_candidates,
+            path,
+            cursor,
+            query,
+            edits,
+            language_id,
+            multicursor_active,
+            highlight_doc,
+            buffer_text,
+            cursor_byte,
+        )
+    };
+
+    let snippet_items = if needs_snippets {
+        let resolved_language_id = language_id.clone().or_else(|| {
+            let path = path.as_deref()?;
+            if path_is_vsnip(path) {
+                return Some("vsnip".to_owned());
+            }
+            let extension = path.extension()?.to_str()?;
+            runtime
+                .services()
+                .get::<SyntaxRegistry>()
+                .and_then(|syntax| {
+                    syntax
+                        .language_for_extension(extension)
+                        .map(|config| config.id().to_owned())
+                })
+        });
+        match (resolved_language_id.as_deref(), buffer_text.as_deref()) {
+            (Some(language_id), Some(buffer_text)) => {
+                let nodes = match highlight_doc.as_ref() {
+                    Some(highlight_doc) => runtime
+                        .services_mut()
+                        .get_mut::<SyntaxRegistry>()
+                        .and_then(|syntax| {
+                            syntax
+                                .structure_nodes_for_language(language_id, highlight_doc)
+                                .ok()
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|node: SyntaxStructureNode| SnippetStructureNode {
+                            kind: node.kind,
+                            field_name: node.field_name,
+                            start_byte: node.start_byte,
+                            end_byte: node.end_byte,
+                        })
+                        .collect::<Vec<_>>(),
+                    None => Vec::new(),
+                };
+                shell_user_library(runtime).snippet_autocomplete_items(
+                    &SnippetAutocompleteContext {
+                        language_id,
+                        prefix: &query.prefix,
+                        cursor_byte,
+                        cursor_line: cursor.line,
+                        cursor_column: cursor.column,
+                        buffer_text,
+                        nodes: &nodes,
+                        multicursor_active,
+                    },
+                )
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    Some(AutocompleteBufferRequest {
+        buffer_id,
+        buffer_revision,
+        text,
+        plugin_kind,
+        db_candidates,
+        path,
+        root,
+        cursor,
+        query,
+        providers: registry.providers.clone(),
+        snippet_items,
+        lsp_client: lsp_client.clone(),
+        edits,
         token_edits_from: None,
         token_edits: None,
     })

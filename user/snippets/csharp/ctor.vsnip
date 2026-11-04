@@ -1,0 +1,11 @@
+name: csharp-ctor
+trigger: ctor
+target: enclosing class_declaration
+maybe classname:
+  path: name
+  line: ${name}
+body:
+public ${classname}($0)
+{
+$1
+}

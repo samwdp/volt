@@ -372,6 +372,7 @@ fn map_scope(scope: PluginKeymapScope) -> KeymapScope {
         PluginKeymapScope::Multicursor => KeymapScope::Multicursor,
         PluginKeymapScope::AcpDock => KeymapScope::AcpDock,
         PluginKeymapScope::BrowserDock => KeymapScope::BrowserDock,
+        PluginKeymapScope::Snippet => KeymapScope::Snippet,
     }
 }
 
