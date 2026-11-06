@@ -420,6 +420,22 @@ pub(super) fn render_text_panel(
     } else if line_count == 0 {
         draw_text(target, body_x, body_y, "", muted)?;
     }
+    let max_scroll = line_count.saturating_sub(pane_layout.visible_rows.max(1));
+    if max_scroll > 0 {
+        paint_buffer_scrollbar(
+            target,
+            ScrollbarPaint {
+                pane_rect: rect,
+                body_y,
+                visible_rows: pane_layout.visible_rows.max(1),
+                line_height: line_height.max(1),
+                scroll_row,
+                max_scroll,
+                color: muted,
+                window_effects,
+            },
+        )?;
+    }
     Ok(())
 }
 
@@ -575,7 +591,11 @@ pub(super) fn acp_pane_body_visible_rows(rect_height: u32, line_height: i32) -> 
     let line_height = line_height.max(1);
     let header_height = (line_height + 10).max(line_height);
     let body_height = rect_height as i32 - header_height - 4;
-    (body_height.max(line_height) / line_height).max(1) as usize
+    if body_height < line_height {
+        0
+    } else {
+        (body_height / line_height) as usize
+    }
 }
 
 pub(super) fn acp_buffer_layout(
@@ -603,9 +623,12 @@ pub(super) fn acp_buffer_layout(
         .unwrap_or(footer_line_count)
         .max(footer_line_count);
     let input_chrome = input_panel_chrome_height();
-    let footer_chrome = text_panel_chrome_height("", line_height);
+    let footer_title = acp_footer_title(state);
+    let footer_chrome = text_panel_chrome_height(footer_title, line_height);
     let plan_chrome = text_panel_chrome_height("Plan", line_height);
     let output_chrome = text_panel_chrome_height("Output", line_height);
+    let plan_content_rows = acp_pane_content_rows(&state.plan_pane, wrap_cols);
+    let plan_target_rows = plan_content_rows.min(10);
     let total_height = layout.pane_bottom.saturating_sub(layout.body_y).max(
         plan_chrome + output_chrome + input_chrome + footer_chrome + gap * 3 + line_height * 4,
     );
@@ -631,8 +654,12 @@ pub(super) fn acp_buffer_layout(
     let total_row_budget = ((top_height - plan_chrome - output_chrome).max(line_height * 2)
         / line_height)
         .max(2) as usize;
-    let plan_target_rows = acp_pane_content_rows(&state.plan_pane, wrap_cols).clamp(1, 10);
-    let plan_rows = plan_target_rows.min(total_row_budget.saturating_sub(1).max(1));
+    // Empty plan collapses to chrome-only (0 body rows); content still capped at 10.
+    let plan_rows = if plan_target_rows == 0 {
+        0
+    } else {
+        plan_target_rows.min(total_row_budget.saturating_sub(1).max(1))
+    };
     let output_rows = total_row_budget.saturating_sub(plan_rows).max(1);
     let used_top_height = plan_chrome
         + output_chrome
@@ -649,12 +676,13 @@ pub(super) fn acp_buffer_layout(
     Some(AcpBufferLayout {
         plan: AcpPaneLayout {
             rect: Rect::new(panel_x, layout.body_y, panel_width, plan_height as u32),
-            visible_rows: acp_pane_body_visible_rows(plan_height as u32, line_height),
+            // Use budget rows directly so chrome-only empty plans stay at 0.
+            visible_rows: plan_rows,
             wrap_cols,
         },
         output: AcpPaneLayout {
             rect: Rect::new(panel_x, output_y, panel_width, output_height as u32),
-            visible_rows: acp_pane_body_visible_rows(output_height as u32, line_height),
+            visible_rows: acp_pane_body_visible_rows(output_height as u32, line_height).max(1),
             wrap_cols,
         },
         input: TextPaneLayout {
@@ -817,6 +845,8 @@ pub(super) fn render_acp_buffer_body(
             line_height,
         },
     )?;
+    let footer_title = acp_footer_title(state);
+    let footer_header_height = text_panel_header_height(footer_title, line_height.max(1));
     let footer_logo = state
         .client_logo
         .as_deref()
@@ -830,6 +860,7 @@ pub(super) fn render_acp_buffer_body(
                 line_height,
                 logo,
                 8,
+                footer_header_height,
             );
             dest.width() as i32 + 10
         })
@@ -844,7 +875,7 @@ pub(super) fn render_acp_buffer_body(
                 .then_some(state.footer_pane.cursor()),
             pane_active: active && active_pane == AcpPane::Footer,
             pane_layout: acp_layout.footer,
-            title: "",
+            title: footer_title,
             visual_selection: if active_pane == AcpPane::Footer {
                 visual_selection
             } else {
@@ -883,6 +914,7 @@ pub(super) fn render_acp_buffer_body(
             line_height,
             logo,
             8,
+            footer_header_height,
         );
         super::acp::draw_acp_logo(target, logo, dest)?;
     }

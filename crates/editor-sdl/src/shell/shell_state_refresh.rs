@@ -396,6 +396,7 @@ impl ShellState {
             notification_revision: ui.notification_revision(),
             notification_deadline: ui.notification_deadline(now),
             yank_flash_until: ui.yank_flash_deadline(now),
+            picker_loading_frame: picker::picker_loading_animation_frame(ui.picker()),
         })
     }
 }

@@ -234,9 +234,20 @@ pub(super) fn render_workspace_dock(
         .saturating_sub(cell_width.max(1) * 2 + card_inset * 2)
         / cell_width.max(1))
     .max(4) as usize;
-    for (index, entry) in entries.iter().enumerate() {
-        let card_y = layout.dock_rect.y + index as i32 * card_height;
-        if card_y >= layout.dock_rect.y + layout.dock_rect.height as i32 {
+    let dock_bottom = layout.dock_rect.y + layout.dock_rect.height as i32;
+    for (painted, entry) in entries.iter().enumerate() {
+        let card_y = layout.dock_rect.y + painted as i32 * card_height;
+        if card_y + card_height > dock_bottom {
+            let remaining = entries.len().saturating_sub(painted);
+            if remaining > 0 {
+                draw_text(
+                    target,
+                    text_x,
+                    dock_bottom.saturating_sub(line_height.max(1)),
+                    &format!("+{remaining} more"),
+                    muted,
+                )?;
+            }
             break;
         }
         let card_rect = PixelRectToRect::rect(
@@ -290,7 +301,16 @@ pub(super) fn render_workspace_dock(
                 accent,
                 window_effects,
             )?;
-            draw_text(target, badge_x + 3, badge_y + 1, &label, dock_background)?;
+            let label_x = badge_x
+                + ((badge_size as i32 - label.chars().count() as i32 * cell_width.max(1)) / 2)
+                    .max(1);
+            let label_y = badge_y + ((badge_size as i32 - line_height.max(1)) / 2).max(0) + 1;
+            let badge_fg = theme_color(
+                theme_registry,
+                "ui.workspace-dock.badge.foreground",
+                foreground,
+            );
+            draw_text(target, label_x, label_y, &label, badge_fg)?;
         }
         let separator_y = card_y + card_height - 1;
         if separator_y < layout.dock_rect.y + layout.dock_rect.height as i32 {

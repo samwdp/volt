@@ -4,7 +4,6 @@ use editor_dap::{BreakpointState, DapVariableRow, StoredBreakpoint};
 
 use super::*;
 
-pub(super) const DAP_WATCHES_HEADER: &str = "Watch Expressions";
 pub(super) const DAP_VAR_EXPANDED_GLYPH: &str = "▾";
 pub(super) const DAP_VAR_COLLAPSED_GLYPH: &str = "▸";
 
@@ -12,7 +11,6 @@ pub(super) const TOKEN_DEBUG_BREAKPOINT_PATH: &str = "debug.breakpoint.path";
 pub(super) const TOKEN_DEBUG_BREAKPOINT_LINE: &str = "debug.breakpoint.line";
 pub(super) const TOKEN_DEBUG_BREAKPOINT_EXTRA: &str = "debug.breakpoint.extra";
 pub(super) const TOKEN_DEBUG_BREAKPOINT_EMPTY: &str = "debug.breakpoint.empty";
-pub(super) const TOKEN_DEBUG_VARIABLE_HEADER: &str = "debug.variable.header";
 pub(super) const TOKEN_DEBUG_VARIABLE_CHEVRON: &str = "debug.variable.chevron";
 pub(super) const TOKEN_DEBUG_VARIABLE_NAME: &str = "debug.variable.name";
 pub(super) const TOKEN_DEBUG_VARIABLE_VALUE: &str = "debug.variable.value";
@@ -21,9 +19,9 @@ pub(super) const TOKEN_DEBUG_VARIABLE_ERROR: &str = "debug.variable.error";
 pub(super) const TOKEN_DEBUG_VARIABLE_WATCH: &str = "debug.variable.watch";
 pub(super) const TOKEN_DEBUG_VARIABLE_EMPTY: &str = "debug.variable.empty";
 
-const EMPTY_BREAKPOINTS: &str = "No Breakpoints in this Workspace.";
-const EMPTY_LOCALS: &str = "No locals";
-const EMPTY_WATCHES: &str = "No watches";
+const EMPTY_BREAKPOINTS: &str = "No Breakpoints in this Workspace. (Space t b to toggle)";
+const EMPTY_LOCALS: &str = "No locals.";
+const EMPTY_WATCHES: &str = "No watches — insert a line or run dap.expressions-add";
 const NOT_STOPPED_SUFFIX: &str = "(not stopped)";
 
 pub(super) fn format_dap_breakpoint_line(bp: &StoredBreakpoint, root: Option<&Path>) -> String {
@@ -114,34 +112,13 @@ pub(super) fn format_dap_variable_row(row: &DapVariableRow) -> String {
     }
 }
 
-pub(super) fn dap_locals_section_lines(
-    local_rows: &[DapVariableRow],
-    watch_rows: &[DapVariableRow],
-    idle_watches: &[String],
-    stopped: bool,
-) -> Vec<String> {
-    let mut lines = Vec::new();
+/// Adapter Locals only. Watch Expressions live in the Expressions section.
+pub(super) fn dap_locals_section_lines(local_rows: &[DapVariableRow]) -> Vec<String> {
     if local_rows.is_empty() {
-        lines.push(EMPTY_LOCALS.to_owned());
+        vec![EMPTY_LOCALS.to_owned()]
     } else {
-        lines.extend(local_rows.iter().map(format_dap_variable_row));
+        local_rows.iter().map(format_dap_variable_row).collect()
     }
-    lines.push(DAP_WATCHES_HEADER.to_owned());
-    if stopped {
-        if watch_rows.is_empty() {
-            return lines;
-        }
-        lines.extend(watch_rows.iter().map(format_dap_variable_row));
-    } else if idle_watches.is_empty() {
-        return lines;
-    } else {
-        lines.extend(
-            idle_watches
-                .iter()
-                .map(|expression| format!("{expression}: {NOT_STOPPED_SUFFIX}")),
-        );
-    }
-    lines
 }
 
 pub(super) fn dap_expression_section_lines(
@@ -166,63 +143,33 @@ pub(super) fn dap_expression_section_lines(
 }
 
 pub(super) fn dap_variable_syntax_lines(lines: &[String], force_watch: bool) -> IndexedSyntaxLines {
-    let header_index = lines.iter().position(|line| line == DAP_WATCHES_HEADER);
     lines
         .iter()
         .enumerate()
         .filter_map(|(index, line)| {
-            let watches = force_watch || header_index.is_some_and(|header| index >= header);
-            let spans = dap_variable_line_spans(line, watches);
+            let spans = dap_variable_line_spans(line, force_watch);
             (!spans.is_empty()).then_some((index, spans))
         })
         .collect()
 }
 
 pub(super) fn extract_watch_expressions(lines: &[String]) -> Vec<String> {
-    let Some(header_index) = lines.iter().position(|line| line == DAP_WATCHES_HEADER) else {
-        return Vec::new();
-    };
     lines
         .iter()
-        .skip(header_index + 1)
         .filter_map(|line| parse_dap_watch_line(line))
         .collect()
 }
 
 pub(super) fn locals_line_variable_kind(
-    lines: &[String],
     line_index: usize,
     local_row_count: usize,
-    watch_row_count: usize,
-) -> Option<DapLocalsLineTarget> {
-    let Some(header_index) = lines.iter().position(|line| line == DAP_WATCHES_HEADER) else {
-        if local_row_count == 0 {
-            return None;
-        }
-        return (line_index < local_row_count).then_some(DapLocalsLineTarget::Local(line_index));
-    };
-    if line_index < header_index {
-        if local_row_count == 0 {
-            return None;
-        }
-        return (line_index < local_row_count).then_some(DapLocalsLineTarget::Local(line_index));
-    }
-    if line_index == header_index {
-        return None;
-    }
-    let watch_index = line_index.saturating_sub(header_index + 1);
-    (watch_index < watch_row_count).then_some(DapLocalsLineTarget::Watch(watch_index))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DapLocalsLineTarget {
-    Local(usize),
-    Watch(usize),
+) -> Option<usize> {
+    (local_row_count > 0 && line_index < local_row_count).then_some(line_index)
 }
 
 fn parse_dap_watch_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed == DAP_WATCHES_HEADER || trimmed == EMPTY_WATCHES {
+    if trimmed.is_empty() || trimmed == EMPTY_WATCHES {
         return None;
     }
     let stripped = trimmed
@@ -328,10 +275,6 @@ fn dap_breakpoint_line_spans(line: &str, state: BreakpointState) -> Vec<LineSynt
 
 fn dap_variable_line_spans(line: &str, watch_section: bool) -> Vec<LineSyntaxSpan> {
     let mut spans = Vec::new();
-    if line == DAP_WATCHES_HEADER {
-        push_span_bytes(&mut spans, line, 0, line.len(), TOKEN_DEBUG_VARIABLE_HEADER);
-        return spans;
-    }
     if line == EMPTY_LOCALS || line == EMPTY_WATCHES {
         push_span_bytes(&mut spans, line, 0, line.len(), TOKEN_DEBUG_VARIABLE_EMPTY);
         return spans;

@@ -313,6 +313,7 @@ pub(super) fn notification_status_text(notification: &ShellNotification) -> Opti
     }
 }
 
+#[cfg(test)]
 pub(super) fn notification_overlay_layouts(
     notifications: &[&ShellNotification],
     width: u32,
@@ -320,13 +321,31 @@ pub(super) fn notification_overlay_layouts(
     cell_width: i32,
     line_height: i32,
 ) -> Vec<NotificationOverlayLayout> {
+    notification_overlay_layouts_inset(
+        notifications,
+        width,
+        height,
+        cell_width,
+        line_height,
+        0,
+    )
+}
+
+pub(super) fn notification_overlay_layouts_inset(
+    notifications: &[&ShellNotification],
+    width: u32,
+    height: u32,
+    cell_width: i32,
+    line_height: i32,
+    right_inset: u32,
+) -> Vec<NotificationOverlayLayout> {
     if notifications.is_empty() {
         return Vec::new();
     }
     let row_height = line_height.max(1) as u32;
     let toast_width = overlay_width(width, cell_width, 34, 56);
     let body_columns = overlay_text_columns(toast_width, 28, cell_width);
-    let x = width as i32 - toast_width as i32 - 12;
+    let x = width as i32 - toast_width as i32 - 12 - right_inset as i32;
     let mut layouts = Vec::new();
     let mut bottom = height as i32 - 12;
     for notification in notifications {
@@ -358,6 +377,7 @@ pub(super) fn notification_overlay_layouts(
     layouts
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn notification_action_at_point(
     state: &ShellUiState,
     width: u32,
@@ -366,18 +386,26 @@ pub(super) fn notification_action_at_point(
     line_height: i32,
     now: Instant,
     point: (i32, i32),
+    right_inset: u32,
 ) -> Option<NotificationAction> {
     let (x, y) = point;
     let notifications = state.visible_notifications(now);
-    notification_overlay_layouts(&notifications, width, height, cell_width, line_height)
-        .into_iter()
-        .find(|layout| {
-            let rect = layout.rect;
-            let right = rect.x().saturating_add(rect.width() as i32);
-            let bottom = rect.y().saturating_add(rect.height() as i32);
-            x >= rect.x() && y >= rect.y() && x < right && y < bottom
-        })
-        .and_then(|layout| layout.action)
+    notification_overlay_layouts_inset(
+        &notifications,
+        width,
+        height,
+        cell_width,
+        line_height,
+        right_inset,
+    )
+    .into_iter()
+    .find(|layout| {
+        let rect = layout.rect;
+        let right = rect.x().saturating_add(rect.width() as i32);
+        let bottom = rect.y().saturating_add(rect.height() as i32);
+        x >= rect.x() && y >= rect.y() && x < right && y < bottom
+    })
+    .and_then(|layout| layout.action)
 }
 
 pub(super) fn render_notification_overlay(
@@ -387,6 +415,7 @@ pub(super) fn render_notification_overlay(
     theme_registry: Option<&ThemeRegistry>,
     metrics: CellMetrics,
     now: Instant,
+    right_inset: u32,
 ) -> Result<(), ShellError> {
     let WindowSize { width, height } = size;
     let CellMetrics {
@@ -394,8 +423,14 @@ pub(super) fn render_notification_overlay(
         line_height,
     } = metrics;
     let notifications = state.visible_notifications(now);
-    let layouts =
-        notification_overlay_layouts(&notifications, width, height, cell_width, line_height);
+    let layouts = notification_overlay_layouts_inset(
+        &notifications,
+        width,
+        height,
+        cell_width,
+        line_height,
+        right_inset,
+    );
     if layouts.is_empty() {
         return Ok(());
     }

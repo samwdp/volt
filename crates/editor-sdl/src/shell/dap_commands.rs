@@ -1447,7 +1447,7 @@ fn dap_locals_insert_in_progress(
     Ok(buffer
         .plugin_active_section_name()
         .unwrap_or(DAP_LOCALS_SECTION)
-        == DAP_LOCALS_SECTION)
+        == DAP_EXPRESSIONS_SECTION)
 }
 
 fn set_named_plugin_section_lines(
@@ -1486,7 +1486,7 @@ fn dap_locals_and_expression_lines(
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let Some(dap_client) = runtime.services().get::<Arc<DapClientManager>>() else {
         return Ok((
-            dap_locals_section_lines(&[], &[], &[], false),
+            dap_locals_section_lines(&[]),
             dap_expression_section_lines(&[], &[], false),
         ));
     };
@@ -1498,14 +1498,14 @@ fn dap_locals_and_expression_lines(
         .map_err(|error| error.to_string())?
     else {
         return Ok((
-            dap_locals_section_lines(&[], &[], &idle_watches, false),
+            dap_locals_section_lines(&[]),
             dap_expression_section_lines(&[], &idle_watches, false),
         ));
     };
     let local_rows = snapshot.local_rows();
     let watch_rows = snapshot.watch_rows();
     Ok((
-        dap_locals_section_lines(&local_rows, &watch_rows, &idle_watches, true),
+        dap_locals_section_lines(&local_rows),
         dap_expression_section_lines(&watch_rows, &idle_watches, true),
     ))
 }
@@ -1522,7 +1522,7 @@ fn apply_dap_locals_edits(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
         if buffer
             .plugin_active_section_name()
             .unwrap_or(DAP_LOCALS_SECTION)
-            != DAP_LOCALS_SECTION
+            != DAP_EXPRESSIONS_SECTION
         {
             return Ok(());
         }
@@ -1530,15 +1530,14 @@ fn apply_dap_locals_edits(runtime: &mut EditorRuntime, buffer_id: BufferId) -> R
             .model()
             .active_workspace_id()
             .map_err(|error| error.to_string())?;
-        let lines: Vec<String> = (0..buffer.text.line_count())
-            .filter_map(|line_index| buffer.text.line(line_index))
+        let Some(pane) = buffer.plugin_attached_pane_state() else {
+            return Ok(());
+        };
+        let lines: Vec<String> = (0..pane.line_count())
+            .map(|line_index| pane.text.line(line_index).unwrap_or_default())
             .collect();
         (workspace_id, lines)
     };
-    if !lines.iter().any(|line| line == DAP_WATCHES_HEADER) {
-        refresh_dap_locals_buffer(runtime, workspace_id)?;
-        return Ok(());
-    }
     let Some(dap_client) = runtime.services().get::<Arc<DapClientManager>>() else {
         return Ok(());
     };
@@ -1554,7 +1553,7 @@ fn dap_toggle_variable(runtime: &mut EditorRuntime) -> Result<(), String> {
         .active_workspace_id()
         .map_err(|error| error.to_string())?;
     let buffer_id = active_shell_buffer_id(runtime)?;
-    let (section, line_index, lines) = {
+    let (section, line_index) = {
         let buffer = shell_buffer(runtime, buffer_id)?;
         match &buffer.kind {
             BufferKind::Plugin(kind) if kind == DAP_LOCALS_KIND => {}
@@ -1570,10 +1569,7 @@ fn dap_toggle_variable(runtime: &mut EditorRuntime) -> Result<(), String> {
             .plugin_attached_pane_state()
             .map(|pane| pane.cursor().line)
             .unwrap_or_else(|| buffer.cursor_row());
-        let lines: Vec<String> = (0..buffer.text.line_count())
-            .filter_map(|index| buffer.text.line(index))
-            .collect();
-        (section, line_index, lines)
+        (section, line_index)
     };
     let dap_client = dap_client_manager(runtime)?;
     let Some(snapshot) = dap_client
@@ -1587,11 +1583,8 @@ fn dap_toggle_variable(runtime: &mut EditorRuntime) -> Result<(), String> {
     let row = if section == DAP_EXPRESSIONS_SECTION {
         watch_rows.get(line_index)
     } else {
-        match locals_line_variable_kind(&lines, line_index, local_rows.len(), watch_rows.len()) {
-            Some(DapLocalsLineTarget::Local(index)) => local_rows.get(index),
-            Some(DapLocalsLineTarget::Watch(index)) => watch_rows.get(index),
-            None => return Ok(()),
-        }
+        locals_line_variable_kind(line_index, local_rows.len())
+            .and_then(|index| local_rows.get(index))
     };
     let Some(row) = row else {
         return Ok(());
@@ -1854,7 +1847,7 @@ fn open_dap_repl(runtime: &mut EditorRuntime) -> Result<(), String> {
         runtime,
         workspace_id,
         DAP_REPL_BUFFER_NAME,
-        Some("DAP REPL"),
+        Some("DAP REPL (dap.repl)"),
     )?;
     {
         let ui = shell_ui_mut(runtime)?;
@@ -1866,7 +1859,7 @@ fn open_dap_repl(runtime: &mut EditorRuntime) -> Result<(), String> {
                 .map(|line| line.is_empty() || line.starts_with('('))
                 .unwrap_or(true)
         {
-            buffer.replace_with_lines_follow_output(vec!["(debug REPL)".to_owned(), String::new()]);
+            buffer.replace_with_lines_follow_output(vec!["(dap.repl)".to_owned(), String::new()]);
         }
         ui.focus_buffer_in_active_pane(buffer_id);
         ui.enter_normal_mode();
@@ -1875,7 +1868,7 @@ fn open_dap_repl(runtime: &mut EditorRuntime) -> Result<(), String> {
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    let overlay = InputPromptOverlay::new(DAP_REPL_PROMPT_ID, "DAP REPL: ", "");
+    let overlay = InputPromptOverlay::new(DAP_REPL_PROMPT_ID, "dap.repl: ", "");
     shell_ui_mut(runtime)?.open_input_prompt(overlay);
     Ok(())
 }
@@ -1896,7 +1889,7 @@ fn submit_dap_repl_expression(runtime: &mut EditorRuntime, expression: &str) -> 
         runtime,
         workspace_id,
         DAP_REPL_BUFFER_NAME,
-        Some("DAP REPL"),
+        Some("DAP REPL (dap.repl)"),
     )?;
     {
         let ui = shell_ui_mut(runtime)?;
@@ -1923,7 +1916,7 @@ fn submit_dap_repl_expression(runtime: &mut EditorRuntime, expression: &str) -> 
         .model_mut()
         .focus_buffer(workspace_id, buffer_id)
         .map_err(|error| error.to_string())?;
-    let overlay = InputPromptOverlay::new(DAP_REPL_PROMPT_ID, "DAP REPL: ", "");
+    let overlay = InputPromptOverlay::new(DAP_REPL_PROMPT_ID, "dap.repl: ", "");
     shell_ui_mut(runtime)?.open_input_prompt(overlay);
     Ok(())
 }

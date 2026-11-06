@@ -363,8 +363,8 @@ fn dap_locals_and_watches_expand_structured_variables() -> Result<(), String> {
         plugin_section_lines(locals, DAP_LOCALS_SECTION)?.join("\n")
     };
     assert!(
-        locals_text.contains(DAP_WATCHES_HEADER),
-        "Locals section must keep Watch Expressions header: {locals_text}"
+        !locals_text.contains("Watch Expressions"),
+        "Locals section must not embed Watch Expressions: {locals_text}"
     );
     assert!(
         locals_text.contains(&format!("{DAP_VAR_EXPANDED_GLYPH} person:")),
@@ -406,7 +406,7 @@ fn dap_locals_and_watches_expand_structured_variables() -> Result<(), String> {
 }
 
 #[test]
-fn dap_locals_insert_watch_expression_evaluates_while_stopped() -> Result<(), String> {
+fn dap_expressions_insert_watch_expression_evaluates_while_stopped() -> Result<(), String> {
     let mut state = state_with_user_library()?;
     let root = unique_temp_dir("dap-insert-watch");
     let workspace = open_workspace_from_project(&mut state.runtime, "dbg", &root)?;
@@ -432,16 +432,11 @@ fn dap_locals_insert_watch_expression_evaluates_while_stopped() -> Result<(), St
     let buffer_id = active_shell_buffer_id(&state.runtime)?;
     {
         let buffer = active_shell_buffer_mut(&mut state.runtime)?;
-        buffer.plugin_focus_section_named(DAP_LOCALS_SECTION);
-        let mut lines: Vec<String> = (0..buffer.line_count())
-            .filter_map(|index| buffer.text.line(index))
-            .collect();
-        let header = lines
-            .iter()
-            .position(|line| line == DAP_WATCHES_HEADER)
-            .ok_or_else(|| format!("Watch Expressions header missing: {lines:?}"))?;
-        lines.insert(header + 1, "x".to_owned());
-        buffer.replace_with_lines_preserve_view(lines);
+        buffer.plugin_focus_section_named(DAP_EXPRESSIONS_SECTION);
+        let pane = buffer
+            .plugin_attached_pane_state_mut()
+            .ok_or_else(|| "Expressions pane missing".to_owned())?;
+        pane.replace_lines(vec!["x".to_owned()], false);
     }
     apply_dap_locals_edits(&mut state.runtime, buffer_id)?;
 
@@ -450,12 +445,12 @@ fn dap_locals_insert_watch_expression_evaluates_while_stopped() -> Result<(), St
         plugin_section_lines(locals, DAP_LOCALS_SECTION)?.join("\n")
     };
     assert!(
-        locals_text.contains(DAP_WATCHES_HEADER),
-        "header must remain: {locals_text}"
+        !locals_text.contains("Watch Expressions"),
+        "Locals must stay adapter-only: {locals_text}"
     );
     assert!(
-        locals_text.lines().any(|line| line.contains("x@")),
-        "inserted Watch Expression must evaluate while stopped: {locals_text}"
+        !locals_text.lines().any(|line| line.contains("x@")),
+        "inserted watch must not appear in Locals: {locals_text}"
     );
     let watch_text = {
         let locals = shell_buffer(&state.runtime, buffer_id)?;
@@ -463,7 +458,7 @@ fn dap_locals_insert_watch_expression_evaluates_while_stopped() -> Result<(), St
     };
     assert!(
         watch_text.contains("x@"),
-        "Expressions section must mirror the new watch: {watch_text}"
+        "Expressions section must show the new watch: {watch_text}"
     );
 
     stop_dap_for_active_workspace(&mut state.runtime)?;
@@ -598,8 +593,8 @@ fn dap_mode_function_keys_continue_and_step() -> Result<(), String> {
     let toggle = state
         .runtime
         .keymaps()
-        .resolve_with_minor_modes(&[KeymapScope::Workspace], KeymapVimMode::Any, "Space d a")
-        .ok_or_else(|| "expected <leader> da".to_owned())?;
+        .resolve_with_minor_modes(&[KeymapScope::Workspace], KeymapVimMode::Any, "Space t b")
+        .ok_or_else(|| "expected <leader> tb".to_owned())?;
     assert_eq!(toggle.command_name(), "dap.toggle-breakpoint");
 
     stop_dap_for_active_workspace(&mut state.runtime)?;
@@ -636,12 +631,14 @@ fn dap_watches_eval_repl_switch_and_breakpoint_extras() -> Result<(), String> {
     let workspace_id = workspace.get();
     let (locals, expressions) = dap_locals_and_expression_lines(&state.runtime, workspace_id)?;
     assert!(
-        locals.iter().any(|line| line == DAP_WATCHES_HEADER),
-        "locals must keep Watch Expressions header: {locals:?}"
+        !locals.iter().any(|line| line.contains("Watch Expressions")),
+        "locals must not embed Watch Expressions: {locals:?}"
     );
     assert!(
-        locals.iter().any(|line| line.contains("x")),
-        "locals rows: {locals:?}"
+        !locals
+            .iter()
+            .any(|line| line.contains("x@") || line.starts_with("x:")),
+        "watch must not appear in Locals rows: {locals:?}"
     );
     assert!(
         expressions.iter().any(|line| line.contains("x:")),

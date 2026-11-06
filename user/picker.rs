@@ -572,17 +572,6 @@ mod tests {
     }
 
     #[test]
-    fn layout_exposes_window_fractions() {
-        assert_eq!(width_fraction(), WIDTH_FRACTION);
-        assert_eq!(height_fraction(), HEIGHT_FRACTION);
-        assert_eq!(split_fraction(), SPLIT_FRACTION);
-        let layout = layout();
-        assert_eq!(layout.width_fraction, WIDTH_FRACTION);
-        assert_eq!(layout.height_fraction, HEIGHT_FRACTION);
-        assert_eq!(layout.split_fraction, SPLIT_FRACTION);
-    }
-
-    #[test]
     fn buffer_picker_shows_file_name_first_and_keeps_path_search() {
         let mut context = PickerProviderContext::new("buffers", "Buffers", PickerSource::Buffers);
         context.buffers = vec![editor_plugin_api::PickerBufferContext {

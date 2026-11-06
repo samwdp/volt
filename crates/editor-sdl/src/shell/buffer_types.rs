@@ -121,6 +121,8 @@ struct PluginTextPaneState {
 #[derive(Debug, Clone)]
 struct AcpBufferState {
     session_title: Option<String>,
+    /// Display name for the connected ACP client (footer title fallback).
+    client_label: String,
     /// Bundled asset path relative to `assets/` for the connected client logo.
     client_logo: Option<String>,
     active_pane: AcpPane,
@@ -484,11 +486,11 @@ impl AcpSubagentState {
 
 impl AcpBufferState {
     fn new(client_label: String, client_logo: Option<String>) -> Self {
-        let _ = client_label;
         let mut input = InputField::new("> ");
         input.set_placeholder(Some(ACP_INPUT_PLACEHOLDER.to_owned()));
         Self {
             session_title: None,
+            client_label,
             client_logo,
             active_pane: AcpPane::Output,
             plan_entries: Vec::new(),
@@ -727,7 +729,8 @@ impl AcpPaneState {
     }
 
     fn visible_rows(&self) -> usize {
-        self.viewport_rows.max(1)
+        // 0 is valid for chrome-only panes (empty ACP Plan).
+        self.viewport_rows
     }
 
     fn wrap_cols(&self) -> usize {
@@ -739,7 +742,7 @@ impl AcpPaneState {
     }
 
     fn set_view_metrics(&mut self, visible_rows: usize, wrap_cols: usize) {
-        self.viewport_rows = visible_rows.max(1);
+        self.viewport_rows = visible_rows;
         self.wrap_cols = wrap_cols.max(1);
         self.scroll_visual_row = self
             .scroll_visual_row
@@ -1143,6 +1146,19 @@ fn acp_pane_content_rows(pane: &AcpPaneState, wrap_cols: usize) -> usize {
         .iter()
         .map(|line| acp_rendered_line_row_count(line, wrap_cols))
         .sum()
+}
+
+fn acp_footer_title(state: &AcpBufferState) -> &str {
+    if let Some(title) = state
+        .session_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        title
+    } else {
+        state.client_label.trim()
+    }
 }
 
 fn acp_text_segment(text: impl Into<String>, role: AcpColorRole) -> AcpRenderedSegment {

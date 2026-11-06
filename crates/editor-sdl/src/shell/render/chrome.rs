@@ -213,19 +213,19 @@ pub(super) fn render_runtime_popup_overlay(
             popup_background,
             window_effects,
         )?;
+        fill_window_surface_rounded_rect(
+            target,
+            PixelRectToRect::rect(
+                popup_rect.x() + popup_rect.width() as i32 / 2 - 16,
+                popup_rect.y() + 6,
+                32,
+                4,
+            ),
+            2,
+            border_color,
+            window_effects,
+        )?;
     }
-    fill_window_surface_rounded_rect(
-        target,
-        PixelRectToRect::rect(
-            popup_rect.x() + popup_rect.width() as i32 / 2 - 16,
-            popup_rect.y() + 6,
-            32,
-            4,
-        ),
-        2,
-        border_color,
-        window_effects,
-    )?;
     let popup_focus = state.popup_focus_active(popup);
     if let Some(buffer) = state.buffer(popup.active_buffer) {
         let view_state = buffer.view_state();
@@ -408,6 +408,11 @@ pub(super) fn render_autocomplete_overlay(
     };
     let outer_rect = PixelRectToRect::rect(x, y, width, height);
     let radius = overlay_radius(theme_registry);
+    // Empty means truly empty: prior entries stay during in-flight refresh
+    // (`is_visible` / `mark_loading`), so skip the blank card entirely.
+    if autocomplete.entries().is_empty() {
+        return Ok(());
+    }
     let focus_border = if autocomplete.docs_focused {
         theme_color(theme_registry, "ui.autocomplete.focused.border", accent)
     } else {
@@ -444,9 +449,6 @@ pub(super) fn render_autocomplete_overlay(
             docs_background,
             window_effects,
         )?;
-    }
-    if autocomplete.entries().is_empty() {
-        return Ok(());
     }
     let list_text_width = list_width.saturating_sub(24);
     let visible_start = autocomplete_visible_start(

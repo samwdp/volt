@@ -48,7 +48,7 @@ impl BrowserTabState {
 impl Default for BrowserBufferState {
     fn default() -> Self {
         let mut input = InputField::new("");
-        input.set_placeholder(Some("https://example.com".to_owned()));
+        input.set_placeholder(Some("Search or enter address".to_owned()));
         let first_id = BrowserTabId(1);
         Self {
             tabs: vec![BrowserTabState::blank(first_id)],
@@ -744,12 +744,18 @@ pub(super) fn browser_sync_plan(
     for rect in &mut pane_rects {
         rect.x = rect.x.saturating_add(docks.content_x);
     }
-    let notification_rects = notification_overlay_layouts(
+    let notification_right_inset = if docks.acp.visible {
+        docks.acp.dock_width.saturating_add(8)
+    } else {
+        0
+    };
+    let notification_rects = notification_overlay_layouts_inset(
         &state.visible_notifications(now),
         width,
         height,
         cell_width,
         line_height,
+        notification_right_inset,
     )
     .into_iter()
     .map(|layout| layout.rect)
@@ -837,6 +843,7 @@ pub(super) struct BrowserBufferLayout {
     pub(super) viewport: Rect,
     pub(super) input: TextPaneLayout,
     pub(super) footer: TextPaneLayout,
+    pub(super) tab_strip: Rect,
 }
 
 pub(super) fn browser_viewport_rect(
@@ -902,7 +909,9 @@ pub(super) fn browser_buffer_layout(
         1
     };
     let footer_line_count = state.footer_pane.line_count();
-    let show_footer = footer_line_count > 0;
+    // Empty TextBuffer still reports one blank line; don't reserve bottom chrome for that.
+    let show_footer =
+        (0..footer_line_count).any(|index| state.footer_pane.line_len_chars(index) > 0);
     let footer_rows = if show_footer {
         state
             .footer_pane
@@ -925,14 +934,18 @@ pub(super) fn browser_buffer_layout(
         0
     };
     let input_height = input_chrome + input_rows as i32 * line_height;
+    // Compact in-buffer tab strip above the URL bar.
+    let tab_strip_height = (line_height + 10).max(line_height);
+    let tab_y = layout.body_y.saturating_sub(2);
+    let input_y = tab_y + tab_strip_height + gap / 2;
     let footer_y = layout.pane_bottom.saturating_sub(footer_height.max(0));
-    let input_y = if show_footer {
-        footer_y.saturating_sub(gap + input_height)
+    let viewport_y = input_y + input_height + gap;
+    let viewport_bottom = if show_footer {
+        footer_y.saturating_sub(gap)
     } else {
-        layout.pane_bottom.saturating_sub(input_height)
+        layout.pane_bottom
     };
-    let viewport_y = layout.body_y.saturating_sub(2);
-    let viewport_height = input_y.saturating_sub(gap).saturating_sub(viewport_y);
+    let viewport_height = viewport_bottom.saturating_sub(viewport_y);
     if panel_width == 0 || viewport_height <= 0 {
         return None;
     }
@@ -948,7 +961,88 @@ pub(super) fn browser_buffer_layout(
             visible_rows: footer_rows,
             wrap_cols,
         },
+        tab_strip: Rect::new(panel_x, tab_y, panel_width, tab_strip_height as u32),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_browser_tab_strip(
+    target: &mut DrawTarget<'_>,
+    state: &BrowserBufferState,
+    strip: Rect,
+    panel_background: Color,
+    foreground: Color,
+    muted: Color,
+    active_border: Color,
+    cell_width: i32,
+    line_height: i32,
+    window_effects: WindowEffects,
+    theme_registry: Option<&ThemeRegistry>,
+) -> Result<(), ShellError> {
+    let corner_radius = shared_corner_radius(theme_registry).min(8);
+    fill_window_surface_rounded_rect(
+        target,
+        strip,
+        corner_radius,
+        panel_background,
+        window_effects,
+    )?;
+    let tab_count = state.tabs.len().max(1);
+    let gap = 4i32;
+    let usable = strip.width().saturating_sub(16);
+    let tab_width = ((usable as i32 - gap * (tab_count as i32 - 1).max(0)) / tab_count as i32)
+        .max(cell_width.max(1) * 6) as u32;
+    let max_chars = (tab_width as i32 / cell_width.max(1))
+        .saturating_sub(2)
+        .max(4) as usize;
+    let baseline = strip.y() + (line_height.max(1) * 3 / 4).max(ascent_fallback(line_height));
+    let mut x = strip.x() + 8;
+    for tab in &state.tabs {
+        let active = tab.id == state.active_tab_id;
+        let label = truncate_browser_tab_label(&tab.label(), max_chars);
+        let tab_rect = PixelRectToRect::rect(
+            x,
+            strip.y() + 2,
+            tab_width.min(strip.width().saturating_sub((x - strip.x()) as u32)),
+            strip.height().saturating_sub(4),
+        );
+        if active {
+            fill_window_surface_rounded_rect(
+                target,
+                tab_rect,
+                corner_radius.min(6),
+                active_border,
+                window_effects,
+            )?;
+        }
+        draw_text(
+            target,
+            x + 6,
+            baseline,
+            &label,
+            if active { foreground } else { muted },
+        )?;
+        x += tab_width as i32 + gap;
+        if x >= strip.x() + strip.width() as i32 - 8 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn ascent_fallback(line_height: i32) -> i32 {
+    (line_height * 3 / 4).max(1)
+}
+
+fn truncate_browser_tab_label(label: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = label.chars().collect();
+    if chars.len() <= max_chars {
+        return label.to_owned();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut out: String = chars.into_iter().take(keep).collect();
+    out.push('…');
+    out
 }
 
 pub(super) fn render_browser_buffer_body(
@@ -990,12 +1084,18 @@ pub(super) fn render_browser_buffer_body(
     let panel_background = buffer_section_panel_background(base_background);
     let active_border = theme_color(theme_registry, TOKEN_STATUSLINE_ACTIVE, cursor);
     let corner_radius = shared_corner_radius(theme_registry);
-    fill_window_surface_rounded_rect(
+    paint_browser_tab_strip(
         target,
-        browser_layout.viewport,
-        corner_radius,
+        state,
+        browser_layout.tab_strip,
         panel_background,
+        foreground,
+        muted,
+        active_border,
+        cell_width,
+        line_height,
         window_effects,
+        theme_registry,
     )?;
     render_input_panel(
         target,
@@ -1033,12 +1133,26 @@ pub(super) fn render_browser_buffer_body(
                 input_rect.x() + 8,
                 input_rect.y() + input_rect.height() as i32 - 3,
                 input_rect.width().saturating_sub(16),
-                2,
+                3,
             ),
             active_border,
             window_effects,
         )?;
+        draw_text(
+            target,
+            input_rect.x() + 12,
+            input_rect.y() + 4,
+            "Loading…",
+            muted,
+        )?;
     }
+    fill_window_surface_rounded_rect(
+        target,
+        browser_layout.viewport,
+        corner_radius,
+        panel_background,
+        window_effects,
+    )?;
     if browser_layout.footer.rect.height() > 0 {
         render_text_panel(
             target,

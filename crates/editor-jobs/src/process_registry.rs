@@ -1,7 +1,8 @@
 //! Process Registry and Process Launch for Owned Process trees.
 //!
-//! Every Launch registers a tree root (platform kill-tree) under hybrid
-//! supervision (kill-tree plus `volt --process-supervisor` when applicable).
+//! Every Launch registers a tree root under platform kill-tree supervision.
+//! Windows uses a kill-on-close Job Object. Unix adds `volt --process-supervisor`
+//! so a crashed editor still reaps the child process group.
 
 use std::{
     collections::{HashMap, HashSet},

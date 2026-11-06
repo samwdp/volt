@@ -431,6 +431,7 @@ fn notification_action_at_point_returns_acp_permission_action() -> Result<(), St
         line_height,
         now,
         (rect.x() + 4, rect.y() + 4),
+        0,
     );
 
     assert_eq!(
@@ -484,6 +485,7 @@ fn notification_action_at_point_returns_copilot_sign_in_action() -> Result<(), S
         line_height,
         now,
         (rect.x() + 4, rect.y() + 4),
+        0,
     );
 
     assert_eq!(
@@ -826,6 +828,56 @@ fn render_picker_overlay_uses_opaque_overlay_chrome() -> Result<(), String> {
         command,
         DrawCommand::Text { color, .. } if color.a == 255
     )));
+    Ok(())
+}
+
+#[test]
+fn render_autocomplete_overlay_skips_paint_when_entries_empty() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let buffer_id =
+        install_text_test_buffer(&mut state, "*autocomplete-empty*", vec!["alpha".to_owned()])?;
+    shell_buffer_mut(&mut state.runtime, buffer_id)?.set_cursor(TextPoint::new(0, 5));
+
+    let overlay = AutocompleteOverlay {
+        buffer_id,
+        buffer_revision: 0,
+        query: AutocompleteQuery {
+            prefix: String::new(),
+            token: "alpha".to_owned(),
+            replace_range: TextRange::new(TextPoint::new(0, 0), TextPoint::new(0, 5)),
+        },
+        entries: Vec::new(),
+        selected_index: 0,
+        loading: true,
+        docs_focused: false,
+        docs_scroll_offset: 0,
+    };
+    let mut scene = Vec::new();
+    render_autocomplete_overlay(
+        &mut DrawTarget::Scene(&mut scene),
+        shell_ui(&state.runtime)?,
+        &overlay,
+        OverlayAnchorContext {
+            pane_rect: PixelRectToRect::rect(0, 0, 640, 360),
+            user_library: &NullUserLibrary,
+            theme_registry: None,
+            metrics: CellMetrics {
+                cell_width: 8,
+                line_height: 16,
+            },
+            typing_active: false,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    assert!(
+        scene.is_empty(),
+        "empty autocomplete must not paint a blank overlay card"
+    );
+    assert!(
+        !overlay.is_visible(),
+        "empty overlay stays invisible while loading with no prior entries"
+    );
     Ok(())
 }
 
@@ -1481,15 +1533,16 @@ fn render_picker_overlay_uses_picker_text_tokens() -> Result<(), String> {
         "unexpected picker text colors: {text_commands:?}"
     );
     assert!(
-        text_commands
-            .iter()
-            .any(|(text, color)| text == "filter" && *color == to_render_color(picker_muted)),
+        text_commands.iter().any(|(text, color)| {
+            text == "Type to filter…" && *color == to_render_color(picker_muted)
+        }),
         "unexpected picker text colors: {text_commands:?}"
     );
     assert!(
-        text_commands
-            .iter()
-            .any(|(text, color)| text == "two" && *color == to_render_color(picker_muted)),
+        text_commands.iter().any(|(text, color)| {
+            text == "↑↓ navigate · Enter accept · Esc close"
+                && *color == to_render_color(picker_subtle)
+        }),
         "unexpected picker text colors: {text_commands:?}"
     );
     assert!(
@@ -1825,6 +1878,89 @@ fn workspace_compile_opens_input_prompt_overlay() -> Result<(), String> {
         "overlay id must be COMPILE_PROMPT_ID"
     );
     std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
+#[test]
+fn render_picker_loading_row_draws_spinner() -> Result<(), String> {
+    let sdl_context = sdl3::init().map_err(|error| error.to_string())?;
+    let _video = sdl_context.video().map_err(|error| error.to_string())?;
+    let ttf = sdl3::ttf::init().map_err(|error| error.to_string())?;
+    let (fonts, _) = load_font_set(
+        &ttf,
+        &ThemeRuntimeSettings {
+            font_request: None,
+            emoji_font_request: None,
+            font_size: 16,
+            emoji_font_size: 16,
+            display_scale: 1.0,
+            line_height_multiplier: 1.0,
+            window_effects: crate::window_effects::WindowEffects::default(),
+        },
+        &NullUserLibrary,
+    )
+    .map_err(|error| error.to_string())?;
+    let picker = PickerOverlay::from_entries(
+        "Branches",
+        vec![
+            PickerEntry {
+                item: PickerItem::new(
+                    "git-worktree-branch-loading",
+                    "Loading branches…",
+                    "Fetching remote branches off the UI thread.",
+                    None::<String>,
+                ),
+                action: PickerAction::NoOp,
+                quickfix: None,
+            },
+            PickerEntry {
+                item: PickerItem::new("keep", "main", "branch", None::<String>),
+                action: PickerAction::NoOp,
+                quickfix: None,
+            },
+        ],
+    );
+    let mut scene = Vec::new();
+    picker::render_picker_overlay(
+        &mut DrawTarget::Scene(&mut scene),
+        &fonts,
+        PickerOverlayDraw {
+            picker: &picker,
+            size: WindowSize {
+                width: 640,
+                height: 360,
+            },
+            line_height: 16,
+            theme_registry: None,
+            picker_layout: editor_plugin_api::PickerLayout::default(),
+            truncate_strategy: editor_plugin_api::PickerTruncateStrategy::Auto,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let texts = scene
+        .iter()
+        .filter_map(|command| match command {
+            DrawCommand::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        texts
+            .iter()
+            .any(|text| super::super::render::SPINNER_FRAMES.contains(text)),
+        "loading row should draw a spinner frame, got {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| { text.starts_with("Loading branches") && *text != "Loading branches…" }),
+        "loading label should cycle dots, got {texts:?}"
+    );
+    assert!(
+        texts.contains(&"main"),
+        "static rows stay unchanged, got {texts:?}"
+    );
     Ok(())
 }
 

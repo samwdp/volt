@@ -636,6 +636,8 @@ fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
         8,
         state.user_library.commandline_enabled(),
     );
+    let browser_layout = browser_buffer_layout(buffer, rect, layout, 8, 18)
+        .ok_or_else(|| "browser layout missing".to_owned())?;
     let viewport = browser_viewport_rect(
         buffer,
         rect,
@@ -649,7 +651,11 @@ fn browser_viewport_rect_stays_above_prompt_footer() -> Result<(), String> {
     assert!(viewport.width > 0);
     assert!(viewport.height > 0);
     assert!(viewport.y >= layout.body_y - 2);
-    assert!(viewport_bottom <= layout.input_y);
+    assert!(viewport_bottom <= layout.statusline_y);
+    // URL chrome lives at the top now; empty footer must not leave a bottom gap.
+    assert_eq!(browser_layout.footer.visible_rows, 0);
+    assert_eq!(viewport_bottom, layout.pane_bottom);
+    assert!(browser_layout.input.rect.y() < browser_layout.viewport.y());
     Ok(())
 }
 

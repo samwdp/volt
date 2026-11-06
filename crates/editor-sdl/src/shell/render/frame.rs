@@ -287,6 +287,11 @@ pub(super) fn render_shell_state(
         )?;
     }
 
+    let notification_right_inset = if docks.acp.visible {
+        docks.acp.dock_width.saturating_add(8)
+    } else {
+        0
+    };
     render_notification_overlay(
         target,
         state,
@@ -294,6 +299,7 @@ pub(super) fn render_shell_state(
         theme_registry,
         metrics.cells(),
         now,
+        notification_right_inset,
     )?;
     render_fps_overlay(
         target,

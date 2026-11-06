@@ -235,8 +235,7 @@ const TOKEN_DEBUG_FRINGE_PENDING: &str = "debug.fringe.pending";
 const TOKEN_DEBUG_FRINGE_EXECUTION: &str = "debug.fringe.execution";
 const TOKEN_DEBUG_LINE_EXECUTION: &str = "debug.line.execution";
 const COPILOT_LANGUAGE_SERVER: &str = "copilot-language-server";
-const ACP_INPUT_PLACEHOLDER: &str =
-    "Type / for commands, @ for files. Paste images with Ctrl+Shift+V";
+const ACP_INPUT_PLACEHOLDER: &str = "Message the agent…  (/ commands · @ files)";
 const QUICKFIX_BUFFER_NAME: &str = "*quickfix*";
 const QUICKFIX_POPUP_TITLE: &str = "Quickfix";
 const GIT_STATUS_KIND: &str = buffer_kinds::GIT_STATUS;

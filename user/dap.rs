@@ -330,27 +330,21 @@ pub fn package() -> PluginPackage {
     .with_buffers(vec![
         PluginBuffer::new(
             BREAKPOINTS_KIND,
-            vec!["No Breakpoints in this Workspace.".to_owned()],
+            vec!["No Breakpoints in this Workspace. (Space t b to toggle)".to_owned()],
         )
         .with_key_bindings(vec![
             PluginKeyBinding::new("Enter", "dap.goto-breakpoint", PluginKeymapScope::Workspace)
                 .with_vim_mode(PluginVimMode::Normal),
         ]),
-        PluginBuffer::new(
-            LOCALS_KIND,
-            vec!["No locals".to_owned(), "Watch Expressions".to_owned()],
-        )
-        .with_sections(locals_sections())
-        .with_key_bindings(vec![
-            PluginKeyBinding::new("Enter", "dap.toggle-variable", PluginKeymapScope::Workspace)
-                .with_vim_mode(PluginVimMode::Normal),
-            PluginKeyBinding::new("l", "dap.toggle-variable", PluginKeymapScope::Workspace)
-                .with_vim_mode(PluginVimMode::Normal),
-        ]),
-        PluginBuffer::new(
-            REPL_KIND,
-            vec!["(debug REPL — enter expression below)".to_owned()],
-        ),
+        PluginBuffer::new(LOCALS_KIND, vec!["No locals.".to_owned()])
+            .with_sections(locals_sections())
+            .with_key_bindings(vec![
+                PluginKeyBinding::new("Enter", "dap.toggle-variable", PluginKeymapScope::Workspace)
+                    .with_vim_mode(PluginVimMode::Normal),
+                PluginKeyBinding::new("l", "dap.toggle-variable", PluginKeymapScope::Workspace)
+                    .with_vim_mode(PluginVimMode::Normal),
+            ]),
+        PluginBuffer::new(REPL_KIND, vec!["(dap.repl)".to_owned()]),
     ])
     .with_key_bindings(vec![
         PluginKeyBinding::new(
@@ -365,17 +359,19 @@ pub fn package() -> PluginPackage {
     ])
 }
 
-/// Locals pane: adapter locals above a Watch Expressions header (insert a line to watch).
-/// Expressions below mirrors those watches.
+/// Locals pane: adapter Locals only. Expressions section holds Watch Expressions
+/// (insert a line or run `dap.expressions-add`).
 pub fn locals_sections() -> PluginBufferSections {
     PluginBufferSections::new(vec![
         PluginBufferSection::new(LOCALS_SECTION)
-            .with_writable(true)
             .with_min_lines(4)
-            .with_initial_lines(vec!["No locals".to_owned(), "Watch Expressions".to_owned()]),
+            .with_initial_lines(vec!["No locals.".to_owned()]),
         PluginBufferSection::new(EXPRESSIONS_SECTION)
+            .with_writable(true)
             .with_min_lines(2)
-            .with_initial_lines(vec!["No watches".to_owned()]),
+            .with_initial_lines(vec![
+                "No watches — insert a line or run dap.expressions-add".to_owned(),
+            ]),
     ])
     .with_layout(PluginBufferLayout::rows(vec![
         PluginBufferLayoutNode::section(LOCALS_SECTION, 3),
@@ -471,8 +467,12 @@ mod tests {
         let layout = sections.layout().expect("locals layout");
         assert_eq!(layout.children().len(), 2);
         assert!(
-            sections.sections()[0].writable(),
-            "Locals section must be writable so Watch Expressions can be inserted as lines"
+            !sections.sections()[0].writable(),
+            "Locals section is adapter-owned and not line-editable"
+        );
+        assert!(
+            sections.sections()[1].writable(),
+            "Expressions section must be writable so Watch Expressions can be inserted as lines"
         );
     }
 

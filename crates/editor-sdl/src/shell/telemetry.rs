@@ -611,6 +611,7 @@ struct ShellVisualRefreshKey {
     notification_revision: u64,
     notification_deadline: Option<Instant>,
     yank_flash_until: Option<Instant>,
+    picker_loading_frame: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

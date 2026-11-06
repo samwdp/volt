@@ -117,6 +117,21 @@ fn test_tool_call_update(title: &str) -> ToolCallUpdate {
     )
 }
 
+fn test_tool_call_update_with_locations(title: &str) -> ToolCallUpdate {
+    ToolCallUpdate::new(
+        "tool-1",
+        ToolCallUpdateFields::new()
+            .status(ToolCallStatus::Pending)
+            .title(title)
+            .locations(vec![
+                ToolCallLocation::new("src\\main.rs").line(12u32),
+                ToolCallLocation::new("src\\lib.rs"),
+                ToolCallLocation::new("src\\util.rs").line(4u32),
+                ToolCallLocation::new("src\\extra.rs"),
+            ]),
+    )
+}
+
 fn test_pending_permission_request(
     request_id: u64,
     session_id: &str,
@@ -128,6 +143,21 @@ fn test_pending_permission_request(
         workspace_name: "project".to_owned(),
         subagent_title: None,
         tool_call: test_tool_call_update(title),
+        options: test_permission_options(),
+    }
+}
+
+fn test_pending_permission_request_with_locations(
+    request_id: u64,
+    session_id: &str,
+    title: &str,
+) -> AcpPendingPermissionUi {
+    AcpPendingPermissionUi {
+        request_id,
+        session_id: agent_client_protocol::SessionId::new(session_id),
+        workspace_name: "project".to_owned(),
+        subagent_title: None,
+        tool_call: test_tool_call_update_with_locations(title),
         options: test_permission_options(),
     }
 }
@@ -617,6 +647,8 @@ fn permission_prompt_lines_show_locations_and_choices() {
     assert!(rendered.contains("12"));
     assert!(rendered.contains("Allow once (allow once)"));
     assert!(rendered.contains("Reject once (reject once)"));
+    assert!(rendered.contains("permission picker"));
+    assert!(rendered.contains("Esc to deny"));
 }
 
 #[test]
@@ -930,6 +962,73 @@ fn open_permission_request_reorders_queue_for_requested_picker() -> Result<(), S
         shell_ui(&state.runtime)?.picker_kind(),
         Some(PickerKind::AcpPermission { request_id: 2 })
     );
+    Ok(())
+}
+
+#[test]
+fn permission_picker_shows_tool_title_locations_and_preview() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let request = test_pending_permission_request_with_locations(9, "session-1", "Read file");
+    open_permission_picker(&mut state.runtime, &request)?;
+
+    let picker = shell_ui(&state.runtime)?
+        .picker()
+        .ok_or_else(|| "permission picker missing".to_owned())?;
+    assert!(picker.show_preview());
+    assert_eq!(
+        shell_ui(&state.runtime)?.picker_kind(),
+        Some(PickerKind::AcpPermission { request_id: 9 })
+    );
+
+    let selected = picker
+        .session()
+        .selected()
+        .ok_or_else(|| "permission picker has no selection".to_owned())?;
+    let detail = selected.item().detail();
+    assert!(detail.contains("Read file"), "detail={detail}");
+    assert!(detail.contains("main.rs"), "detail={detail}");
+    assert!(detail.contains("12"), "detail={detail}");
+
+    let preview = selected
+        .item()
+        .preview()
+        .ok_or_else(|| "permission picker preview missing".to_owned())?;
+    assert!(preview.contains("Read file"), "preview={preview}");
+    assert!(preview.contains("main.rs:12"), "preview={preview}");
+    assert!(preview.contains("lib.rs"), "preview={preview}");
+    assert!(preview.contains("util.rs:4"), "preview={preview}");
+    assert!(
+        preview.contains("... 1 more location(s)"),
+        "preview={preview}"
+    );
+    assert!(preview.contains("project"), "preview={preview}");
+    Ok(())
+}
+
+#[test]
+fn permission_picker_dismiss_resolves_as_deny() -> Result<(), String> {
+    let (mut manager, mut command_rx) = test_acp_manager();
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    manager.queue_permission_request(test_pending_permission_request(
+        3,
+        "session-1",
+        "Write file",
+    ));
+    manager.open_permission_request(&mut state.runtime, 3)?;
+    assert_eq!(manager.active_permission_request, Some(3));
+
+    shell_ui_mut(&mut state.runtime)?.close_picker();
+    manager.resolve_permission(3, PermissionDecision::Deny);
+
+    assert!(matches!(
+        command_rx.try_recv().expect("deny command"),
+        AcpCommand::ResolvePermission {
+            request_id: 3,
+            decision: PermissionDecision::Deny,
+        }
+    ));
+    assert_eq!(manager.active_permission_request, Some(3));
+    assert!(!manager.permission_queue_paused);
     Ok(())
 }
 

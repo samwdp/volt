@@ -214,26 +214,54 @@ fn process_launch_registers_alive_owned_process_tree() {
 #[test]
 fn process_launch_wraps_with_supervisor_when_volt_is_available() {
     let Some(supervisor) = discover_volt_supervisor_exe() else {
-        // ADR: supervisor wrapping applies when a Volt supervisor exe is available.
+        // Unix: supervisor wrapping applies when a Volt supervisor exe is available.
+        // Windows: kill-on-close Job Object replaces that wrapper.
         return;
     };
     let mut registry = ProcessRegistry::new();
+    let (program, args) = synthetic_sleep_command(60);
     let id = launch_id(
         &mut registry,
-        ProcessLaunchSpec::new(synthetic_sleep_command(60).0, synthetic_sleep_command(60).1)
+        ProcessLaunchSpec::new(program.clone(), args)
             .with_workspace(WorkspaceId::from_raw(2))
             .with_process_supervisor_exe(supervisor),
     );
     let pid = registry.root_pid(id).expect("root pid");
-    #[cfg(windows)]
-    {
-        let image = process_image_name(pid);
+    let image = process_image_name(pid);
+    if cfg!(windows) {
         assert!(
-            image.contains("volt"),
-            "hybrid Launch root should be the process supervisor (got `{image}`)"
+            !image.contains("volt"),
+            "Windows Launch should run `{program}` directly, got `{image}`"
+        );
+        assert!(
+            image.contains(&program.to_ascii_lowercase()) || image.is_empty(),
+            "Windows Launch root should be `{program}`, got `{image}`"
+        );
+    } else {
+        assert!(
+            image.contains("volt") || image.is_empty(),
+            "Unix Launch root should be the process supervisor (got `{image}`)"
         );
     }
     must(registry.application_quit(Duration::from_millis(200)));
+}
+
+#[test]
+fn windows_background_launch_skips_process_supervisor() {
+    let (program, args) = super::supervised_command_with_exe(
+        Some(Path::new("volt")),
+        "marksman",
+        &["server".to_owned()],
+        ProcessSupervisionMode::Background,
+    );
+    if cfg!(windows) {
+        assert_eq!(program, "marksman");
+        assert_eq!(args, vec!["server".to_owned()]);
+    } else {
+        assert!(program.contains("volt"));
+        assert!(args.iter().any(|arg| arg == "--process-supervisor"));
+        assert!(args.iter().any(|arg| arg == "marksman"));
+    }
 }
 
 #[test]

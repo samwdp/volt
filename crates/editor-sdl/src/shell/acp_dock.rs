@@ -266,9 +266,20 @@ pub(super) fn render_acp_dock(
         .saturating_sub(cell_width.max(1) * 2 + card_inset * 2 + logo_reserve)
         / cell_width.max(1))
     .max(4) as usize;
-    for (index, entry) in entries.iter().enumerate() {
-        let card_y = layout.dock_rect.y + index as i32 * card_height;
-        if card_y >= layout.dock_rect.y + layout.dock_rect.height as i32 {
+    let dock_bottom = layout.dock_rect.y + layout.dock_rect.height as i32;
+    for (painted, entry) in entries.iter().enumerate() {
+        let card_y = layout.dock_rect.y + painted as i32 * card_height;
+        if card_y + card_height > dock_bottom {
+            let remaining = entries.len().saturating_sub(painted);
+            if remaining > 0 {
+                draw_text(
+                    target,
+                    text_x,
+                    dock_bottom.saturating_sub(line_height.max(1)),
+                    &format!("+{remaining} more"),
+                    muted,
+                )?;
+            }
             break;
         }
         let card_rect = PixelRectToRect::rect(

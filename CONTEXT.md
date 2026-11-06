@@ -317,7 +317,7 @@ A line marker stored for a Workspace (in memory for now) that can be toggled wit
 _Avoid_: debug point, red dot (as the product term)
 
 **Watch Expression**:
-A user-owned expression. Insert a line under the Watch Expressions header in the Locals section (or use the Expressions section / add command). Re-evaluated while the Debug Session is stopped, and as soon as a new line is committed during a live Session.
+A user-owned expression that lives in the Expressions section only. Insert a line there, or run the add command (`dap.expressions-add`). Re-evaluated while the Debug Session is stopped, and as soon as a new line is committed during a live Session. Locals shows adapter locals only.
 _Avoid_: watch (alone), expression breakpoint
 
 **Debug Fringe**:

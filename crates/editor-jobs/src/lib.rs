@@ -367,12 +367,19 @@ pub fn supervised_command(
 }
 
 /// Like [`supervised_command`], but prefers an explicit supervisor executable when provided.
+///
+/// Windows Launch already assigns the child to a kill-on-close Job Object, so a
+/// `volt --process-supervisor` wrapper would only add a process that polls the
+/// machine. Those launches stay unwrapped.
 pub fn supervised_command_with_exe(
     process_supervisor_exe: Option<&Path>,
     program: &str,
     args: &[String],
     mode: ProcessSupervisionMode,
 ) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        return (program.to_owned(), args.to_vec());
+    }
     let supervisor_exe = process_supervisor_exe
         .map(Path::to_path_buf)
         .or_else(|| env::var_os(PROCESS_SUPERVISOR_EXE_ENV).map(PathBuf::from))

@@ -319,13 +319,16 @@ pub fn directory_sections(
     sort_mode: OilSortMode,
     trash_enabled: bool,
 ) -> SectionTree {
-    let header = format!(
-        "Directory {} (hidden: {}, sort: {}, trash: {})",
-        root.display(),
-        if show_hidden { "on" } else { "off" },
-        sort_mode.label(),
-        if trash_enabled { "on" } else { "off" },
-    );
+    // Keep a stable `Directory <path>` prefix — oil parses the path from this header.
+    let mut flags = Vec::new();
+    if show_hidden {
+        flags.push("hidden");
+    }
+    flags.push(sort_mode.label());
+    if trash_enabled {
+        flags.push("trash");
+    }
+    let header = format!("Directory {} ({})", root.display(), flags.join(", "));
     let mut items = Vec::new();
     if let Some(parent) = root
         .parent()
@@ -341,6 +344,9 @@ pub fn directory_sections(
             SectionAction::new(ACTION_OIL_ENTRY).with_detail(entry.path().display().to_string()),
         )
     }));
+    if entries.is_empty() {
+        items.push(SectionItem::new("(empty directory)"));
+    }
     SectionTree::new(vec![
         Section::new(SECTION_OIL_DIRECTORY, header).with_items(items),
     ])

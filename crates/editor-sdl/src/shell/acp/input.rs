@@ -944,7 +944,9 @@ pub(crate) fn acp_permission_picker_closed(
     let mut manager = manager
         .lock()
         .map_err(|_| "acp manager lock was poisoned".to_owned())?;
-    manager.permission_picker_closed(request_id);
+    // Esc/dismiss denies the request. Keep active until PermissionResolved so
+    // the queue does not reopen the same prompt before the agent answers.
+    manager.resolve_permission(request_id, PermissionDecision::Deny);
     Ok(())
 }
 
@@ -952,6 +954,7 @@ pub(crate) fn acp_permission_picker_submitted(
     _runtime: &mut EditorRuntime,
     _request_id: u64,
 ) -> Result<(), String> {
+    // Option submit already resolves via PickerAction::AcpResolvePermission.
     Ok(())
 }
 
@@ -1299,6 +1302,7 @@ pub(crate) fn open_permission_picker(
     runtime: &mut EditorRuntime,
     request: &AcpPendingPermissionUi,
 ) -> Result<(), String> {
+    let preview = request.picker_preview();
     let entries = request
         .options
         .iter()
@@ -1306,12 +1310,8 @@ pub(crate) fn open_permission_picker(
             item: PickerItem::new(
                 option.option_id.to_string(),
                 option.name.clone(),
-                format!(
-                    "{} · {}",
-                    request.workspace_name,
-                    format_permission_option_kind(option.kind)
-                ),
-                None::<String>,
+                request.picker_detail(format_permission_option_kind(option.kind)),
+                Some(preview.clone()),
             ),
             action: PickerAction::AcpResolvePermission {
                 request_id: request.request_id,
@@ -1324,7 +1324,8 @@ pub(crate) fn open_permission_picker(
         PickerOverlay::from_entries(format!("ACP Permission · {}", request.title()), entries)
             .with_kind(PickerKind::AcpPermission {
                 request_id: request.request_id,
-            });
+            })
+            .with_preview();
     shell_ui_mut(runtime)?.set_picker(picker);
     Ok(())
 }

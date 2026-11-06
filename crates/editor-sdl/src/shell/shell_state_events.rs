@@ -29,6 +29,21 @@ impl ShellState {
                 let mouse_x = x as i32;
                 let mouse_y = y as i32;
                 let now = Instant::now();
+                let notification_right_inset = {
+                    let ui = self.ui()?;
+                    let docks = shell_docks_layout(
+                        &*shell_user_library(&self.runtime),
+                        ui,
+                        render_width,
+                        render_height,
+                        cell_width,
+                    );
+                    if docks.acp.visible {
+                        docks.acp.dock_width.saturating_add(8)
+                    } else {
+                        0
+                    }
+                };
                 if mouse_btn == MouseButton::Left
                     && let Some(action) = notification_action_at_point(
                         self.ui()?,
@@ -38,6 +53,7 @@ impl ShellState {
                         line_height,
                         now,
                         (mouse_x, mouse_y),
+                        notification_right_inset,
                     )
                 {
                     match action {

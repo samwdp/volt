@@ -488,7 +488,7 @@ pub(crate) fn permission_prompt_lines(request: &RequestPermissionRequest) -> Vec
         }
     }
     lines.push(format!(
-        "{} Use `acp.permission-approve` or `acp.permission-deny`.",
+        "{} Choose an option in the permission picker, or Esc to deny.",
         editor_icons::symbols::cod::COD_CHECKLIST
     ));
     lines

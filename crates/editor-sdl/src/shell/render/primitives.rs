@@ -87,7 +87,7 @@ pub(super) fn fill_overlay_surface_rect(
     )
 }
 
-fn paint_buffer_scrollbar(
+pub(super) fn paint_buffer_scrollbar(
     target: &mut DrawTarget<'_>,
     paint: ScrollbarPaint,
 ) -> Result<(), ShellError> {

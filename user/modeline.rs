@@ -163,14 +163,27 @@ fn mode_tokens(vim_mode: &str) -> (&'static str, &'static str) {
 }
 
 fn buffer_segment(context: &ModelineContext<'_>) -> ModelineSegment {
-    let name = context.buffer_name;
+    let name = elide_middle(context.buffer_name, 48);
     let text = if context.buffer_modified {
         let modified = crate::icon_font::symbols::cod::COD_DIFF_MODIFIED;
         format!("{modified} {name}")
     } else {
-        name.to_string()
+        name
     };
     ModelineSegment::left(vec![ModelinePart::fg(text, TOKEN_FOREGROUND)])
+}
+
+/// Keep head and tail of long paths so modeline stays readable in narrow panes.
+fn elide_middle(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars || max_chars < 8 {
+        return text.to_owned();
+    }
+    let keep_tail = (max_chars / 3).max(4);
+    let keep_head = max_chars.saturating_sub(keep_tail + 1);
+    let head: String = chars.iter().take(keep_head).collect();
+    let tail: String = chars.iter().skip(chars.len() - keep_tail).collect();
+    format!("{head}…{tail}")
 }
 
 fn filetype_symbol(language_id: Option<&str>) -> Option<&'static str> {

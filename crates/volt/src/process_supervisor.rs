@@ -5,7 +5,7 @@ use std::{
 };
 
 use editor_jobs::{PROCESS_SUPERVISOR_FLAG, ProcessSupervisionMode};
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
@@ -249,10 +249,16 @@ fn exit_with_status(status: ExitStatus) -> ! {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+fn parent_snapshot(pid: Pid) -> System {
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    system
+}
+
 impl ParentProcess {
     fn capture(pid: u32) -> Option<Self> {
         let pid = Pid::from_u32(pid);
-        let system = System::new_all();
+        let system = parent_snapshot(pid);
         let process = system.process(pid)?;
         Some(Self {
             pid,
@@ -261,8 +267,7 @@ impl ParentProcess {
     }
 
     fn is_alive(self) -> bool {
-        let system = System::new_all();
-        system
+        parent_snapshot(self.pid)
             .process(self.pid)
             .map(|process| process.start_time() == self.start_time)
             .unwrap_or(false)
@@ -274,6 +279,12 @@ mod tests {
     use editor_jobs::ProcessSupervisionMode;
 
     use super::{ProcessSupervisorRequest, parse_request};
+
+    #[test]
+    fn parent_capture_sees_current_process() {
+        let parent = super::ParentProcess::capture(std::process::id()).expect("current process");
+        assert!(parent.is_alive());
+    }
 
     #[test]
     fn parse_request_ignores_normal_launch_args() {

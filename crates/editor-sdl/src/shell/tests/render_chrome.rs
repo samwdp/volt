@@ -102,6 +102,10 @@ fn acp_section_layout_orders_output_input_footer_and_statusline() -> Result<(), 
         acp_layout.input.rect.height() as i32,
         18 + input_panel_chrome_height()
     );
+    assert_eq!(
+        acp_layout.plan.visible_rows, 0,
+        "idle ACP with no plan entries keeps plan chrome-only"
+    );
     Ok(())
 }
 

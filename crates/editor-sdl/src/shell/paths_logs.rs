@@ -608,7 +608,8 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
             ],
             BufferKind::Directory => vec![
                 format!("{name} is a directory buffer."),
-                "Oil-style editing surfaces can be rendered through the same shell.".to_owned(),
+                "Open a folder with oil.open, or pick a path from the workspace file picker."
+                    .to_owned(),
             ],
             BufferKind::Diagnostics => vec![
                 format!("{name} is a diagnostics-oriented buffer."),
@@ -639,8 +640,7 @@ fn placeholder_lines(name: &str, kind: &BufferKind, user_library: &dyn UserLibra
             BufferKind::Plugin(plugin_kind) if plugin_kind == ACP_BUFFER_KIND => vec![
                 format!("{name} is an ACP session buffer."),
                 "Use acp.pick-client to start an ACP agent.".to_owned(),
-                "Type into the prompt and press Ctrl+Enter to send.".to_owned(),
-                "Use / for slash commands (/clear starts a new session), @ to link git files, Ctrl+Shift+V to paste images, Ctrl+Space/Tab for completion, Shift+Tab to cycle modes, Ctrl+Tab to switch ACP panes, acp.pick-mode to choose a mode, acp.pick-model to choose a model, and Ctrl+j for a newline."
+                "Type a message and press Ctrl+Enter to send. / opens slash commands."
                     .to_owned(),
             ],
             BufferKind::Plugin(plugin_kind) if plugin_kind == GIT_STATUS_KIND => Vec::new(),

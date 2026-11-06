@@ -62,6 +62,11 @@ pub(crate) fn resolve_bundled_asset_path(relative: &str) -> Option<PathBuf> {
     None
 }
 
+/// Shared UI logo loader (ACP dock, browser dock, and other chrome icons).
+pub(crate) fn load_ui_logo(relative: &str) -> Option<DecodedImage> {
+    load_acp_logo(relative)
+}
+
 pub(crate) fn load_acp_logo(relative: &str) -> Option<DecodedImage> {
     let relative = relative.trim();
     if relative.is_empty() {
@@ -127,6 +132,8 @@ pub(crate) fn acp_logo_dest_rect(
 
 /// Matches headerless text-panel body origin (`rect.y + 10` in `render_text_panel`).
 const TEXT_PANEL_BODY_TOP_PADDING: i32 = 10;
+/// Matches titled text-panel body origin (`rect.y + header_height + 6`).
+const TEXT_PANEL_BODY_AFTER_HEADER_GAP: i32 = 6;
 
 /// Leading logo for ACP footer text panels: sized to the text line and vertically
 /// centred on that line (not the full panel chrome).
@@ -136,9 +143,14 @@ pub(crate) fn acp_logo_leading_rect(
     line_height: i32,
     logo: &DecodedImage,
     inset: i32,
+    header_height: i32,
 ) -> Rect {
     let line_height = line_height.max(1);
-    let body_y = area_y + TEXT_PANEL_BODY_TOP_PADDING;
+    let body_y = if header_height > 0 {
+        area_y + header_height + TEXT_PANEL_BODY_AFTER_HEADER_GAP
+    } else {
+        area_y + TEXT_PANEL_BODY_TOP_PADDING
+    };
     let max_side = line_height as u32;
     let scale = (max_side as f32 / logo.width.max(1) as f32)
         .min(max_side as f32 / logo.height.max(1) as f32);

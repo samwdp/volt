@@ -256,9 +256,20 @@ pub(super) fn render_browser_dock(
         .saturating_sub(cell_width.max(1) * 2 + card_inset * 2 + logo_reserve)
         / cell_width.max(1))
     .max(4) as usize;
-    for (index, entry) in entries.iter().enumerate() {
-        let card_y = layout.dock_rect.y + index as i32 * card_height;
-        if card_y >= layout.dock_rect.y + layout.dock_rect.height as i32 {
+    let dock_bottom = layout.dock_rect.y + layout.dock_rect.height as i32;
+    for (painted, entry) in entries.iter().enumerate() {
+        let card_y = layout.dock_rect.y + painted as i32 * card_height;
+        if card_y + card_height > dock_bottom {
+            let remaining = entries.len().saturating_sub(painted);
+            if remaining > 0 {
+                draw_text(
+                    target,
+                    text_x,
+                    dock_bottom.saturating_sub(line_height.max(1)),
+                    &format!("+{remaining} more"),
+                    muted,
+                )?;
+            }
             break;
         }
         let card_rect = PixelRectToRect::rect(
@@ -288,7 +299,7 @@ pub(super) fn render_browser_dock(
         let logo_side = line_height.max(1) as u32;
         let logo_area_y =
             card_rect.y() + ((card_rect.height() as i32 - logo_side as i32) / 2).max(0);
-        if let Some(logo) = super::acp::load_acp_logo(entry.logo)
+        if let Some(logo) = super::acp::load_ui_logo(entry.logo)
             && let Some(dest) = super::acp::acp_logo_dest_rect(
                 card_rect.x(),
                 logo_area_y,
@@ -299,6 +310,14 @@ pub(super) fn render_browser_dock(
             )
         {
             super::acp::draw_acp_logo(target, &logo, dest)?;
+        } else {
+            draw_text(
+                target,
+                card_rect.x() + card_rect.width() as i32 - cell_width.max(1) * 2 - card_inset,
+                card_y + ascent.max(0),
+                "◉",
+                muted,
+            )?;
         }
     }
     Ok(())

@@ -13,7 +13,11 @@ use url::Url;
 use super::*;
 
 const WORKSPACE_SEARCH_OUTPUT_LIMIT: usize = 48;
-const PICKER_PREVIEW_CONTEXT_RADIUS: usize = 4;
+/// Lines of file context on each side of a location preview.
+///
+/// Large enough that the preview pane can fill the picker body. Render clips
+/// to the visible rows and keeps the target line on screen.
+const PICKER_PREVIEW_CONTEXT_RADIUS: usize = REPOSITORY_FILE_PREVIEW_MAX_LINES / 2;
 const LSP_CODE_ACTION_KIND_ORDER: [&str; 8] = [
     "quickfix",
     "refactor",

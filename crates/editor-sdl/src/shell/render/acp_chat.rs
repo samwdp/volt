@@ -155,13 +155,17 @@ pub(super) fn acp_color(
     }
 }
 
-pub(super) fn acp_spinner_frame() -> &'static str {
-    const FRAMES: [&str; 6] = ["◜", "◠", "◝", "◞", "◡", "◟"];
-    let frame = SystemTime::now()
+pub(crate) const SPINNER_FRAMES: [&str; 6] = ["◜", "◠", "◝", "◞", "◡", "◟"];
+
+pub(crate) fn spinner_frame_index() -> usize {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| ((duration.as_millis() / 120) % FRAMES.len() as u128) as usize)
-        .unwrap_or(0);
-    FRAMES[frame]
+        .map(|duration| ((duration.as_millis() / 120) % SPINNER_FRAMES.len() as u128) as usize)
+        .unwrap_or(0)
+}
+
+pub(super) fn acp_spinner_frame() -> &'static str {
+    SPINNER_FRAMES[spinner_frame_index()]
 }
 
 pub(super) fn block_cursor_text_overlay(

@@ -144,6 +144,36 @@ fn file_context_preview_marks_target_line() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn file_context_preview_covers_a_tall_pane() -> Result<(), Box<dyn std::error::Error>> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("volt-picker-preview-tall-{unique}"));
+    std::fs::create_dir_all(&root)?;
+    let path = root.join("main.rs");
+    let body = (0..200)
+        .map(|index| format!("line-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, body)?;
+
+    let preview =
+        file_context_preview(&path, TextPoint::new(99, 0)).ok_or("missing file context preview")?;
+
+    assert!(preview.contains(">  100 line-99"));
+    assert!(
+        preview.contains("line-0"),
+        "preview must include lines well above the old 4-line radius"
+    );
+    assert!(
+        preview.contains("line-199"),
+        "preview must include lines well below the old 4-line radius"
+    );
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn workspace_search_status_entry_is_noop() {
     let entry = workspace_search_status_entry(
         "needle",

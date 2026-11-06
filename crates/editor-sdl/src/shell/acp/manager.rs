@@ -1042,6 +1042,9 @@ impl AcpManager {
         removed
     }
 
+    /// Pause the permission queue without resolving (e.g. switch to another request).
+    /// Esc dismiss resolves as deny via `acp_permission_picker_closed` instead.
+    #[allow(dead_code)] // used by permission-queue unit tests
     pub(crate) fn permission_picker_closed(&mut self, request_id: u64) {
         if self.active_permission_request == Some(request_id) {
             self.active_permission_request = None;

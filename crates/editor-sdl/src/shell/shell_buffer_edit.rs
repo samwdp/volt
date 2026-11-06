@@ -791,14 +791,13 @@ impl ShellBuffer {
             }
         }
         if let Some(state) = self.acp_state.as_mut() {
-            let plan_rows = state.plan_pane.visible_rows();
-            let plan_wrap_cols = state.plan_pane.wrap_cols();
-            state.plan_pane.set_view_metrics(plan_rows, plan_wrap_cols);
-            let output_rows = state.output_pane.visible_rows();
-            let output_wrap_cols = state.output_pane.wrap_cols();
+            let rows = visible_lines.max(1);
+            let output_wrap_cols = state.output_pane.wrap_cols().max(1);
+            // `set_viewport_lines` is the coarse sync path used by tests/helpers.
+            // Full Plan/Output split lives in `sync_acp_viewport_metrics`.
             state
                 .output_pane
-                .set_view_metrics(output_rows, output_wrap_cols);
+                .set_view_metrics(rows, output_wrap_cols);
         }
     }
 

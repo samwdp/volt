@@ -443,10 +443,13 @@ fn acp_switch_pane_command_changes_internal_pane_without_changing_workspace_pane
         .active_pane_id()
         .ok_or_else(|| "active pane is missing".to_owned())?;
 
-    state
-        .runtime
-        .execute_command("acp.switch-pane")
-        .map_err(|error| error.to_string())?;
+    {
+        let buffer = shell_buffer_mut(&mut state.runtime, buffer_id)?;
+        assert!(
+            buffer.acp_switch_pane(),
+            "ACP buffer must switch internal panes"
+        );
+    }
 
     assert_eq!(
         shell_ui(&state.runtime)?.active_pane_id(),
@@ -483,7 +486,8 @@ fn acp_plan_entries_populate_static_plan_pane() -> Result<(), String> {
     match &acp.plan_pane.render_lines[0] {
         AcpRenderedLine::Text(line) => {
             assert_eq!(line.text, "Render the ACP plan pane");
-            assert_eq!(line.prefix[0].role, AcpColorRole::PriorityHigh);
+            // Later InProgress step forces earlier entries to Completed (Success glyph).
+            assert_eq!(line.prefix[0].role, AcpColorRole::Success);
         }
         other => panic!("expected text line, got {other:?}"),
     }
@@ -608,6 +612,47 @@ fn acp_tool_call_updates_replace_existing_output_item() -> Result<(), String> {
 }
 
 #[test]
+fn acp_empty_plan_collapses_to_chrome_only() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
+    let buffer = state
+        .active_buffer_mut()
+        .map_err(|error| error.to_string())?;
+    // Fresh ACP view: Connected banner lives in Output; Plan has no entries.
+    buffer.sync_acp_viewport_metrics(800, 400, 8, 16, true);
+
+    let rect = PixelRectToRect::rect(0, 0, 800, 400);
+    let layout = buffer_footer_layout(buffer, rect, 16, 8);
+    let acp_layout = acp_buffer_layout(buffer, rect, layout, 8, 16)
+        .ok_or_else(|| "missing ACP layout".to_owned())?;
+    let plan_chrome = text_panel_chrome_height("Plan", 16);
+    assert_eq!(
+        acp_layout.plan.visible_rows, 0,
+        "empty plan must not reserve body rows"
+    );
+    assert_eq!(
+        acp_layout.plan.rect.height() as i32,
+        plan_chrome,
+        "empty plan collapses to chrome-only height"
+    );
+    assert!(
+        acp_layout.output.visible_rows >= 1,
+        "output still keeps the remaining top budget"
+    );
+    assert!(
+        acp_layout.output.rect.height() as i32 > plan_chrome * 2,
+        "output receives leftover height instead of an empty plan body"
+    );
+    let acp = buffer.acp_state.as_ref().expect("ACP state missing");
+    assert_eq!(
+        acp.plan_pane.visible_rows(),
+        0,
+        "synced empty plan pane must stay chrome-only"
+    );
+    Ok(())
+}
+
+#[test]
 fn acp_plan_height_caps_wrapped_content_at_ten_rows() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let _buffer_id = install_acp_test_buffer(&mut state, 0, "", None)?;
@@ -629,7 +674,8 @@ fn acp_plan_height_caps_wrapped_content_at_ten_rows() -> Result<(), String> {
             .collect(),
     ));
 
-    buffer.sync_acp_viewport_metrics(220, 420, 8, 16, true);
+    // Tall enough that titled footer chrome still leaves a 10-row plan budget.
+    buffer.sync_acp_viewport_metrics(220, 520, 8, 16, true);
 
     let acp = buffer.acp_state.as_ref().expect("ACP state missing");
     assert_eq!(acp.plan_pane.visible_rows(), 10);
@@ -1559,6 +1605,14 @@ fn render_acp_footer_draws_client_logo_before_text() -> Result<(), String> {
         _ => None,
     });
     let text_y = text_y.ok_or_else(|| "ACP footer text must still render after logo".to_owned())?;
+    let title_drawn = scene.iter().any(|command| match command {
+        DrawCommand::Text { text, .. } => text.contains("Cursor Agent"),
+        _ => false,
+    });
+    assert!(
+        title_drawn,
+        "footer must use client label as title when session title is unset"
+    );
     let line_height = 16i32;
     let logo_center = image_rect.y + (image_rect.height as i32) / 2;
     let text_center = text_y + line_height / 2;

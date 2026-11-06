@@ -89,6 +89,53 @@ impl AcpPendingPermissionUi {
             .unwrap_or_else(|| "Tool".to_owned())
     }
 
+    pub(crate) fn location_summaries(&self) -> Vec<String> {
+        let Some(locations) = self.tool_call.fields.locations.as_ref() else {
+            return Vec::new();
+        };
+        locations
+            .iter()
+            .take(3)
+            .map(|location| {
+                let suffix = location
+                    .line
+                    .map(|line| format!(":{line}"))
+                    .unwrap_or_default();
+                format!("{}{suffix}", location.path.display())
+            })
+            .collect()
+    }
+
+    pub(crate) fn picker_detail(&self, option_kind: &str) -> String {
+        let mut parts = vec![
+            self.workspace_name.clone(),
+            option_kind.to_owned(),
+            self.title(),
+        ];
+        let locations = self.location_summaries();
+        if !locations.is_empty() {
+            parts.push(locations.join(", "));
+        }
+        parts.join(" · ")
+    }
+
+    pub(crate) fn picker_preview(&self) -> String {
+        let mut lines = vec![self.title()];
+        lines.extend(self.location_summaries());
+        if let Some(locations) = self.tool_call.fields.locations.as_ref()
+            && locations.len() > 3
+        {
+            lines.push(format!("... {} more location(s)", locations.len() - 3));
+        }
+        match self.subagent_title.as_deref() {
+            Some(subagent) if !subagent.is_empty() => {
+                lines.push(format!("[{subagent}] {}", self.workspace_name));
+            }
+            _ => lines.push(self.workspace_name.clone()),
+        }
+        lines.join("\n")
+    }
+
     pub(crate) fn notification_key(&self) -> String {
         format!("acp.permission.{}", self.request_id)
     }

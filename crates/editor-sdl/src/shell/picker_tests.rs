@@ -258,4 +258,155 @@ fn picker_preview_layout_honors_split_fraction() {
     assert!(middle.list_width < right.list_width);
     assert!(left.x < middle.x);
     assert!(middle.x < right.x);
+    assert!(!middle.stub);
+}
+
+#[test]
+fn picker_preview_layout_shows_stub_when_narrow() {
+    let layout = picker_preview_layout(Some("path\nline"), 0, 400, 0, 300, 20, 0.5)
+        .expect("narrow preview should still reserve a pane");
+    assert!(layout.stub);
+    assert_eq!(
+        layout.lines,
+        vec!["Preview unavailable (narrow window)".to_owned()]
+    );
+}
+
+#[test]
+fn picker_loading_label_animates_known_rows() {
+    let samples = [
+        "Loading code actions",
+        "Loading Definitions",
+        "Loading References",
+        "Loading Implementations",
+        "Loading branches…",
+        "Loading…",
+        "Loading...",
+    ];
+    for label in samples {
+        let first = picker_loading_label(label, 0).expect(label);
+        let second = picker_loading_label(label, 1).expect(label);
+        assert_ne!(first.spinner, second.spinner, "{label}");
+        assert_ne!(first.text, second.text, "{label}");
+        assert!(first.text.starts_with("Loading"), "{label}");
+        assert!(!first.text.contains('…'), "{label}");
+        assert_eq!(
+            first.text.chars().count(),
+            second.text.chars().count(),
+            "{label}"
+        );
+        assert!(
+            super::super::render::SPINNER_FRAMES.contains(&first.spinner),
+            "{label}"
+        );
+    }
+
+    let width = picker_loading_label("Loading code actions", 0)
+        .expect("loading label")
+        .text
+        .chars()
+        .count();
+    for frame in 0..12 {
+        let animated = picker_loading_label("Loading code actions", frame).expect("frame");
+        assert_eq!(animated.text.chars().count(), width);
+    }
+
+    assert!(picker_loading_label("Save and Close", 0).is_none());
+    assert!(picker_loading_label("LoadingScreen", 0).is_none());
+    assert!(picker_loading_label("No diagnostics available", 0).is_none());
+}
+
+#[test]
+fn picker_loading_animation_frame_tracks_pending_rows() {
+    let loading = PickerOverlay::from_entries(
+        "Code Actions",
+        vec![PickerEntry {
+            item: PickerItem::new(
+                "lsp-code-action-status",
+                "Loading code actions",
+                "Waiting for language server response.",
+                None::<String>,
+            ),
+            action: PickerAction::NoOp,
+            quickfix: None,
+        }],
+    );
+    assert!(picker_loading_animation_frame(Some(&loading)).is_some());
+
+    let idle = PickerOverlay::from_entries(
+        "Code Actions",
+        vec![PickerEntry {
+            item: PickerItem::new("save", "Save and Close", "write", None::<String>),
+            action: PickerAction::NoOp,
+            quickfix: None,
+        }],
+    );
+    assert!(picker_loading_animation_frame(Some(&idle)).is_none());
+    assert!(picker_loading_animation_frame(None).is_none());
+}
+
+#[test]
+fn picker_body_layout_extends_list_to_the_footer() {
+    let popup = PixelRect {
+        x: 10,
+        y: 20,
+        width: 800,
+        height: 700,
+    };
+    let line_height = 22;
+    let layout = picker_body_layout(popup, line_height);
+    let footer_y = popup.y + popup.height as i32 - line_height - 12;
+
+    assert_eq!(layout.footer_y, footer_y);
+    assert_eq!(layout.list_top + layout.list_height, footer_y - 12);
+    let old_height = popup.height as i32 - ((line_height * 5) + 82);
+    assert!(layout.list_height > old_height);
+}
+
+#[test]
+fn picker_preview_lines_fills_height_around_target_marker() {
+    let mut lines = vec!["C:\\repo\\file.rs".to_owned()];
+    for index in 0..40 {
+        let marker = if index == 30 { ">" } else { " " };
+        lines.push(format!("{marker} {:>4} line-{index}", index + 1));
+    }
+    let window = picker_preview_lines(&lines.join("\n"), 11);
+
+    assert_eq!(window.len(), 11);
+    assert_eq!(window[0], "C:\\repo\\file.rs");
+    assert!(window.iter().any(|line| line.contains("line-30")));
+    assert!(!window[1].contains("line-0"));
+}
+
+#[test]
+fn picker_preview_lines_keeps_file_prefix_when_unmarked() {
+    let body = (0..30)
+        .map(|index| format!("line-{index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let window = picker_preview_lines(&format!("C:\\repo\\file.rs\n{body}"), 5);
+
+    assert_eq!(
+        window,
+        vec![
+            "C:\\repo\\file.rs".to_owned(),
+            "line-0".to_owned(),
+            "line-1".to_owned(),
+            "line-2".to_owned(),
+            "line-3".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn picker_footer_hint_appends_extra_chords() {
+    assert_eq!(
+        picker_footer_hint(&[]),
+        "↑↓ navigate · Enter accept · Esc close"
+    );
+    let extras = [PickerExtraKeybind::new("Ctrl+d", "workspace.delete")];
+    assert_eq!(
+        picker_footer_hint(&extras),
+        "↑↓ navigate · Enter accept · Esc close · Ctrl+d"
+    );
 }

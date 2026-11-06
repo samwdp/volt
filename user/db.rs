@@ -97,7 +97,7 @@ fn browser_item(item: &DbBrowserItemContext) -> DbBrowserItemSpec {
         DbBrowserItemKind::Header => header_line(&item.label),
         DbBrowserItemKind::Empty => {
             if item.label.is_empty() {
-                String::new()
+                "  (empty)".to_owned()
             } else {
                 format!("  {}", item.label)
             }
@@ -359,7 +359,9 @@ pub fn dashboard_sections() -> PluginBufferSections {
             .with_browser_kind(DbBrowserKind::Schema),
         PluginBufferSection::new(OUTPUT_SECTION)
             .with_min_lines(4)
-            .with_initial_lines(vec!["(press Ctrl+c Ctrl+c to execute)".to_owned()])
+            .with_initial_lines(vec![
+                "No results yet. Press Ctrl+c Ctrl+c to execute.".to_owned(),
+            ])
             .with_update(PluginBufferSectionUpdate::Replace),
     ])
     .with_layout(PluginBufferLayout::columns(vec![
@@ -397,7 +399,15 @@ pub fn sidebar_sections() -> PluginBufferSections {
 }
 
 fn readonly_browser_buffer(kind: &'static str, include_refresh: bool) -> PluginBuffer {
-    PluginBuffer::new(kind, vec!["Loading...".to_owned()])
+    let empty = match kind {
+        CONNECTIONS_KIND => "No connections — run db.connect",
+        SCHEMA_KIND => "No tables",
+        HISTORY_KIND => "No query history",
+        SNIPPETS_KIND => "No snippets",
+        RESULTS_KIND => "No results",
+        _ => "Loading…",
+    };
+    PluginBuffer::new(kind, vec![empty.to_owned()])
         .with_key_bindings(browser_key_bindings(include_refresh))
 }
 
