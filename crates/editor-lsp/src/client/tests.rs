@@ -1546,6 +1546,118 @@ fn workspace_folders_response_returns_session_root() {
 }
 
 #[test]
+fn external_document_text_reads_existing_file_uri() {
+    let dir = std::env::temp_dir().join(format!("volt-external-doc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("Decompiled.cs");
+    std::fs::write(&path, "class C {}\n").expect("write decompiled file");
+    let uri = path_to_file_uri(&path);
+    let manager = LspClientManager::new(LanguageServerRegistry::new());
+    let text = manager
+        .external_document_text("roslyn-language-server", None, &uri)
+        .expect("read file");
+    assert_eq!(text, "class C {}\n");
+    assert_eq!(external_document_path(&uri), path);
+    let again = external_document_path("csharp:/proj/decompiled/System.String.cs");
+    assert_eq!(
+        again,
+        external_document_path("csharp:/proj/decompiled/System.String.cs")
+    );
+    assert!(again.ends_with("System.String.cs"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn parse_open_location_batch_keeps_server_and_origin() {
+    let value = json!({
+        "serverId": "roslyn-language-server",
+        "originUri": "file:///src/Program.cs",
+        "locations": [{
+            "uri": "csharp:/proj/decompiled/System.String.cs",
+            "line": 3,
+            "column": 1
+        }]
+    });
+    let (server_id, origin_uri, locations) = parse_open_location_batch(&value).expect("batch");
+    assert_eq!(server_id.as_deref(), Some("roslyn-language-server"));
+    assert_eq!(origin_uri.as_deref(), Some("file:///src/Program.cs"));
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].server_id(), "roslyn-language-server");
+    assert_eq!(
+        locations[0].uri(),
+        "csharp:/proj/decompiled/System.String.cs"
+    );
+    assert_eq!(locations[0].range().start(), TextPoint::new(3, 1));
+}
+
+#[test]
+fn text_from_document_content_reads_object_or_string() {
+    assert_eq!(
+        text_from_document_content(&json!({ "text": "class C {}" })).as_deref(),
+        Some("class C {}")
+    );
+    assert_eq!(
+        text_from_document_content(&json!("class C {}")).as_deref(),
+        Some("class C {}")
+    );
+    assert!(text_from_document_content(&json!({ "source": "nope" })).is_none());
+}
+
+#[test]
+fn external_document_did_open_skips_created_and_keeps_server_uri() {
+    let path = PathBuf::from("src").join("Generated.rs");
+    let uri = "rust-decompiled://std/Generated.rs";
+    let (manager, session) = manager_with_incremental_session(&path);
+    manager
+        .note_external_document(
+            &path,
+            uri,
+            "rust-analyzer",
+            Some(Path::new("P:/projects/demo")),
+        )
+        .expect("note external");
+    assert_eq!(
+        manager
+            .session_root_for_origin("rust-analyzer", uri)
+            .as_deref(),
+        Some(Path::new("P:/projects/demo"))
+    );
+    manager
+        .sync_buffer(&path, "fn generated() {}", 1, None)
+        .expect("sync");
+
+    let log = session.transport_log.lock().expect("transport log");
+    let methods = log
+        .snapshot()
+        .entries()
+        .iter()
+        .filter(|entry| entry.direction() == LspLogDirection::Outgoing)
+        .filter_map(|entry| serde_json::from_str::<Value>(entry.body()).ok())
+        .filter_map(|message| {
+            message
+                .get("method")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    drop(log);
+    assert!(
+        !methods
+            .iter()
+            .any(|method| method == "workspace/didChangeWatchedFiles"),
+        "decompiled didOpen must not send Created: {methods:?}"
+    );
+    let params = last_notification_params(&session, "textDocument/didOpen").expect("didOpen");
+    assert_eq!(
+        params
+            .get("textDocument")
+            .and_then(|document| document.get("uri"))
+            .and_then(Value::as_str),
+        Some(uri)
+    );
+}
+
+#[test]
 fn did_open_emits_watched_files_created_before_did_open() {
     let path = PathBuf::from("src").join("new_type.rs");
     let (manager, session) = manager_with_incremental_session(&path);
@@ -1813,6 +1925,8 @@ fn test_session_handle_in_workspace(
         #[cfg(test)]
         fail_next_send: AtomicBool::new(false),
         needs_full_document: Mutex::new(BTreeSet::new()),
+        external_paths: Mutex::new(BTreeSet::new()),
+        document_uris: Mutex::new(BTreeMap::new()),
         completion_resolve_supported: AtomicBool::new(false),
     })
 }

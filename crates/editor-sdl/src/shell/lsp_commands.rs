@@ -668,6 +668,9 @@ fn open_lsp_locations(
 }
 
 fn open_lsp_location(runtime: &mut EditorRuntime, location: &LspLocation) -> Result<(), String> {
+    if decompiled_lsp_location(runtime, location) {
+        return open_decompiled_lsp_location(runtime, location);
+    }
     if let Some(path) = location.file_path() {
         return open_workspace_file_at(runtime, path, location.range().start());
     }
@@ -676,6 +679,219 @@ fn open_lsp_location(runtime: &mut EditorRuntime, location: &LspLocation) -> Res
         location.uri(),
         location.server_id()
     ))
+}
+
+fn decompiled_lsp_location(runtime: &EditorRuntime, location: &LspLocation) -> bool {
+    let Some(path) = location.file_path() else {
+        return true;
+    };
+    if path_is_in_open_workspace(runtime, path) {
+        return false;
+    }
+    if location
+        .root()
+        .is_some_and(|root| path.starts_with(root))
+    {
+        return false;
+    }
+    let server_id = location.server_id();
+    !server_id.is_empty() && server_id != "volt"
+}
+
+fn path_is_in_open_workspace(runtime: &EditorRuntime, path: &Path) -> bool {
+    runtime
+        .model()
+        .active_window()
+        .ok()
+        .into_iter()
+        .flat_map(|window| window.workspaces())
+        .filter_map(|workspace| workspace.root())
+        .any(|root| path.starts_with(root))
+}
+
+struct PreparedDecompiledDocument {
+    server_id: String,
+    root: Option<PathBuf>,
+    uri: String,
+    path: PathBuf,
+    text: String,
+    target: TextPoint,
+    error: Option<String>,
+}
+
+static PENDING_DECOMPILED: Mutex<Vec<PreparedDecompiledDocument>> = Mutex::new(Vec::new());
+
+fn take_pending_decompiled_documents() -> Vec<PreparedDecompiledDocument> {
+    PENDING_DECOMPILED
+        .lock()
+        .map(|mut pending| pending.drain(..).collect())
+        .unwrap_or_default()
+}
+
+fn open_decompiled_lsp_location(
+    runtime: &mut EditorRuntime,
+    location: &LspLocation,
+) -> Result<(), String> {
+    let uri = location.uri().to_owned();
+    let path = editor_lsp::external_document_path(&uri);
+    if path.is_file() {
+        let bytes = fs::read(&path).map_err(|error| {
+            format!("failed to read decompiled source `{}`: {error}", path.display())
+        })?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        return open_decompiled_buffer(
+            runtime,
+            &PreparedDecompiledDocument {
+                server_id: location.server_id().to_owned(),
+                root: location.root().map(Path::to_path_buf),
+                uri,
+                path,
+                text,
+                target: location.range().start(),
+                error: None,
+            },
+        );
+    }
+    let Some(lsp) = runtime.services().get::<Arc<LspClientManager>>().cloned() else {
+        return Err(format!(
+            "unsupported LSP location URI `{}` returned by `{}`",
+            location.uri(),
+            location.server_id()
+        ));
+    };
+    let picker = lsp_diagnostics_status_picker_overlay(
+        "Decompiled source",
+        "Loading decompiled source.",
+        Some(uri.clone()),
+    );
+    shell_ui_mut(runtime)?.set_picker(picker);
+    let server_id = location.server_id().to_owned();
+    let root = location.root().map(Path::to_path_buf);
+    let target = location.range().start();
+    std::thread::spawn(move || {
+        let prepared = match lsp.external_document_text(&server_id, root.as_deref(), &uri) {
+            Ok(text) => PreparedDecompiledDocument {
+                server_id,
+                root,
+                path: editor_lsp::external_document_path(&uri),
+                uri,
+                text,
+                target,
+                error: None,
+            },
+            Err(error) => PreparedDecompiledDocument {
+                server_id,
+                root,
+                path,
+                uri,
+                text: String::new(),
+                target,
+                error: Some(error.to_string()),
+            },
+        };
+        if let Ok(mut pending) = PENDING_DECOMPILED.lock() {
+            pending.push(prepared);
+        }
+        ping_shell_wakeup();
+    });
+    Ok(())
+}
+
+fn open_prepared_decompiled_document(
+    runtime: &mut EditorRuntime,
+    prepared: PreparedDecompiledDocument,
+) -> Result<(), String> {
+    if let Some(error) = prepared.error.as_deref() {
+        let picker = lsp_diagnostics_status_picker_overlay(
+            "Decompiled source",
+            error,
+            Some(prepared.uri),
+        );
+        shell_ui_mut(runtime)?.set_picker(picker);
+        return Ok(());
+    }
+    open_decompiled_buffer(runtime, &prepared)?;
+    shell_ui_mut(runtime)?.close_picker();
+    Ok(())
+}
+
+fn open_decompiled_buffer(
+    runtime: &mut EditorRuntime,
+    prepared: &PreparedDecompiledDocument,
+) -> Result<(), String> {
+    let workspace_id = runtime
+        .model()
+        .active_workspace_id()
+        .map_err(|error| error.to_string())?;
+    let buffer_id = if let Some(existing) =
+        find_workspace_file_buffer(runtime, workspace_id, &prepared.path)?
+    {
+        runtime
+            .model_mut()
+            .focus_buffer(workspace_id, existing)
+            .map_err(|error| error.to_string())?;
+        shell_ui_mut(runtime)?.focus_buffer_in_active_pane(existing);
+        existing
+    } else {
+        let display_name = prepared
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("decompiled")
+            .to_owned();
+        let buffer_id = runtime
+            .model_mut()
+            .create_buffer(
+                workspace_id,
+                display_name,
+                BufferKind::Plugin(LSP_METADATA_BUFFER_KIND.to_owned()),
+                Some(prepared.path.clone()),
+            )
+            .map_err(|error| error.to_string())?;
+        let buffer = runtime
+            .model()
+            .workspace(workspace_id)
+            .map_err(|error| error.to_string())?
+            .buffer(buffer_id)
+            .ok_or_else(|| format!("new decompiled buffer `{buffer_id}` is missing"))?;
+        let mut text = TextBuffer::from_text(&prepared.text);
+        text.set_path(prepared.path.clone());
+        text.mark_clean();
+        let user_library = shell_user_library(runtime);
+        let mut shell_buffer = ShellBuffer::from_text_buffer(buffer, text, &*user_library);
+        if let Ok(language_id) = language_id_for_path(runtime, &prepared.path) {
+            shell_buffer.set_language_id(Some(language_id));
+        }
+        shell_buffer.set_lsp_enabled(true);
+        {
+            let ui = shell_ui_mut(runtime)?;
+            ui.insert_buffer(shell_buffer);
+            ui.focus_buffer_in_active_pane(buffer_id);
+        }
+        queue_buffer_syntax_refresh(runtime, buffer_id)?;
+        buffer_id
+    };
+    {
+        let buffer = shell_buffer_mut(runtime, buffer_id)?;
+        buffer.set_cursor(prepared.target);
+        buffer.set_lsp_enabled(true);
+        buffer.set_lsp_path(Some(prepared.path.clone()));
+        buffer.set_lsp_pin(
+            prepared.server_id.clone(),
+            prepared.root.clone(),
+            prepared.uri.clone(),
+        );
+    }
+    if let Some(lsp) = runtime.services().get::<Arc<LspClientManager>>().cloned() {
+        lsp.note_external_document(
+            &prepared.path,
+            &prepared.uri,
+            &prepared.server_id,
+            prepared.root.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn quickfix_state(runtime: &EditorRuntime) -> Result<&QuickfixState, String> {

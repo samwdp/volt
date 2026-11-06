@@ -72,6 +72,7 @@ pub(crate) const ROSLYN_LANGUAGE_SERVER_ID: &str = "roslyn-language-server";
 pub(crate) const CSHARP_WORKSPACE_SECTION: &str = "csharp";
 
 pub(crate) const CSHARP_METADATA_REQUEST_METHOD: &str = "csharp/metadata";
+pub(crate) const TEXT_DOCUMENT_CONTENT_METHOD: &str = "workspace/textDocumentContent";
 
 pub(crate) const INLINE_COMPLETION_METHOD: &str = "textDocument/inlineCompletion";
 
@@ -415,6 +416,8 @@ pub struct LspLocation {
     pub(crate) file_path: Option<PathBuf>,
     pub(crate) uri: String,
     pub(crate) range: TextRange,
+    /// Session root of the server that returned this location.
+    pub(crate) root: Option<PathBuf>,
 }
 
 impl LspLocation {
@@ -434,7 +437,20 @@ impl LspLocation {
             file_path,
             uri,
             range,
+            root: None,
         }
+    }
+
+    /// Stamps the language-server session that produced this location.
+    pub fn with_origin(mut self, server_id: impl Into<String>, root: Option<PathBuf>) -> Self {
+        self.server_id = server_id.into();
+        self.root = root;
+        self
+    }
+
+    /// Workspace root of the session that produced this location.
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
     }
 
     pub fn server_id(&self) -> &str {
@@ -1155,6 +1171,19 @@ pub(crate) struct LspClientState {
     pub(crate) settings_overrides: BTreeMap<SessionKey, Value>,
     pub(crate) initialization_options_overrides: BTreeMap<SessionKey, Value>,
     pub(crate) start_failures: BTreeMap<SessionKey, String>,
+    /// Document path to the URI and session the language server actually owns.
+    ///
+    /// Decompiled and other non-workspace documents use this so `didOpen`
+    /// keeps the server URI and does not look like a newly created project file.
+    pub(crate) external_documents: BTreeMap<PathBuf, ExternalDocument>,
+}
+
+/// A decompiled or other non-workspace document pinned to one language server session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalDocument {
+    pub(crate) uri: String,
+    pub(crate) server_id: String,
+    pub(crate) root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2207,6 +2236,8 @@ pub(crate) fn request_timeout_for_method(method: &str) -> Duration {
         COMPLETION_RESOLVE_REQUEST_TIMEOUT
     } else if method == "codeAction/resolve" {
         CODE_ACTION_RESOLVE_REQUEST_TIMEOUT
+    } else if method == TEXT_DOCUMENT_CONTENT_METHOD || method == CSHARP_METADATA_REQUEST_METHOD {
+        REFERENCES_REQUEST_TIMEOUT
     } else {
         REQUEST_TIMEOUT
     }
@@ -2577,6 +2608,106 @@ pub(crate) fn parse_csharp_metadata_response(
         metadata.insert("source".to_owned(), source);
     }
     Ok(Some(Value::Object(metadata)))
+}
+
+pub(crate) fn text_from_document_content(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return Some(text.to_owned());
+    }
+    value.as_str().map(str::to_owned)
+}
+
+/// Path used to track a decompiled or other non-workspace document.
+///
+/// A `file` URI that already exists on disk keeps that path. Any other URI
+/// gets a stable cache path so every server can share one buffer identity.
+pub fn external_document_path(uri: &str) -> PathBuf {
+    if let Some(path) = file_uri_to_path(uri)
+        && path.is_file()
+    {
+        return path;
+    }
+    std::env::temp_dir()
+        .join("volt")
+        .join("lsp-documents")
+        .join(external_document_id(uri))
+        .join(external_document_file_name(uri))
+}
+
+fn external_document_id(uri: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in uri.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn external_document_file_name(uri: &str) -> String {
+    let tail = uri.rsplit(['/', '\\']).next().unwrap_or("document");
+    let tail = tail.split(['?', '#']).next().unwrap_or(tail);
+    let name = tail
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | ' ') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let name = name.trim_matches(|ch| ch == '.' || ch == ' ' || ch == '_');
+    if name.is_empty() {
+        return "document.txt".to_owned();
+    }
+    if Path::new(name).extension().is_none() {
+        return format!("{name}.txt");
+    }
+    name.to_owned()
+}
+
+/// Parses the payload from `volt.ui.open_locations`.
+///
+/// Accepts a bare location array, or an object that also names the server and
+/// the document the jump started from.
+pub fn parse_open_location_batch(
+    value: &Value,
+) -> Option<(Option<String>, Option<String>, Vec<LspLocation>)> {
+    if let Some(entries) = value.as_array() {
+        return Some((None, None, open_location_entries(entries, "volt")));
+    }
+    let object = value.as_object()?;
+    let entries = object.get("locations")?.as_array()?;
+    let server_id = object
+        .get("serverId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|server_id| !server_id.is_empty())
+        .map(str::to_owned);
+    let origin_uri = object
+        .get("originUri")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|uri| !uri.is_empty())
+        .map(str::to_owned);
+    let server = server_id.clone().unwrap_or_else(|| "volt".to_owned());
+    Some((
+        server_id,
+        origin_uri,
+        open_location_entries(entries, &server),
+    ))
+}
+
+fn open_location_entries(entries: &[Value], server_id: &str) -> Vec<LspLocation> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let uri = entry.get("uri").and_then(Value::as_str)?;
+            let line = entry.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let column = entry.get("column").and_then(Value::as_u64).unwrap_or(0) as usize;
+            Some(LspLocation::from_uri_position(server_id, uri, line, column))
+        })
+        .collect()
 }
 
 pub(crate) fn session_lifecycle_notification(

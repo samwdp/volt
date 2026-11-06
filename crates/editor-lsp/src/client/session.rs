@@ -61,6 +61,8 @@ pub(crate) struct LspSessionHandle {
     #[cfg(test)]
     pub(crate) fail_next_send: AtomicBool,
     pub(crate) needs_full_document: Mutex<BTreeSet<PathBuf>>,
+    pub(crate) external_paths: Mutex<BTreeSet<PathBuf>>,
+    pub(crate) document_uris: Mutex<BTreeMap<PathBuf, String>>,
     pub(crate) completion_resolve_supported: AtomicBool,
 }
 
@@ -179,6 +181,8 @@ impl LspSessionHandle {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            external_paths: Mutex::new(BTreeSet::new()),
+            document_uris: Mutex::new(BTreeMap::new()),
             completion_resolve_supported: AtomicBool::new(false),
         });
         record_transport_event(
@@ -399,6 +403,50 @@ impl LspSessionHandle {
         }
     }
 
+    pub(crate) fn bind_external_document(&self, path: &Path, uri: &str) {
+        if let Ok(mut paths) = self.external_paths.lock() {
+            paths.insert(path.to_path_buf());
+        }
+        if uri != path_to_file_uri(path)
+            && let Ok(mut uris) = self.document_uris.lock()
+        {
+            uris.insert(path.to_path_buf(), uri.to_owned());
+        }
+    }
+
+    fn is_external_document(&self, path: &Path) -> bool {
+        self.external_paths
+            .lock()
+            .map(|paths| paths.contains(path))
+            .unwrap_or(false)
+    }
+
+    fn document_uri(&self, path: &Path) -> Result<Uri, LspClientError> {
+        if let Some(uri) = self
+            .document_uris
+            .lock()
+            .ok()
+            .and_then(|uris| uris.get(path).cloned())
+        {
+            return uri.parse().map_err(|error| {
+                LspClientError::Protocol(format!(
+                    "failed to parse external document URI `{uri}`: {error}"
+                ))
+            });
+        }
+        path_to_uri(path)
+    }
+
+    fn text_document_position(
+        &self,
+        path: &Path,
+        position: TextPoint,
+    ) -> Result<lsp_types::TextDocumentPositionParams, LspClientError> {
+        let mut params = text_document_position_params(path, position)?;
+        params.text_document.uri = self.document_uri(path)?;
+        Ok(params)
+    }
+
     pub(crate) fn did_open(
         &self,
         path: &Path,
@@ -408,10 +456,15 @@ impl LspSessionHandle {
         // Roslyn (and similar project-system servers) only add new files when they
         // see a watched-files Created event. Send it before didOpen so the file is
         // not stuck in the miscellaneous-files project until an LSP restart.
-        self.did_change_watched_files(&[(path, LspWatchedFileChange::Created)])?;
+        // Decompiled documents must skip that event. Created pulls them into the
+        // project instead of the metadata workspace, so later jumps inside the
+        // decompiled file never resolve.
+        if !self.is_external_document(path) {
+            self.did_change_watched_files(&[(path, LspWatchedFileChange::Created)])?;
+        }
         self.notify_typed::<DidOpenTextDocument>(DidOpenTextDocumentParams {
             text_document: TextDocumentItem::new(
-                path_to_uri(path)?,
+                self.document_uri(path)?,
                 self.session.document_language_id_for_path(path).to_owned(),
                 version,
                 text.clone(),
@@ -458,7 +511,10 @@ impl LspSessionHandle {
         };
         let notify_result =
             self.notify_typed::<DidChangeTextDocument>(DidChangeTextDocumentParams {
-                text_document: VersionedTextDocumentIdentifier::new(path_to_uri(path)?, version),
+                text_document: VersionedTextDocumentIdentifier::new(
+                    self.document_uri(path)?,
+                    version,
+                ),
                 content_changes,
             });
         match notify_result {
@@ -483,7 +539,7 @@ impl LspSessionHandle {
 
     pub(crate) fn did_save(&self, path: &Path) -> Result<(), LspClientError> {
         self.notify_typed::<DidSaveTextDocument>(DidSaveTextDocumentParams {
-            text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+            text_document: TextDocumentIdentifier::new(self.document_uri(path)?),
             text: None,
         })?;
         self.did_change_watched_files(&[(path, LspWatchedFileChange::Changed)])
@@ -499,7 +555,7 @@ impl LspSessionHandle {
         let mut events = Vec::with_capacity(changes.len());
         for (path, change) in changes {
             events.push(FileEvent {
-                uri: path_to_uri(path)?,
+                uri: self.document_uri(path)?,
                 typ: (*change).into(),
             });
         }
@@ -511,7 +567,7 @@ impl LspSessionHandle {
             return Ok(());
         }
         self.notify_typed::<DidCloseTextDocument>(DidCloseTextDocumentParams {
-            text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+            text_document: TextDocumentIdentifier::new(self.document_uri(path)?),
         })?;
         self.open_documents
             .lock()
@@ -526,7 +582,7 @@ impl LspSessionHandle {
             "textDocument/didFocus",
             json!({
                 "textDocument": {
-                    "uri": path_to_uri(path)?,
+                    "uri": self.document_uri(path)?,
                 }
             }),
         )
@@ -577,7 +633,7 @@ impl LspSessionHandle {
         position: TextPoint,
     ) -> Result<Option<LspHoverContents>, LspClientError> {
         let response = self.request_typed::<HoverRequest>(HoverParams {
-            text_document_position_params: text_document_position_params(path, position)?,
+            text_document_position_params: self.text_document_position(path, position)?,
             work_done_progress_params: self.work_done_progress_params(HoverRequest::METHOD),
         })?;
         Ok(parse_hover_response(self.server_id(), &response))
@@ -590,7 +646,7 @@ impl LspSessionHandle {
     ) -> Result<Option<LspSignatureHelpContents>, LspClientError> {
         let response = match self.request_typed::<SignatureHelpRequest>(SignatureHelpParams {
             context: None,
-            text_document_position_params: text_document_position_params(path, position)?,
+            text_document_position_params: self.text_document_position(path, position)?,
             work_done_progress_params: self.work_done_progress_params(SignatureHelpRequest::METHOD),
         }) {
             Ok(response) => response,
@@ -606,7 +662,7 @@ impl LspSessionHandle {
         position: TextPoint,
     ) -> Result<Vec<LspCompletionItem>, LspClientError> {
         let response = self.request_typed::<Completion>(CompletionParams {
-            text_document_position: text_document_position_params(path, position)?,
+            text_document_position: self.text_document_position(path, position)?,
             work_done_progress_params: self.work_done_progress_params(Completion::METHOD),
             partial_result_params: PartialResultParams::default(),
             context: None,
@@ -738,6 +794,44 @@ impl LspSessionHandle {
         Ok(())
     }
 
+    fn with_session_root(&self, mut locations: Vec<LspLocation>) -> Vec<LspLocation> {
+        let root = self.key.root.clone();
+        for location in &mut locations {
+            if location.root.is_none() {
+                location.root = root.clone();
+            }
+        }
+        locations
+    }
+
+    pub(crate) fn external_document_text(
+        &self,
+        uri: &str,
+    ) -> Result<Option<String>, LspClientError> {
+        match self.request(TEXT_DOCUMENT_CONTENT_METHOD, json!({ "uri": uri })) {
+            Ok(value) => {
+                if let Some(text) = text_from_document_content(&value) {
+                    return Ok(Some(text));
+                }
+            }
+            Err(error) if unsupported_lsp_request(&error) => {}
+            Err(error) => return Err(error),
+        }
+        if !is_csharp_metadata_uri(uri) {
+            return Ok(None);
+        }
+        let response = self.request(
+            CSHARP_METADATA_REQUEST_METHOD,
+            csharp_metadata_request_params(uri),
+        )?;
+        let parsed = parse_csharp_metadata_response(uri, &response)?;
+        Ok(parsed
+            .as_ref()
+            .and_then(|metadata| metadata.get("source"))
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
     pub(crate) fn csharp_metadata(&self, uri: &str) -> Result<Option<Value>, LspClientError> {
         if self.server_id() != CSHARP_SERVER_ID || !is_csharp_metadata_uri(uri) {
             return Ok(None);
@@ -755,11 +849,11 @@ impl LspSessionHandle {
         position: TextPoint,
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let response = self.request_typed::<GotoDefinition>(GotoDefinitionParams {
-            text_document_position_params: text_document_position_params(path, position)?,
+            text_document_position_params: self.text_document_position(path, position)?,
             work_done_progress_params: self.work_done_progress_params(GotoDefinition::METHOD),
             partial_result_params: PartialResultParams::default(),
         })?;
-        parse_definition_response(self.server_id(), &response)
+        Ok(self.with_session_root(parse_definition_response(self.server_id(), &response)?))
     }
 
     pub(crate) fn references(
@@ -768,14 +862,14 @@ impl LspSessionHandle {
         position: TextPoint,
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let response = self.request_typed::<References>(ReferenceParams {
-            text_document_position: text_document_position_params(path, position)?,
+            text_document_position: self.text_document_position(path, position)?,
             work_done_progress_params: self.work_done_progress_params(References::METHOD),
             partial_result_params: PartialResultParams::default(),
             context: ReferenceContext {
                 include_declaration: true,
             },
         })?;
-        parse_reference_response(self.server_id(), &response)
+        Ok(self.with_session_root(parse_reference_response(self.server_id(), &response)?))
     }
 
     pub(crate) fn diagnostic_identifiers(&self) -> Vec<Option<String>> {
@@ -810,7 +904,7 @@ impl LspSessionHandle {
         for identifier in identifiers {
             let response =
                 self.request_typed::<DocumentDiagnosticRequest>(DocumentDiagnosticParams {
-                    text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+                    text_document: TextDocumentIdentifier::new(self.document_uri(path)?),
                     identifier,
                     previous_result_id: None,
                     work_done_progress_params: self
@@ -831,11 +925,11 @@ impl LspSessionHandle {
         position: TextPoint,
     ) -> Result<Vec<LspLocation>, LspClientError> {
         let response = self.request_typed::<GotoImplementation>(GotoDefinitionParams {
-            text_document_position_params: text_document_position_params(path, position)?,
+            text_document_position_params: self.text_document_position(path, position)?,
             work_done_progress_params: self.work_done_progress_params(GotoImplementation::METHOD),
             partial_result_params: PartialResultParams::default(),
         })?;
-        parse_definition_response(self.server_id(), &response)
+        Ok(self.with_session_root(parse_definition_response(self.server_id(), &response)?))
     }
 
     pub(crate) fn code_actions(
@@ -905,7 +999,7 @@ impl LspSessionHandle {
         options: LspFormattingOptions,
     ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
         let response = match self.request_typed::<Formatting>(DocumentFormattingParams {
-            text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+            text_document: TextDocumentIdentifier::new(self.document_uri(path)?),
             options: lsp_formatting_options(options),
             work_done_progress_params: self.work_done_progress_params(Formatting::METHOD),
         }) {
@@ -923,7 +1017,7 @@ impl LspSessionHandle {
         options: LspFormattingOptions,
     ) -> Result<Option<Vec<LspTextEdit>>, LspClientError> {
         let response = match self.request_typed::<RangeFormatting>(DocumentRangeFormattingParams {
-            text_document: TextDocumentIdentifier::new(path_to_uri(path)?),
+            text_document: TextDocumentIdentifier::new(self.document_uri(path)?),
             range: lsp_range_from_text_range(range),
             options: lsp_formatting_options(options),
             work_done_progress_params: self.work_done_progress_params(RangeFormatting::METHOD),

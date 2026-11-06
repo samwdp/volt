@@ -1109,6 +1109,28 @@ impl ShellBuffer {
         self.lsp_path = path;
     }
 
+    fn lsp_pinned_server(&self) -> Option<&str> {
+        self.lsp_pinned.as_ref().map(|pinned| pinned.server_id.as_str())
+    }
+
+    fn lsp_session_root(&self) -> Option<&Path> {
+        self.lsp_pinned
+            .as_ref()
+            .and_then(|pinned| pinned.root.as_deref())
+    }
+
+    fn lsp_document_uri(&self) -> Option<&str> {
+        self.lsp_pinned.as_ref().map(|pinned| pinned.uri.as_str())
+    }
+
+    fn set_lsp_pin(&mut self, server_id: String, root: Option<PathBuf>, uri: String) {
+        self.lsp_pinned = Some(LspPinnedDocument {
+            server_id,
+            root,
+            uri,
+        });
+    }
+
     fn lsp_diagnostics_revision(&self) -> u64 {
         self.lsp_diagnostics_revision
     }

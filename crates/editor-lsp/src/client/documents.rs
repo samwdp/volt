@@ -129,11 +129,20 @@ impl LspClientManager {
                 && sessions.iter().all(|session| {
                     session.has_open_document(path) && !session.path_needs_full_document(path)
                 });
+            let external_uri = state
+                .external_documents
+                .get(path)
+                .map(|document| document.uri.clone());
             let tracked = state
                 .tracked_buffers
                 .entry(path.to_path_buf())
                 .or_insert_with(TrackedBufferState::default);
             tracked.sessions = session_keys;
+            if let Some(uri) = external_uri.as_deref() {
+                for session in &sessions {
+                    session.bind_external_document(path, uri);
+                }
+            }
             if already_synced {
                 return Ok(labels);
             }

@@ -64,9 +64,10 @@ fn prepare_volt_host(runtime: &EditorRuntime) {
         return;
     };
     let path = buffer.lsp_path().map(Path::to_path_buf);
-    let uri = path
-        .as_deref()
-        .map(LspClientManager::document_uri_for_path);
+    let uri = buffer
+        .lsp_document_uri()
+        .map(str::to_owned)
+        .or_else(|| path.as_deref().map(LspClientManager::document_uri_for_path));
     let root = lsp_root_for_buffer(runtime, buffer).ok().flatten();
     let workspace_root = runtime
         .model()
@@ -74,10 +75,15 @@ fn prepare_volt_host(runtime: &EditorRuntime) {
         .ok()
         .and_then(|workspace_id| runtime.model().workspace(workspace_id).ok())
         .and_then(|workspace| workspace.root().map(Path::to_path_buf));
-    let client_ids = runtime
-        .services()
-        .get::<Arc<LspClientManager>>()
-        .and_then(|lsp| path.as_deref().map(|path| lsp.session_labels_for_path(path)))
+    let client_ids = buffer
+        .lsp_pinned_server()
+        .map(|server_id| vec![server_id.to_owned()])
+        .or_else(|| {
+            runtime
+                .services()
+                .get::<Arc<LspClientManager>>()
+                .and_then(|lsp| path.as_deref().map(|path| lsp.session_labels_for_path(path)))
+        })
         .unwrap_or_default();
     let section_action = buffer
         .section_line_meta(buffer.cursor_point().line)
@@ -114,14 +120,18 @@ fn prepare_volt_host(runtime: &EditorRuntime) {
 }
 
 fn apply_volt_host_actions(runtime: &mut EditorRuntime) -> Result<bool, String> {
+    let mut handled = false;
+    for prepared in take_pending_decompiled_documents() {
+        open_prepared_decompiled_document(runtime, prepared)?;
+        handled = true;
+    }
     let (pending_locations, pending_cursor) = {
         let mut slot = volt_host_lock();
         let Some(state) = slot.as_mut() else {
-            return Ok(false);
+            return Ok(handled);
         };
         (state.pending_locations.take(), state.pending_cursor.take())
     };
-    let mut handled = false;
     if let Some((title, locations)) = pending_locations
         && !locations.is_empty()
     {
@@ -295,19 +305,24 @@ extern "C" fn volt_host_ui_open_locations(
     let Ok(value) = serde_json::from_str::<Value>(payload.as_str()) else {
         return;
     };
-    let Some(entries) = value.as_array() else {
+    let Some((server_id, origin_uri, mut locations)) =
+        editor_lsp::parse_open_location_batch(&value)
+    else {
         return;
     };
-    let mut locations = Vec::new();
-    for entry in entries {
-        let Some(uri) = entry.get("uri").and_then(Value::as_str) else {
-            continue;
-        };
-        let line = entry.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
-        let column = entry.get("column").and_then(Value::as_u64).unwrap_or(0) as usize;
-        locations.push(editor_lsp::LspLocation::from_uri_position(
-            "volt", uri, line, column,
-        ));
+    if let Some(server_id) = server_id {
+        let root = origin_uri.as_deref().and_then(|origin_uri| {
+            volt_host_lock().as_ref().and_then(|state| {
+                state
+                    .lsp
+                    .as_ref()
+                    .and_then(|lsp| lsp.session_root_for_origin(&server_id, origin_uri))
+            })
+        });
+        locations = locations
+            .into_iter()
+            .map(|location| location.with_origin(server_id.clone(), root.clone()))
+            .collect();
     }
     if let Some(state) = volt_host_lock().as_mut() {
         state.pending_locations = Some((title.into_string(), locations));

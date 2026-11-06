@@ -70,6 +70,8 @@ fn goto_locations(title: &'static str, method: &'static str) -> bool {
     let Some(client) = get_clients(buf).into_iter().next() else {
         return false;
     };
+    let server_id = client.0.clone();
+    let origin_uri = uri.clone();
     let mut params = json!({
         "textDocument": { "uri": uri },
         "position": { "line": cursor.0, "character": cursor.1 }
@@ -81,7 +83,12 @@ fn goto_locations(title: &'static str, method: &'static str) -> bool {
         let Ok(value) = result else {
             return;
         };
-        ui::open_locations(title, &parse_locations(&value));
+        ui::open_locations_from(
+            title,
+            Some(&server_id),
+            Some(&origin_uri),
+            &parse_locations(&value),
+        );
     });
     true
 }

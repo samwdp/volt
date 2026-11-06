@@ -1,3 +1,10 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LspPinnedDocument {
+    server_id: String,
+    root: Option<PathBuf>,
+    uri: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ShellBuffer {
     id: BufferId,
@@ -27,6 +34,7 @@ pub(crate) struct ShellBuffer {
     terminal_render: Option<TerminalRenderSnapshot>,
     pub(crate) text: TextBuffer,
     lsp_path: Option<PathBuf>,
+    lsp_pinned: Option<LspPinnedDocument>,
     backing_file_fingerprint: Option<BackingFileFingerprint>,
     backing_file_reload_pending: bool,
     backing_file_check_in_flight: bool,

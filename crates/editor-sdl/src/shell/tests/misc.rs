@@ -399,6 +399,47 @@ fn render_primary_text_surface_preserves_straight_alpha_edge_colors() -> Result<
 }
 
 #[test]
+fn open_lsp_location_opens_decompiled_file_on_the_origin_server() -> Result<(), String> {
+    let mut state = ShellState::new().map_err(|error| error.to_string())?;
+    let dir = unique_temp_dir("decompiled-source");
+    let path = dir.join("System.String.cs");
+    fs::write(
+        &path,
+        "namespace System;\npublic class String {\n    public int Length => 0;\n}\n",
+    )
+    .map_err(|error| error.to_string())?;
+    let uri = editor_lsp::LspClientManager::document_uri_for_path(&path);
+    let location =
+        editor_lsp::LspLocation::from_uri_position("roslyn-language-server", &uri, 2, 11)
+            .with_origin(
+                "roslyn-language-server",
+                Some(PathBuf::from("P:/projects/demo")),
+            );
+
+    open_lsp_location(&mut state.runtime, &location)?;
+
+    let buffer_id = active_shell_buffer_id(&state.runtime)?;
+    let buffer = shell_buffer(&state.runtime, buffer_id)?;
+    assert_eq!(
+        buffer.kind,
+        BufferKind::Plugin(LSP_METADATA_BUFFER_KIND.to_owned())
+    );
+    assert!(buffer.is_read_only());
+    assert_eq!(buffer.lsp_path(), Some(path.as_path()));
+    assert_eq!(buffer.lsp_pinned_server(), Some("roslyn-language-server"));
+    assert_eq!(
+        buffer.lsp_session_root(),
+        Some(PathBuf::from("P:/projects/demo").as_path())
+    );
+    assert_eq!(buffer.lsp_document_uri(), Some(uri.as_str()));
+    assert!(buffer.text.text().contains("class String"));
+    assert_eq!(buffer.cursor_point(), TextPoint::new(2, 11));
+
+    let _ = fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
 fn open_workspace_file_routes_png_to_image_buffer() -> Result<(), String> {
     let mut state = ShellState::new().map_err(|error| error.to_string())?;
     let root = unique_temp_dir("open-image-png");

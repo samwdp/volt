@@ -91,6 +91,8 @@ impl LspClientManager {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            external_paths: Mutex::new(BTreeSet::new()),
+            document_uris: Mutex::new(BTreeMap::new()),
             completion_resolve_supported: AtomicBool::new(false),
         });
         let key = handle.key.clone();
@@ -232,6 +234,84 @@ impl LspClientManager {
             .prepare_session_for_path(server_id, path, workspace_root)
             .map(|session| session.root().cloned())
             .map_err(Into::into)
+    }
+
+    /// Remembers that `path` is a decompiled or other non-workspace document.
+    pub fn note_external_document(
+        &self,
+        path: &Path,
+        uri: &str,
+        server_id: &str,
+        root: Option<&Path>,
+    ) -> Result<(), LspClientError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| LspClientError::Protocol("LSP state mutex poisoned".to_owned()))?;
+        state.external_documents.insert(
+            path.to_path_buf(),
+            ExternalDocument {
+                uri: uri.to_owned(),
+                server_id: server_id.to_owned(),
+                root: root.map(Path::to_path_buf),
+            },
+        );
+        Ok(())
+    }
+
+    /// Loads text for a decompiled or virtual document.
+    ///
+    /// File URIs that exist on disk are read locally. Other URIs ask the
+    /// language server, first with `workspace/textDocumentContent`, then with
+    /// `csharp/metadata` when the URI uses that scheme.
+    pub fn external_document_text(
+        &self,
+        server_id: &str,
+        root: Option<&Path>,
+        uri: &str,
+    ) -> Result<String, LspClientError> {
+        if let Some(path) = file_uri_to_path(uri)
+            && path.is_file()
+        {
+            let bytes = std::fs::read(&path)?;
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        let Some(session) = self.live_session_for_server(server_id, root)? else {
+            return Err(LspClientError::Protocol(format!(
+                "language server `{server_id}` is not running"
+            )));
+        };
+        session.external_document_text(uri)?.ok_or_else(|| {
+            LspClientError::Protocol(format!(
+                "language server `{server_id}` returned no text for `{uri}`"
+            ))
+        })
+    }
+
+    /// Root of the session that owns `origin_uri`.
+    ///
+    /// File URIs prefer the live tracked session. Virtual URIs, and files not
+    /// yet synced, use the root recorded when the document was opened.
+    pub fn session_root_for_origin(&self, server_id: &str, origin_uri: &str) -> Option<PathBuf> {
+        if let Some(path) = file_uri_to_path(origin_uri)
+            && let Some(root) = self
+                .tracked_sessions_for_path(&path)
+                .ok()
+                .and_then(|sessions| {
+                    sessions
+                        .into_iter()
+                        .find(|session| session.server_id() == server_id)
+                        .and_then(|session| session.key.root.clone())
+                })
+        {
+            return Some(root);
+        }
+        let state = self.state.lock().ok()?;
+        state
+            .external_documents
+            .values()
+            .find(|document| document.server_id == server_id && document.uri == origin_uri)
+            .and_then(|document| document.root.clone())
     }
 
     pub fn csharp_metadata(
@@ -786,6 +866,8 @@ impl LspClientManager {
             #[cfg(test)]
             fail_next_send: AtomicBool::new(false),
             needs_full_document: Mutex::new(BTreeSet::new()),
+            external_paths: Mutex::new(BTreeSet::new()),
+            document_uris: Mutex::new(BTreeMap::new()),
             completion_resolve_supported: AtomicBool::new(false),
         }))
     }

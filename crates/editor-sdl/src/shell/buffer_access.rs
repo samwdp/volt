@@ -229,6 +229,9 @@ fn lsp_root_for_buffer(
     runtime: &EditorRuntime,
     buffer: &ShellBuffer,
 ) -> Result<Option<PathBuf>, String> {
+    if let Some(root) = buffer.lsp_session_root() {
+        return Ok(Some(root.to_path_buf()));
+    }
     if buffer_is_db_query(&buffer.kind) {
         return Ok(buffer
             .lsp_path()
